@@ -51,7 +51,7 @@ def test_setup_checks_the_length_and_syncs(screen, tmp_path):
     v = app.mode
     assert isinstance(v, main.Visualizer) and v.audio is not None
     assert v.paused and v.speed == 0.5                     # paused to line it up, speed fixed
-    assert v.wave_rect.h > 0 and v.fall_rect.top == v.wave_rect.bottom
+    assert v.wave_rect.h > 0 and v.fall_rect.top == (v.staff_rect.bottom if v.show_staff else v.wave_rect.bottom)
     app.handle_event(key(pygame.K_UP))
     assert v.speed == 0.5
     v.render()
