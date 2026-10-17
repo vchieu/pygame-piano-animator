@@ -241,3 +241,75 @@ def test_visualizer_layout_and_hotkey(screen):
     controls = dict(vis._key_controls())
     assert "S" in controls
     assert "sheet music" in controls["S"].lower()
+
+
+def test_note_clashing_offset():
+    # Two notes at same time t=0.0 in same clef with adjacent pitches (C4=60, D4=62 -> steps 28 and 29)
+    n1 = Note(pitch=60, start=0.0, end=1.0, velocity=80, track=0, hand=RIGHT)
+    n2 = Note(pitch=62, start=0.01, end=1.0, velocity=80, track=0, hand=RIGHT)  # |start diff| < 0.03
+    s = 7.0
+    usable_w = 1000.0
+    margin_left = 85.0
+
+    info = staff.compute_notes_info([n1, n2], 0.0, 5.0, usable_w, margin_left, s)
+    x1 = info[id(n1)]["x"]
+    x2 = info[id(n2)]["x"]
+    nw = round(s * 0.75)
+    # n2 should be offset to the right relative to n1
+    assert x2 >= x1 + 1.8 * nw
+
+
+def test_octave_transposition_8va_8vb_15ma_15mb():
+    n_high_8va = Note(pitch=81, start=0.0, end=1.0, velocity=80, track=0, hand=RIGHT)   # A5 (pitch 81)
+    n_high_15ma = Note(pitch=93, start=0.0, end=1.0, velocity=80, track=0, hand=RIGHT)  # A6 (pitch 93)
+    n_low_8vb = Note(pitch=43, start=0.0, end=1.0, velocity=80, track=0, hand=LEFT)    # G2 (pitch 43)
+    n_low_15mb = Note(pitch=31, start=0.0, end=1.0, velocity=80, track=0, hand=LEFT)   # G1 (pitch 31)
+    n_normal = Note(pitch=60, start=0.0, end=1.0, velocity=80, track=0, hand=RIGHT)   # C4
+
+    step_draw, shift, label = staff.get_octave_transposition(n_high_8va, CLEF_TREBLE)
+    assert shift == -1 and label == "8va" and step_draw == staff.diatonic_step(81)[0] - 7
+
+    step_draw, shift, label = staff.get_octave_transposition(n_high_15ma, CLEF_TREBLE)
+    assert shift == -2 and label == "15ma" and step_draw == staff.diatonic_step(93)[0] - 14
+
+    step_draw, shift, label = staff.get_octave_transposition(n_low_8vb, CLEF_BASS)
+    assert shift == 1 and label == "8vb" and step_draw == staff.diatonic_step(43)[0] + 7
+
+    step_draw, shift, label = staff.get_octave_transposition(n_low_15mb, CLEF_BASS)
+    assert shift == 2 and label == "15mb" and step_draw == staff.diatonic_step(31)[0] + 14
+
+    step_draw, shift, label = staff.get_octave_transposition(n_normal, CLEF_TREBLE)
+    assert shift == 0 and label == "" and step_draw == staff.diatonic_step(60)[0]
+
+
+def test_staff_height_dragging_and_clamping(screen):
+    app = main.App(screen, sound=False)
+    app.play(midi_path("demo_song.mid"))
+    vis = app.mode
+
+    # Default initial staff_height
+    assert 90 <= vis.staff_height <= 280
+
+    # Test MOUSEBUTTONDOWN at bottom edge of staff_rect
+    bottom_y = vis.staff_rect.bottom
+    app.handle_event(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=(200, bottom_y)))
+    assert vis.dragging_staff_height is True
+
+    # Test MOUSEMOTION to drag height larger
+    app.handle_event(pygame.event.Event(pygame.MOUSEMOTION, pos=(200, vis.staff_rect.top + 200)))
+    assert vis.staff_height == 200.0
+    assert vis.staff_rect.h == 200
+
+    # Test clamping when dragging too large
+    app.handle_event(pygame.event.Event(pygame.MOUSEMOTION, pos=(200, vis.staff_rect.top + 500)))
+    assert vis.staff_height == 280.0
+    assert vis.staff_rect.h == 280
+
+    # Test clamping when dragging too small
+    app.handle_event(pygame.event.Event(pygame.MOUSEMOTION, pos=(200, vis.staff_rect.top + 30)))
+    assert vis.staff_height == 90.0
+    assert vis.staff_rect.h == 90
+
+    # MOUSEBUTTONUP resets dragging state
+    app.handle_event(pygame.event.Event(pygame.MOUSEBUTTONUP, button=1, pos=(200, 100)))
+    assert vis.dragging_staff_height is False

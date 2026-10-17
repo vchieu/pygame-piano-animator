@@ -296,36 +296,205 @@ def draw_sharp(surf: pygame.Surface, x: float, y: float, s: float, color: Tuple[
 
 
 def draw_flags(surf: pygame.Surface, tip_x: float, tip_y: float, s: float, stem_up: bool, color: Tuple[int, int, int], count: int = 1):
-    """Draw 1 or 2 flags on the tip of a stem swooping to the right."""
-    flag_spacing = max(3.0, s * 0.45)
+    """Draw 1 or 2 flags on the tip of a stem swooping to the right using elegant curved lines."""
+    flag_spacing = max(3.5, s * 0.48)
+    line_w = max(1, round(s * 0.18))
     for f in range(count):
         dy = (f * flag_spacing) if stem_up else (-f * flag_spacing)
         y0 = tip_y + dy
         if stem_up:
-            pts = [
-                (tip_x, y0),
-                (tip_x + s * 0.6, y0 + s * 0.4),
-                (tip_x + s * 0.85, y0 + s * 1.0),
-                (tip_x + s * 0.6, y0 + s * 1.6),
-                (tip_x + s * 0.35, y0 + s * 1.3),
-                (tip_x, y0 + s * 0.65),
-            ]
+            p0 = (tip_x, y0)
+            p1 = (tip_x + s * 0.85, y0 + s * 0.5)
+            p2 = (tip_x + s * 0.65, y0 + s * 1.8)
         else:
-            pts = [
-                (tip_x, y0),
-                (tip_x + s * 0.6, y0 - s * 0.4),
-                (tip_x + s * 0.85, y0 - s * 1.0),
-                (tip_x + s * 0.6, y0 - s * 1.6),
-                (tip_x + s * 0.35, y0 - s * 1.3),
-                (tip_x, y0 - s * 0.65),
-            ]
-        int_pts = [(round(px), round(py)) for px, py in pts]
-        pygame.draw.polygon(surf, color, int_pts)
+            p0 = (tip_x, y0)
+            p1 = (tip_x + s * 0.85, y0 - s * 0.5)
+            p2 = (tip_x + s * 0.65, y0 - s * 1.8)
+
+        pts = []
+        for i in range(16):
+            t = i / 15.0
+            bx = (1 - t) ** 2 * p0[0] + 2 * (1 - t) * t * p1[0] + t ** 2 * p2[0]
+            by = (1 - t) ** 2 * p0[1] + 2 * (1 - t) * t * p1[1] + t ** 2 * p2[1]
+            pts.append((round(bx), round(by)))
+
+        if len(pts) >= 2:
+            pygame.draw.lines(surf, color, False, pts, line_w)
 
 
-# --------------------------------------------------------------------------- #
-# Main StaffView
-# --------------------------------------------------------------------------- #
+def get_octave_transposition(n: Note, clef: str) -> Tuple[int, int, str]:
+    """
+    Returns (step_draw, octave_shift, label_text) for a note.
+    octave_shift is in octaves (-2, -1, 0, +1, +2).
+    """
+    step, _ = diatonic_step(n.pitch)
+    if clef == CLEF_TREBLE:
+        if n.pitch >= 93:
+            return step - 14, -2, "15ma"
+        elif n.pitch >= 81:
+            return step - 7, -1, "8va"
+    elif clef == CLEF_BASS:
+        if n.pitch <= 31:
+            return step + 14, 2, "15mb"
+        elif n.pitch <= 43:
+            return step + 7, 1, "8vb"
+    return step, 0, ""
+
+
+def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: float, usable_w: float, margin_left: float, s: float) -> dict:
+    """
+    Computes rendering info for notes in a system:
+    x coordinate (with clashing/overlap offset), clef, step_draw, octave_shift, label_text.
+    Returns dict mapping id(n) -> dict(...)
+    """
+    info = {}
+    if not sys_notes:
+        return info
+
+    nw = round(s * 0.75)
+    sorted_notes = sorted(sys_notes, key=lambda n: (n.start, n.pitch))
+
+    # Pre-calculate base attributes
+    for n in sorted_notes:
+        frac_n = (n.start - sys_start) / sys_duration
+        base_x = margin_left + frac_n * usable_w
+        clef = clef_for_note(n)
+        step_draw, oct_shift, label = get_octave_transposition(n, clef)
+        info[id(n)] = {
+            "n": n,
+            "base_x": base_x,
+            "x": base_x,
+            "clef": clef,
+            "step_draw": step_draw,
+            "octave_shift": oct_shift,
+            "label": label,
+        }
+
+    # Group notes into time clusters (|n1.start - n2.start| < 0.03)
+    clusters = []
+    curr_cluster = []
+    for n in sorted_notes:
+        if not curr_cluster:
+            curr_cluster.append(n)
+        else:
+            if abs(n.start - curr_cluster[0].start) < 0.03:
+                curr_cluster.append(n)
+            else:
+                clusters.append(curr_cluster)
+                curr_cluster = [n]
+    if curr_cluster:
+        clusters.append(curr_cluster)
+
+    # Process each cluster for x-offsets when notes clash in same clef
+    for cluster in clusters:
+        by_clef = {CLEF_TREBLE: [], CLEF_BASS: []}
+        for n in cluster:
+            c = info[id(n)]["clef"]
+            by_clef[c].append(n)
+
+        for c, c_notes in by_clef.items():
+            if len(c_notes) <= 1:
+                continue
+            # Sort notes in clef by step_draw
+            c_notes_sorted = sorted(c_notes, key=lambda n: info[id(n)]["step_draw"])
+            for i in range(1, len(c_notes_sorted)):
+                prev_n = c_notes_sorted[i - 1]
+                curr_n = c_notes_sorted[i]
+                p_info = info[id(prev_n)]
+                c_info = info[id(curr_n)]
+
+                # Check if same step or adjacent step (second interval |step1 - step2| <= 1)
+                step_diff = abs(c_info["step_draw"] - p_info["step_draw"])
+                if step_diff <= 1 or abs(c_info["x"] - p_info["x"]) < (2 * nw + 2):
+                    min_x = p_info["x"] + 1.8 * nw
+                    if c_info["x"] < min_x:
+                        c_info["x"] = min_x
+
+    return info
+
+
+def draw_dashed_line(surf: pygame.Surface, color: Tuple[int, int, int], start_pos: Tuple[float, float], end_pos: Tuple[float, float], width: int = 1, dash_len: int = 4, space_len: int = 3):
+    x1, y1 = start_pos
+    x2, y2 = end_pos
+    dist = math.hypot(x2 - x1, y2 - y1)
+    if dist < 1e-3:
+        return
+    dx = (x2 - x1) / dist
+    dy = (y2 - y1) / dist
+    curr = 0.0
+    while curr < dist:
+        next_c = min(curr + dash_len, dist)
+        p1 = (round(x1 + dx * curr), round(y1 + dy * curr))
+        p2 = (round(x1 + dx * next_c), round(y1 + dy * next_c))
+        pygame.draw.line(surf, color, p1, p2, width)
+        curr += dash_len + space_len
+
+
+def draw_octave_brackets(surf: pygame.Surface, notes_info: dict, sys_notes: List[Note], treble_mid_y: float, bass_mid_y: float, s: float):
+    if not sys_notes:
+        return
+
+    # Find contiguous groups of notes that have octave_shift != 0
+    sorted_notes = sorted([n for n in sys_notes if notes_info[id(n)]["octave_shift"] != 0], key=lambda n: n.start)
+    if not sorted_notes:
+        return
+
+    nw = round(s * 0.75)
+    line_w = max(1, int(s * 0.15))
+    font = ui_font(max(9, int(s * 1.35)), bold=True)
+    color = (40, 40, 50)
+
+    # Group notes with same (clef, octave_shift, label)
+    groups = []
+    curr_group = []
+    for n in sorted_notes:
+        ni = notes_info[id(n)]
+        key = (ni["clef"], ni["octave_shift"], ni["label"])
+        if not curr_group:
+            curr_group.append((n, key))
+        else:
+            prev_ni = notes_info[id(curr_group[-1][0])]
+            prev_key = (prev_ni["clef"], prev_ni["octave_shift"], prev_ni["label"])
+            # If same key and start times close (< 4.0s)
+            if key == prev_key and (n.start - curr_group[-1][0].start) < 4.0:
+                curr_group.append((n, key))
+            else:
+                groups.append(curr_group)
+                curr_group = [(n, key)]
+    if curr_group:
+        groups.append(curr_group)
+
+    for grp in groups:
+        clef, shift, label = grp[0][1]
+        grp_notes = [item[0] for item in grp]
+        xs = [notes_info[id(n)]["x"] for n in grp_notes]
+        x_min = min(xs) - nw - 4
+        x_max = max(xs) + nw + 12
+
+        lbl_surf = font.render(label, True, color)
+        lbl_w = lbl_surf.get_width()
+        lbl_h = lbl_surf.get_height()
+
+        if clef == CLEF_TREBLE:
+            # Above treble staff
+            bracket_y = treble_mid_y - 2.8 * s
+            surf.blit(lbl_surf, (round(x_min), round(bracket_y - lbl_h * 0.5)))
+            line_x_start = x_min + lbl_w + 3
+            if x_max > line_x_start:
+                draw_dashed_line(surf, color, (line_x_start, bracket_y), (x_max, bracket_y), width=line_w)
+                # Downward hook
+                hook_y = bracket_y + s * 0.7
+                pygame.draw.line(surf, color, (round(x_max), round(bracket_y)), (round(x_max), round(hook_y)), line_w)
+        else:
+            # Below bass staff
+            bracket_y = bass_mid_y + 2.8 * s
+            surf.blit(lbl_surf, (round(x_min), round(bracket_y - lbl_h * 0.5)))
+            line_x_start = x_min + lbl_w + 3
+            if x_max > line_x_start:
+                draw_dashed_line(surf, color, (line_x_start, bracket_y), (x_max, bracket_y), width=line_w)
+                # Upward hook
+                hook_y = bracket_y - s * 0.7
+                pygame.draw.line(surf, color, (round(x_max), round(bracket_y)), (round(x_max), round(hook_y)), line_w)
 
 class StaffView:
     """
@@ -459,13 +628,17 @@ class StaffView:
                     nh = round(s * 0.52)
                     stem_len = round(3.2 * s)
 
+                    notes_info = compute_notes_info(sys.notes, sys.start_t, sys.duration, usable_w, MARGIN_LEFT, s)
+                    draw_octave_brackets(staff_surf, notes_info, sys.notes, treble_mid_y, bass_mid_y, s)
+
                     # Sort notes so lower notes draw first
                     notes_sorted = sorted(sys.notes, key=lambda n: (n.start, n.pitch))
                     for n in notes_sorted:
-                        frac_n = (n.start - sys.start_t) / sys.duration
-                        nx = local_rect.x + MARGIN_LEFT + frac_n * usable_w
-                        clef = clef_for_note(n)
-                        step, is_sharp = diatonic_step(n.pitch)
+                        n_info = notes_info[id(n)]
+                        nx = n_info["x"]
+                        clef = n_info["clef"]
+                        step = n_info["step_draw"]
+                        _, is_sharp = diatonic_step(n.pitch)
                         ny = note_y(step, clef, treble_mid_y, bass_mid_y, s)
 
                         sounding = (id(n) in active_ids) or (n.start <= t < n.end)

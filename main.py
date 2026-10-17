@@ -152,6 +152,9 @@ class Visualizer(Transport):
         self.dialog = None               # a message box (the export done, or why it failed)
         self.show_staff = bool(pianists.app_setting("show_staff", True))
         self.staff_opacity = float(pianists.app_setting("staff_opacity", 1.0))
+        self.staff_height = float(pianists.app_setting("staff_height", 140.0))
+        self.staff_height = min(280.0, max(90.0, self.staff_height))
+        self.dragging_staff_height = False
         self.staff_view = StaffView(song)
         self.staff_rect = pygame.Rect(0, 0, 0, 0)
         self.layout(screen.get_size())
@@ -185,7 +188,7 @@ class Visualizer(Transport):
         wave_h = WAVE_H if self.audio and video is None else 0
         self.wave_rect = pygame.Rect(0, bar_h, w, wave_h)
         top = bar_h + wave_h
-        staff_h = (min(160, max(120, kb_rect.h)) if getattr(self, "show_staff", True) and
+        staff_h = (min(280, max(90, int(getattr(self, "staff_height", 140.0)))) if getattr(self, "show_staff", True) and
                    (video is None or video.get("staff")) else 0)
         self.staff_rect = pygame.Rect(0, top, w, staff_h)
         top += staff_h
@@ -280,6 +283,9 @@ class Visualizer(Transport):
                 if path:
                     return ("open", path)
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if self.staff_rect.h > 0 and abs(event.pos[1] - self.staff_rect.bottom) <= 6:
+                self.dragging_staff_height = True
+                return True
             if self.keys_button.collidepoint(event.pos):
                 self.show_keys = not self.show_keys
                 pianists.set_app_setting("player_keys", self.show_keys)
@@ -293,11 +299,33 @@ class Visualizer(Transport):
                 self._seek_to_x(event.pos[0])
             elif self.audio and self.wave_rect.collidepoint(event.pos):
                 self.dragging_wave = event.pos[0]
-        elif event.type == pygame.MOUSEMOTION and self.dragging_bar:
-            self._seek_to_x(event.pos[0])
-        elif event.type == pygame.MOUSEMOTION and self.dragging_wave is not None:
-            self._drag_wave(event.pos[0])
+        elif event.type == pygame.MOUSEMOTION:
+            if getattr(self, "dragging_staff_height", False):
+                new_h = event.pos[1] - self.staff_rect.top
+                new_h = min(280.0, max(90.0, float(new_h)))
+                self.staff_height = new_h
+                pianists.set_app_setting("staff_height", new_h)
+                self.layout(self.screen.get_size())
+                return True
+            elif self.dragging_bar:
+                self._seek_to_x(event.pos[0])
+            elif self.dragging_wave is not None:
+                self._drag_wave(event.pos[0])
+            elif self.staff_rect.h > 0 and abs(event.pos[1] - self.staff_rect.bottom) <= 6:
+                try:
+                    pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_SIZENS)
+                except Exception:
+                    pass
+            else:
+                if not self.dragging_bar and self.dragging_wave is None:
+                    try:
+                        pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_ARROW)
+                    except Exception:
+                        pass
         elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            if getattr(self, "dragging_staff_height", False):
+                self.dragging_staff_height = False
+                return True
             if self.dragging_bar and self.audio and not self.paused:
                 self.dragging_bar = False
                 self._start_audio()
@@ -679,6 +707,12 @@ class Visualizer(Transport):
                            badge=video is None or bool(video.get("badge")))
         if self.staff_rect.h > 0 and hasattr(self, "staff_view"):
             self.staff_view.draw(s, self.staff_rect, self.t, active, opacity=self.staff_opacity)
+            handle_y = self.staff_rect.bottom - 1
+            pygame.draw.line(s, (140, 140, 160), (0, handle_y), (s.get_width(), handle_y), 1)
+            pill_w, pill_h = 40, 3
+            pill_x = self.staff_rect.centerx - pill_w // 2
+            pill_y = self.staff_rect.bottom - 2
+            pygame.draw.rect(s, (180, 180, 200), (pill_x, pill_y, pill_w, pill_h), border_radius=2)
         if self.bar_rect.h > 0:
             self._draw_top_bar()
 
