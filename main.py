@@ -151,6 +151,7 @@ class Visualizer(Transport):
         self._video_surf = None
         self.dialog = None               # a message box (the export done, or why it failed)
         self.show_staff = bool(pianists.app_setting("show_staff", True))
+        self.staff_opacity = float(pianists.app_setting("staff_opacity", 1.0))
         self.staff_view = StaffView(song)
         self.staff_rect = pygame.Rect(0, 0, 0, 0)
         self.layout(screen.get_size())
@@ -260,9 +261,18 @@ class Visualizer(Transport):
             elif k == pygame.K_f:
                 self.show_fingers = not self.show_fingers
             elif k == pygame.K_s:
-                self.show_staff = not self.show_staff
-                pianists.set_app_setting("show_staff", self.show_staff)
-                self.layout(self.screen.get_size())
+                if event.mod & pygame.KMOD_SHIFT:
+                    if self.staff_opacity > 0.9:
+                        self.staff_opacity = 0.85
+                    elif self.staff_opacity > 0.7:
+                        self.staff_opacity = 0.60
+                    else:
+                        self.staff_opacity = 1.0
+                    pianists.set_app_setting("staff_opacity", self.staff_opacity)
+                else:
+                    self.show_staff = not self.show_staff
+                    pianists.set_app_setting("show_staff", self.show_staff)
+                    self.layout(self.screen.get_size())
             elif k in (pygame.K_HOME, pygame.K_r):
                 self.seek(-LEAD_IN)
             elif k == pygame.K_o:
@@ -668,7 +678,7 @@ class Visualizer(Transport):
                            self.song.control_state(self.t) if self.song and pedals else None,
                            badge=video is None or bool(video.get("badge")))
         if self.staff_rect.h > 0 and hasattr(self, "staff_view"):
-            self.staff_view.draw(s, self.staff_rect, self.t, active)
+            self.staff_view.draw(s, self.staff_rect, self.t, active, opacity=self.staff_opacity)
         if self.bar_rect.h > 0:
             self._draw_top_bar()
 
@@ -721,7 +731,7 @@ class Visualizer(Transport):
             keys += [("↑ ↓", "Faster / slower")]
         keys += [("+ −", "Show more / fewer seconds of notes"), ("Home / R", "Back to the start"),
                  ("M", "Mute / unmute the recording" if self.audio else "Mute / unmute"),
-                 ("S", "Show / hide sheet music staff"),
+                 ("S", "Show / hide sheet music staff (Shift+S: opacity)"),
                  ("H", "Show / hide the hands"), ("F", "Show / hide the finger numbers"),
                  ("O", "Open another MIDI file"), ("Esc", "Back to the main menu")]
         return keys

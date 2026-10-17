@@ -7,10 +7,12 @@ from conftest import midi_path
 import main
 from midi_loader import LEFT, RIGHT, Note, load_midi
 import staff
-from staff import (BASS_MID_STEP, CLEF_BASS, CLEF_TREBLE, MARGIN_LEFT,
-                   MARGIN_RIGHT, MIDDLE_C_STEP, TREBLE_MID_STEP, StaffSystem,
-                   StaffView, build_systems, clef_for_note, diatonic_step,
-                   note_y)
+from staff import (BASS_MID_STEP, CLEF_BASS, CLEF_TREBLE, DOTTED_EIGHTH,
+                   DOTTED_HALF, DOTTED_QUARTER, EIGHTH, HALF, MARGIN_LEFT,
+                   MARGIN_RIGHT, MIDDLE_C_STEP, QUARTER, SIXTEENTH,
+                   TREBLE_MID_STEP, WHOLE, StaffSystem, StaffView,
+                   build_systems, clef_for_note, diatonic_step,
+                   get_beat_duration, note_value, note_y)
 
 
 def test_pitch_diatonic_mapping_and_lines():
@@ -163,14 +165,37 @@ def test_staff_view_draw(screen):
     sv = StaffView(song)
     rect = pygame.Rect(0, 34, screen.get_width(), 140)
 
-    # Drawing at different playback times
-    sv.draw(screen, rect, 0.0)
-    sv.draw(screen, rect, 5.0, active_notes=[song.notes[0]])
-    sv.draw(screen, rect, 15.0)
+    # Drawing at different playback times and opacities
+    sv.draw(screen, rect, 0.0, opacity=1.0)
+    sv.draw(screen, rect, 5.0, active_notes=[song.notes[0]], opacity=0.85)
+    sv.draw(screen, rect, 15.0, opacity=0.60)
+    sv.draw(screen, rect, 15.0, opacity=0.0)
 
     # Drawing with empty song
     sv_empty = StaffView(None)
     sv_empty.draw(screen, rect, 0.0)
+
+
+def test_note_value_classification():
+    beat_len = 0.5  # 120 BPM
+    assert note_value(2.0, beat_len) == WHOLE           # 4 beats
+    assert note_value(1.5, beat_len) == DOTTED_HALF     # 3 beats
+    assert note_value(1.0, beat_len) == HALF            # 2 beats
+    assert note_value(0.75, beat_len) == DOTTED_QUARTER # 1.5 beats
+    assert note_value(0.5, beat_len) == QUARTER         # 1 beat
+    assert note_value(0.3, beat_len) == DOTTED_EIGHTH   # 0.6 beats
+    assert note_value(0.25, beat_len) == EIGHTH         # 0.5 beats
+    assert note_value(0.125, beat_len) == SIXTEENTH     # 0.25 beats
+
+
+def test_get_beat_duration_helper():
+    class MockSong:
+        beat_times = [0.0, 0.5, 1.0, 1.5, 2.0]
+        bar_times = [0.0, 2.0]
+
+    song = MockSong()
+    assert abs(get_beat_duration(song, 0.25) - 0.5) < 1e-4
+    assert get_beat_duration(None) == 0.5
 
 
 def test_visualizer_layout_and_hotkey(screen):
@@ -200,6 +225,17 @@ def test_visualizer_layout_and_hotkey(screen):
     assert vis.show_staff is True
     assert vis.staff_rect.h >= 120
     assert vis.fall_rect.top == vis.staff_rect.bottom
+
+    # Shift + S cycles staff opacity [1.0 -> 0.85 -> 0.60 -> 1.0]
+    vis.staff_opacity = 1.0
+    app.handle_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_s, mod=pygame.KMOD_SHIFT))
+    assert abs(vis.staff_opacity - 0.85) < 1e-3
+
+    app.handle_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_s, mod=pygame.KMOD_SHIFT))
+    assert abs(vis.staff_opacity - 0.60) < 1e-3
+
+    app.handle_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_s, mod=pygame.KMOD_SHIFT))
+    assert abs(vis.staff_opacity - 1.0) < 1e-3
 
     # Key controls list includes 'S'
     controls = dict(vis._key_controls())
