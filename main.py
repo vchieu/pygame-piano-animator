@@ -60,6 +60,7 @@ import pianist as pianists
 import recent
 from hands import build_hands, draw_hands, load_with_hands, prepare_hands, prewarm_hands
 from midi_loader import LEFT, RIGHT
+from staff import StaffView
 from audio_sync import WAVE_H, PlaybackSetup
 from version import VERSION
 
@@ -77,7 +78,7 @@ PANEL_MARGIN = 8            # ...this far in from the window's right and below t
 PANEL_ALPHA = 170           # ...and its panels' opacity (0-255): translucent over the notes
 KEYS_BUTTON_W, KEYS_BUTTON_H = 58, 42    # the arrow-keys button under it (shows / hides the key controls)
 # Video export (video_export.py): the button top-left under the progress bar, and what may be recorded
-EXPORT_PARTS = (("bar", "Progress bar"), ("pedals", "Pedals"), ("badge", "Active pianist"))
+EXPORT_PARTS = (("bar", "Progress bar"), ("staff", "Sheet music staff"), ("pedals", "Pedals"), ("badge", "Active pianist"))
 EXPORT_STEP_T = 0.04        # s of each player frame spent drawing video frames while exporting
 UNCAPPED_IDLE_HZ = 240      # uncapped, the hands work ahead (App.run's idle) as if at this frame rate
 PERF_FRAMES = 120           # the performance overlay (Settings): this many frames' times...
@@ -149,6 +150,9 @@ class Visualizer(Transport):
         self.export_cancel = pygame.Rect(0, 0, 0, 0)
         self._video_surf = None
         self.dialog = None               # a message box (the export done, or why it failed)
+        self.show_staff = bool(pianists.app_setting("show_staff", True))
+        self.staff_view = StaffView(song)
+        self.staff_rect = pygame.Rect(0, 0, 0, 0)
         self.layout(screen.get_size())
         if song:
             self.set_song(song, hands)
@@ -158,6 +162,8 @@ class Visualizer(Transport):
         """Play `song`; `hands` (hands.build_hands), when already built for it, saves planning them again."""
         self.midi.silence()
         self.song = song
+        if hasattr(self, "staff_view"):
+            self.staff_view.set_song(song)
         self.hands = hands if hands is not None else build_hands(song)
         # what's heard and the keys that go down follow what the hands play
         self.perf = Performance.from_animators(self.hands.values()) if self.hands else None
@@ -178,6 +184,10 @@ class Visualizer(Transport):
         wave_h = WAVE_H if self.audio and video is None else 0
         self.wave_rect = pygame.Rect(0, bar_h, w, wave_h)
         top = bar_h + wave_h
+        staff_h = (min(160, max(120, kb_rect.h)) if getattr(self, "show_staff", True) and
+                   (video is None or video.get("staff")) else 0)
+        self.staff_rect = pygame.Rect(0, top, w, staff_h)
+        top += staff_h
         self.fall_rect = pygame.Rect(0, top, w, kb_rect.y - FELT_H - top)
         self.felt_rect = pygame.Rect(0, kb_rect.y - FELT_H, w, FELT_H)
         if hasattr(self, "keyboard"):
@@ -249,6 +259,10 @@ class Visualizer(Transport):
                 self.show_hands = not self.show_hands
             elif k == pygame.K_f:
                 self.show_fingers = not self.show_fingers
+            elif k == pygame.K_s:
+                self.show_staff = not self.show_staff
+                pianists.set_app_setting("show_staff", self.show_staff)
+                self.layout(self.screen.get_size())
             elif k in (pygame.K_HOME, pygame.K_r):
                 self.seek(-LEAD_IN)
             elif k == pygame.K_o:
@@ -653,6 +667,8 @@ class Visualizer(Transport):
         draw_pianist_badge(s, self.fonts, self.hand_rect, pianists.active(),
                            self.song.control_state(self.t) if self.song and pedals else None,
                            badge=video is None or bool(video.get("badge")))
+        if self.staff_rect.h > 0 and hasattr(self, "staff_view"):
+            self.staff_view.draw(s, self.staff_rect, self.t, active)
         if self.bar_rect.h > 0:
             self._draw_top_bar()
 
@@ -705,6 +721,7 @@ class Visualizer(Transport):
             keys += [("↑ ↓", "Faster / slower")]
         keys += [("+ −", "Show more / fewer seconds of notes"), ("Home / R", "Back to the start"),
                  ("M", "Mute / unmute the recording" if self.audio else "Mute / unmute"),
+                 ("S", "Show / hide sheet music staff"),
                  ("H", "Show / hide the hands"), ("F", "Show / hide the finger numbers"),
                  ("O", "Open another MIDI file"), ("Esc", "Back to the main menu")]
         return keys
