@@ -6,6 +6,7 @@ import pytest
 from conftest import midi_path
 import main
 from midi_loader import LEFT, RIGHT, Note, load_midi
+import pianist
 import staff
 from staff import (BASS_MID_STEP, CLEF_BASS, CLEF_TREBLE, DOTTED_EIGHTH,
                    DOTTED_HALF, DOTTED_QUARTER, EIGHTH, HALF, MARGIN_LEFT,
@@ -280,6 +281,195 @@ def test_octave_transposition_8va_8vb_15ma_15mb():
 
     step_draw, shift, label = staff.get_octave_transposition(n_normal, CLEF_TREBLE)
     assert shift == 0 and label == "" and step_draw == staff.diatonic_step(60)[0]
+
+
+def test_chord_notes_line_up_vertically():
+    # A C-E-G-C triad in the treble: no neighbour is closer than a third, so no two
+    # noteheads clash and the whole chord stays on one vertical line (not a staircase).
+    s = 7.0
+    chord = [Note(pitch=p, start=0.0, end=1.0, velocity=80, track=0, hand=RIGHT)
+             for p in (60, 64, 67, 72)]                # C4 E4 G4 C5 -> steps 28 30 32 35
+    info = staff.compute_notes_info(chord, 0.0, 5.0, 1000.0, staff.MARGIN_LEFT, s)
+
+    xs = [info[id(n)]["x"] for n in chord]
+    assert len(set(xs)) == 1, f"A chord should share one x, got {xs}"
+    assert xs[0] == info[id(chord[0])]["base_x"], "The chord must sit at its own time's x"
+
+
+def test_only_second_intervals_step_aside():
+    # C4 + D4 (a second) + F4: the second can't share a notehead with the note below it,
+    # but the sixth above C4 is clear, so only D4 moves.
+    s = 7.0
+    nw = round(s * 0.75)
+    notes = [Note(pitch=p, start=0.0, end=1.0, velocity=80, track=0, hand=RIGHT)
+             for p in (60, 62, 65)]
+    info = staff.compute_notes_info(notes, 0.0, 5.0, 1000.0, staff.MARGIN_LEFT, s)
+
+    x_c4, x_d4, x_f4 = (info[id(n)]["x"] for n in notes)
+    assert x_d4 >= x_c4 + 1.8 * nw, "A second interval steps aside"
+    assert x_f4 == x_c4, "The rest of the chord stays on the chord's x"
+
+
+def test_unison_notes_also_step_aside():
+    s = 7.0
+    nw = round(s * 0.75)
+    n1 = Note(pitch=60, start=0.0, end=1.0, velocity=80, track=0, hand=RIGHT)
+    n2 = Note(pitch=60, start=0.01, end=1.0, velocity=80, track=1, hand=RIGHT)
+    info = staff.compute_notes_info([n1, n2], 0.0, 5.0, 1000.0, staff.MARGIN_LEFT, s)
+    assert info[id(n2)]["x"] >= info[id(n1)]["x"] + 1.8 * nw
+
+
+def test_time_sequential_notes_keep_minimum_spacing():
+    # A note right on the heels of the previous one, and a sharp of its own on the left:
+    # the two must not run into each other.
+    s = 7.0
+    nw = round(s * 0.75)
+    n1 = Note(pitch=60, start=0.0, end=0.4, velocity=80, track=0, hand=RIGHT)
+    n2 = Note(pitch=61, start=0.05, end=0.45, velocity=80, track=0, hand=RIGHT)   # C#4
+    info = staff.compute_notes_info([n1, n2], 0.0, 5.0, 1000.0, staff.MARGIN_LEFT, s)
+
+    x1, x2 = info[id(n1)]["x"], info[id(n2)]["x"]
+    assert x2 > x1, "Notes too close in time are spread apart"
+    # the second note's sharp sits 0.8 * s to the left of its head: it must clear the first
+    assert x2 - 0.8 * s - nw > x1 + nw
+
+    # Notes with plenty of room between them keep their time-proportional x
+    far1 = Note(pitch=60, start=0.0, end=0.4, velocity=80, track=0, hand=RIGHT)
+    far2 = Note(pitch=60, start=2.0, end=2.4, velocity=80, track=0, hand=RIGHT)
+    far = staff.compute_notes_info([far1, far2], 0.0, 5.0, 1000.0, staff.MARGIN_LEFT, s)
+    assert far[id(far2)]["x"] == far[id(far2)]["base_x"]
+
+
+def test_notes_never_past_the_system_edge():
+    s = 7.0
+    notes = [Note(pitch=p, start=i * 0.02, end=i * 0.02 + 0.2, velocity=80, track=0, hand=RIGHT)
+             for i, p in enumerate([60, 62, 64, 61, 65, 67, 69, 71, 72, 74])]
+    margin_left, usable_w = staff.MARGIN_LEFT, 400.0
+    info = staff.compute_notes_info(notes, 0.0, 5.0, usable_w, margin_left, s)
+    assert all(info[id(n)]["x"] <= margin_left + usable_w + 1e-6 for n in notes)
+
+
+def test_staff_view_zoom_settings():
+    song = load_midi(midi_path("demo_song.mid"))
+
+    # target_dur: how many seconds of music share one system
+    close = build_systems(song, 4.0)       # zoomed in: fewer seconds per system
+    wide = build_systems(song, 20.0)       # zoomed out: more
+    assert len(close) > len(wide)
+    assert close[0].duration < wide[0].duration
+    # the ends of the song still meet, whichever way it's zoomed
+    assert close[-1].end_t == wide[-1].end_t == song.duration
+    # out-of-range values are brought back inside the supported range
+    assert len(build_systems(song, 100.0)) == len(wide)
+    assert len(build_systems(song, 0.1)) >= len(close)
+
+    sv = StaffView(song, target_dur=6.0, scale=1.25)
+    assert sv.target_dur == 6.0 and sv.scale == 1.25
+    assert len(sv.systems) == len(build_systems(song, 6.0))
+    assert sv._system_starts == [sys.start_t for sys in sv.systems]
+
+    # set_song takes the zoom too, and keeps it
+    sv.set_song(song, target_dur=8.0, scale=0.8)
+    assert sv.target_dur == 8.0 and sv.scale == 0.8
+    assert len(sv.systems) == len(build_systems(song, 8.0))
+
+    # nonsense and out-of-range zoom values are clamped
+    odd = StaffView(song, target_dur=1000.0, scale=99.0)
+    assert odd.target_dur == staff.MAX_TARGET_DUR and odd.scale == staff.MAX_SCALE
+    low = StaffView(song, target_dur=0.0, scale=0.0)
+    assert low.target_dur == staff.MIN_TARGET_DUR and low.scale == staff.MIN_SCALE
+
+    # the cursor still follows the systems, at any zoom
+    rect = pygame.Rect(0, 34, 1280, 140)
+    usable_w = rect.w - MARGIN_LEFT - MARGIN_RIGHT
+    sys0 = sv.system_for_time(0.0)
+    for frac in (0.0, 0.25, 0.5, 0.75):
+        got = sv.cursor_x(sys0.start_t + sys0.duration * frac, rect)
+        assert abs(got - (rect.x + MARGIN_LEFT + frac * usable_w)) < 1e-3
+
+
+def test_staff_view_draws_at_every_zoom(screen):
+    song = load_midi(midi_path("demo_song.mid"))
+    rect = pygame.Rect(0, 34, screen.get_width(), 140)
+    for target_dur in (3.0, 10.0, 20.0):
+        for scale in (staff.MIN_SCALE, 1.0, staff.MAX_SCALE):
+            sv = StaffView(song, target_dur=target_dur, scale=scale)
+            sv.draw(screen, rect, 3.0, active_notes=[song.notes[0]], opacity=0.9)
+
+
+def test_visualizer_staff_zoom_shortcuts_and_wheel(screen):
+    app = main.App(screen, sound=False)
+    app.play(midi_path("demo_song.mid"))
+    vis = app.mode
+
+    # starts at the defaults, inside the supported range
+    assert 3.0 <= vis.staff_target_dur <= 20.0
+    assert 0.6 <= vis.staff_scale <= 1.5
+    assert vis.staff_view.target_dur == vis.staff_target_dur
+    assert vis.staff_view.scale == vis.staff_scale
+
+    # ] zooms in (fewer seconds per system), [ zooms out again
+    start_dur = vis.staff_target_dur
+    app.handle_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RIGHTBRACKET, mod=0))
+    assert vis.staff_target_dur == start_dur - 1.0
+    assert vis.staff_view.target_dur == vis.staff_target_dur
+    app.handle_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_LEFTBRACKET, mod=0))
+    assert vis.staff_target_dur == start_dur
+
+    # clamped at both ends
+    vis.set_staff_target_dur(staff.MIN_TARGET_DUR)
+    app.handle_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RIGHTBRACKET, mod=0))
+    assert vis.staff_target_dur == staff.MIN_TARGET_DUR
+    vis.set_staff_target_dur(999.0)
+    assert vis.staff_target_dur == staff.MAX_TARGET_DUR
+    vis.set_staff_target_dur(-5.0)
+    assert vis.staff_target_dur == staff.MIN_TARGET_DUR
+    vis.set_staff_target_dur(10.0)
+    vis.set_staff_scale(9.0)
+    assert vis.staff_scale == staff.MAX_SCALE
+    vis.set_staff_scale(0.1)
+    assert vis.staff_scale == staff.MIN_SCALE
+    vis.set_staff_scale(1.0)
+
+    # with Shift held the staff's own size is scaled instead of its spacing
+    vis.set_staff_scale(1.0)
+    app.handle_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RIGHTBRACKET, mod=pygame.KMOD_SHIFT))
+    assert vis.staff_scale > 1.0 and vis.staff_view.scale == vis.staff_scale
+    app.handle_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_LEFTBRACKET, mod=pygame.KMOD_SHIFT))
+    assert abs(vis.staff_scale - 1.0) < 1e-6
+
+    vis.render()
+
+    # Ctrl + wheel over the staff: how much music a system holds
+    pygame.mouse.set_pos(vis.staff_rect.center)
+    vis.set_staff_target_dur(10.0)
+    app.handle_event(pygame.event.Event(pygame.MOUSEWHEEL, x=0, y=-1, mod=pygame.KMOD_CTRL))
+    assert vis.staff_target_dur == 9.0
+    app.handle_event(pygame.event.Event(pygame.MOUSEWHEEL, x=0, y=1, mod=pygame.KMOD_CTRL))
+    assert vis.staff_target_dur == 10.0
+
+    # Shift + wheel over the staff: the staff's size
+    vis.set_staff_scale(1.0)
+    app.handle_event(pygame.event.Event(pygame.MOUSEWHEEL, x=0, y=-1, mod=pygame.KMOD_SHIFT))
+    assert vis.staff_scale > 1.0
+    app.handle_event(pygame.event.Event(pygame.MOUSEWHEEL, x=0, y=1, mod=pygame.KMOD_SHIFT))
+    assert abs(vis.staff_scale - 1.0) < 1e-6
+
+    # away from the staff the wheel is left to everything else
+    pygame.mouse.set_pos((vis.staff_rect.centerx, vis.fall_rect.centery))
+    before = (vis.staff_target_dur, vis.staff_scale)
+    app.handle_event(pygame.event.Event(pygame.MOUSEWHEEL, x=0, y=-1, mod=pygame.KMOD_CTRL))
+    assert (vis.staff_target_dur, vis.staff_scale) == before
+
+    # both zoom levels are remembered
+    vis.set_staff_target_dur(7.0)
+    vis.set_staff_scale(1.2)
+    assert pianist.app_setting("staff_target_dur") == 7.0
+    assert abs(pianist.app_setting("staff_scale") - 1.2) < 1e-6
+
+    # and the shortcut list mentions them
+    controls = dict(vis._key_controls())
+    assert any("zoom" in d.lower() for d in controls.values())
 
 
 def test_staff_height_dragging_and_clamping(screen):

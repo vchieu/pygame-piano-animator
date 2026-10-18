@@ -3,6 +3,18 @@
 Versions are vYY.MAJOR.MINOR from v26.1.0 (before that, the UTC date and time of the commit,
 v20YY.MM.DD.HHMM). Newest first.
 
+## v26.2.0 - Sheet music staff
+- A grand staff (treble and bass) is shown above the keyboard with a moving cursor and paging that follows the
+  playback; it can be shown or hidden (S), its opacity changed (Shift+S) and its height dragged at its bottom edge.
+- Zoom it to taste: `[` and `]` spread the notes out over fewer systems or cram more music into one, and Shift
+  with either key makes the staff itself bigger or smaller; pointing at the staff and scrolling (Ctrl or Shift)
+  does the same, and the settings are remembered.
+- Notes of a chord share one vertical line, only notes a second apart step aside, and closely following notes keep
+  room for their sharp, dot or flag; notes are transposed to 8va / 8vb / 15ma / 15mb where they'd need too many
+  ledger lines.
+- The sheet music staff is one of the parts the video export can record, and exporting on a small window no longer
+  lets the staff squeeze the falling notes away.
+
 ## v26.1.20 - Video export, hands on top of each other
 - Export a performance to an .mp4 from the button under the player's progress bar: choose whether the progress
   bar, pedals and pianist badge are in it; it's rendered at the window's size and 60 fps with its sound (the

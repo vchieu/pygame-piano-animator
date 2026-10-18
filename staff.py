@@ -76,6 +76,31 @@ MIDDLE_C_STEP = 28
 MARGIN_LEFT = 85
 MARGIN_RIGHT = 20
 
+# Zoom of the staff: MIN/MAX_TARGET_DUR bound how many seconds of music may share one system
+# (MIN_SCALE / MAX_SCALE bound how big the staff itself is drawn).
+MIN_TARGET_DUR = 3.0
+MAX_TARGET_DUR = 20.0
+MIN_SCALE = 0.6
+MAX_SCALE = 1.5
+
+
+def clamp_target_dur(value) -> float:
+    """Keep the seconds of music per system inside the range the staff draws well at."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return 10.0
+    return max(MIN_TARGET_DUR, min(MAX_TARGET_DUR, v))
+
+
+def clamp_scale(value) -> float:
+    """Keep the staff's size multiplier inside its range."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return 1.0
+    return max(MIN_SCALE, min(MAX_SCALE, v))
+
 
 def diatonic_step(pitch: int) -> Tuple[int, int]:
     """Return (diatonic_step, is_sharp) for a MIDI pitch."""
@@ -189,8 +214,11 @@ def build_systems(song, target_dur: float = 10.0) -> List[StaffSystem]:
     for i in range(len(bars) - 1):
         measures.append(Measure(i, bars[i], bars[i + 1]))
 
+    # How much music fits on one system: target_dur is the seconds of song per system, so a
+    # smaller value shows fewer, wider notes (zoom in) and a bigger one crams them (zoom out).
+    target_dur = max(MIN_TARGET_DUR, min(MAX_TARGET_DUR, float(target_dur)))
     avg_bar = max(0.5, song.duration / max(1, len(measures)))
-    bars_per_sys = max(2, min(5, round(target_dur / avg_bar)))
+    bars_per_sys = max(1, min(8, round(target_dur / avg_bar)))
 
     systems: List[StaffSystem] = []
     for i in range(0, len(measures), bars_per_sys):
@@ -341,17 +369,25 @@ def get_octave_transposition(n: Note, clef: str) -> Tuple[int, int, str]:
     return step, 0, ""
 
 
-def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: float, usable_w: float, margin_left: float, s: float) -> dict:
+def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: float, usable_w: float,
+                       margin_left: float, s: float, beat_len: float = 0.5) -> dict:
     """
     Computes rendering info for notes in a system:
     x coordinate (with clashing/overlap offset), clef, step_draw, octave_shift, label_text.
     Returns dict mapping id(n) -> dict(...)
+
+    Only a real clash moves a note sideways:
+    - notes a second (or unison) apart in the same clef, which would overlap head-on;
+    - notes that follow in time so closely that the second one's sharp or the first one's
+      dot / flag would run into it.
+    The other notes of a chord stay on the same x, so it reads as a chord, not a staircase.
     """
     info = {}
     if not sys_notes:
         return info
 
     nw = round(s * 0.75)
+    right_limit = margin_left + usable_w
     sorted_notes = sorted(sys_notes, key=lambda n: (n.start, n.pitch))
 
     # Pre-calculate base attributes
@@ -403,12 +439,52 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
                 p_info = info[id(prev_n)]
                 c_info = info[id(curr_n)]
 
-                # Check if same step or adjacent step (second interval |step1 - step2| <= 1)
+                # Only a second (step_diff == 1) or a unison (0) really clashes: the two
+                # noteheads would sit on top of each other. Any wider interval already
+                # stacks vertically, so it keeps the chord's common x.
                 step_diff = abs(c_info["step_draw"] - p_info["step_draw"])
-                if step_diff <= 1 or abs(c_info["x"] - p_info["x"]) < (2 * nw + 2):
+                if step_diff <= 1:
                     min_x = p_info["x"] + 1.8 * nw
                     if c_info["x"] < min_x:
                         c_info["x"] = min_x
+
+    # Notes that follow in time: keep enough air for the second note's accidental (♯)
+    # and the first one's dot or flag, so they don't overlap at fast passages.
+    def cluster_head(cluster: List[Note]) -> float:
+        """How far to the left of their x the notes of `cluster` reach (an accidental)."""
+        return max((s * 0.8 for n in cluster if diatonic_step(n.pitch)[1]), default=0.0)
+
+    def cluster_tail(cluster: List[Note]) -> float:
+        """How far to the right of their x the notes of `cluster` reach (notehead, dot, flag)."""
+        tail = nw
+        for n in cluster:
+            nv = note_value(n.duration, beat_len)
+            if nv in (DOTTED_HALF, DOTTED_QUARTER, DOTTED_EIGHTH):
+                tail = max(tail, nw + s * 0.6)
+            elif nv in (EIGHTH, SIXTEENTH):
+                tail = max(tail, nw + s * 0.9)
+        return tail
+
+    for i in range(1, len(clusters)):
+        prev_cluster, curr_cluster = clusters[i - 1], clusters[i]
+        # Notes on different staves are nowhere near each other: nothing to spread.
+        prev_clefs = {info[id(n)]["clef"] for n in prev_cluster}
+        curr_clefs = {info[id(n)]["clef"] for n in curr_cluster}
+        if not prev_clefs & curr_clefs:
+            continue
+
+        head = cluster_head(curr_cluster)
+        min_spacing = nw * 2.2 + head
+        if cluster_tail(prev_cluster) > nw:
+            min_spacing += s * 0.5              # room for the previous note's dot or flag
+        prev_right = max(info[id(n)]["x"] for n in prev_cluster) + cluster_tail(prev_cluster)
+        curr_left = min(info[id(n)]["x"] for n in curr_cluster) - head
+        shift = prev_right + min_spacing - curr_left
+        if shift <= 0:
+            continue
+        shift = min(shift, max(0.0, right_limit - curr_left))   # never past the system's edge
+        for n in curr_cluster:
+            info[id(n)]["x"] += shift
 
     return info
 
@@ -500,17 +576,25 @@ class StaffView:
     """
     Renders a Grand Staff sheet music system with dynamic cursor and paging.
     Supports clean paper white background, custom opacity, and accurate note values.
+
+    Zoom: `target_dur` is how many seconds of the song share one system (smaller = the
+    notes spread out and zoom in), `scale` how big the staff itself is drawn (smaller
+    leaves more room above and below for the notes that reach past the staves).
     """
-    def __init__(self, song=None):
+    def __init__(self, song=None, target_dur: float = 10.0, scale: float = 1.0):
         self.song = None
         self.systems: List[StaffSystem] = []
         self._system_starts: List[float] = []
+        self.target_dur = clamp_target_dur(target_dur)
+        self.scale = clamp_scale(scale)
         if song is not None:
-            self.set_song(song)
+            self.set_song(song, target_dur=self.target_dur, scale=self.scale)
 
-    def set_song(self, song):
+    def set_song(self, song, target_dur: float = 10.0, scale: float = 1.0):
+        self.target_dur = clamp_target_dur(target_dur)
+        self.scale = clamp_scale(scale)
         self.song = song
-        self.systems = build_systems(song)
+        self.systems = build_systems(song, self.target_dur)
         self._system_starts = [sys.start_t for sys in self.systems]
 
     def system_for_time(self, t: float) -> Optional[StaffSystem]:
@@ -554,8 +638,8 @@ class StaffView:
 
         local_rect = pygame.Rect(0, 0, staff_rect.w, staff_rect.h)
 
-        # 2. Staff geometry
-        s = max(5.0, min(9.0, (local_rect.h - 26) / 14.0))
+        # 2. Staff geometry (the user's zoom scales the staff itself)
+        s = max(4.0, min(12.0, ((local_rect.h - 26) / 14.0) * self.scale))
         center_y = local_rect.centery
         treble_mid_y = center_y - round(3.0 * s)
         bass_mid_y = center_y + round(3.0 * s)
@@ -628,7 +712,8 @@ class StaffView:
                     nh = round(s * 0.52)
                     stem_len = round(3.2 * s)
 
-                    notes_info = compute_notes_info(sys.notes, sys.start_t, sys.duration, usable_w, MARGIN_LEFT, s)
+                    notes_info = compute_notes_info(sys.notes, sys.start_t, sys.duration, usable_w,
+                                                    MARGIN_LEFT, s, get_beat_duration(self.song))
                     draw_octave_brackets(staff_surf, notes_info, sys.notes, treble_mid_y, bass_mid_y, s)
 
                     # Sort notes so lower notes draw first

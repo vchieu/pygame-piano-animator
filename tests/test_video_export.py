@@ -57,7 +57,8 @@ def test_the_export_menu_chooses_what_is_recorded(screen):
     assert part == "bar" and v.export_parts["bar"]
     click(v, r.center)
     assert not v.export_parts["bar"] and pianist.app_setting("export_parts")["bar"] is False
-    # without the progress bar the notes fall from the very top of the video
+    # without the progress bar and sheet music staff the notes fall from the very top of the video
+    v.export_parts["staff"] = False
     v.layout((900, 560), video=v.export_parts)
     assert v.bar_rect.h == 0 and v.fall_rect.top == 0
     v.layout((900, 560))

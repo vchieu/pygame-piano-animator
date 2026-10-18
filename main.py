@@ -60,7 +60,7 @@ import pianist as pianists
 import recent
 from hands import build_hands, draw_hands, load_with_hands, prepare_hands, prewarm_hands
 from midi_loader import LEFT, RIGHT
-from staff import StaffView
+from staff import StaffView, clamp_scale, clamp_target_dur
 from audio_sync import WAVE_H, PlaybackSetup
 from version import VERSION
 
@@ -155,7 +155,11 @@ class Visualizer(Transport):
         self.staff_height = float(pianists.app_setting("staff_height", 140.0))
         self.staff_height = min(280.0, max(90.0, self.staff_height))
         self.dragging_staff_height = False
-        self.staff_view = StaffView(song)
+        # the staff's zoom: seconds of music per system (smaller = zoomed in) and how big
+        # the staff is drawn (smaller = more room for notes above and below the staves)
+        self.staff_target_dur = clamp_target_dur(pianists.app_setting("staff_target_dur", 10.0))
+        self.staff_scale = clamp_scale(pianists.app_setting("staff_scale", 1.0))
+        self.staff_view = StaffView(song, target_dur=self.staff_target_dur, scale=self.staff_scale)
         self.staff_rect = pygame.Rect(0, 0, 0, 0)
         self.layout(screen.get_size())
         if song:
@@ -167,7 +171,7 @@ class Visualizer(Transport):
         self.midi.silence()
         self.song = song
         if hasattr(self, "staff_view"):
-            self.staff_view.set_song(song)
+            self.staff_view.set_song(song, target_dur=self.staff_target_dur, scale=self.staff_scale)
         self.hands = hands if hands is not None else build_hands(song)
         # what's heard and the keys that go down follow what the hands play
         self.perf = Performance.from_animators(self.hands.values()) if self.hands else None
@@ -188,17 +192,49 @@ class Visualizer(Transport):
         wave_h = WAVE_H if self.audio and video is None else 0
         self.wave_rect = pygame.Rect(0, bar_h, w, wave_h)
         top = bar_h + wave_h
-        staff_h = (min(280, max(90, int(getattr(self, "staff_height", 140.0)))) if getattr(self, "show_staff", True) and
+        requested_staff_h = min(280, max(90, int(getattr(self, "staff_height", 140.0))))
+        max_staff_h = max(0, kb_rect.y - FELT_H - top - 30)
+        staff_h = (min(requested_staff_h, max_staff_h) if getattr(self, "show_staff", True) and
                    (video is None or video.get("staff")) else 0)
         self.staff_rect = pygame.Rect(0, top, w, staff_h)
         top += staff_h
-        self.fall_rect = pygame.Rect(0, top, w, kb_rect.y - FELT_H - top)
+        self.fall_rect = pygame.Rect(0, top, w, max(1, kb_rect.y - FELT_H - top))
         self.felt_rect = pygame.Rect(0, kb_rect.y - FELT_H, w, FELT_H)
         if hasattr(self, "keyboard"):
             self.keyboard.layout(kb_rect)
         else:
             self.keyboard = Keyboard(kb_rect)
         self._glow_cache.clear()
+
+    # ----- the staff's zoom -------------------------------------------------
+    def set_staff_target_dur(self, value):
+        """How many seconds of music fit on one staff system: smaller spreads the notes out
+        (zoom in). Rebuilds the systems and remembers the choice."""
+        value = clamp_target_dur(value)
+        if abs(value - self.staff_target_dur) < 1e-6:
+            return
+        self.staff_target_dur = value
+        pianists.set_app_setting("staff_target_dur", value)
+        if getattr(self, "song", None) is not None:
+            self.staff_view.set_song(self.song, target_dur=value, scale=self.staff_scale)
+
+    def set_staff_scale(self, value):
+        """How big the staff is drawn: smaller leaves room for the notes above and below it.
+        Only affects drawing (no re-layout of the systems), and is remembered."""
+        value = clamp_scale(value)
+        if abs(value - self.staff_scale) < 1e-6:
+            return
+        self.staff_scale = value
+        self.staff_view.scale = value
+        pianists.set_app_setting("staff_scale", value)
+
+    def zoom_staff(self, steps: int, vertical: bool = False):
+        """Zoom the staff by `steps` (up is positive = closer). `vertical` scales the staff
+        itself instead of how much music shares a system."""
+        if vertical:
+            self.set_staff_scale(self.staff_scale + steps * 0.05)
+        else:
+            self.set_staff_target_dur(self.staff_target_dur - steps * 1.0)
 
     @property
     def overlay_top(self):
@@ -251,6 +287,10 @@ class Visualizer(Transport):
                 self.window_secs = max(0.75, self.window_secs / 1.25)
             elif k in (pygame.K_MINUS, pygame.K_KP_MINUS):
                 self.window_secs = min(12.0, self.window_secs * 1.25)
+            elif k == pygame.K_LEFTBRACKET:          # the staff's zoom: [ out, ] in
+                self.zoom_staff(-1, vertical=bool(event.mod & pygame.KMOD_SHIFT))
+            elif k == pygame.K_RIGHTBRACKET:
+                self.zoom_staff(1, vertical=bool(event.mod & pygame.KMOD_SHIFT))
             elif k == pygame.K_m:
                 self.toggle_mute()
             elif k in (pygame.K_COMMA, pygame.K_PERIOD) and self.audio:
@@ -282,6 +322,17 @@ class Visualizer(Transport):
                 path = pick_file()
                 if path:
                     return ("open", path)
+        elif event.type == pygame.MOUSEWHEEL:
+            over_staff = self.staff_rect.h > 0 and self.staff_rect.collidepoint(
+                getattr(event, "pos", None) or pygame.mouse.get_pos())
+            if over_staff:
+                mods = getattr(event, "mod", None)
+                if mods is None:                      # pygame's wheel event carries no modifiers
+                    mods = pygame.key.get_mods()
+                if mods & pygame.KMOD_SHIFT:          # the staff's size
+                    self.zoom_staff(-event.y, vertical=True)
+                elif mods & pygame.KMOD_CTRL:          # how much music a system holds
+                    self.zoom_staff(-event.y)           # (scrolling up zooms in)
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             if self.staff_rect.h > 0 and abs(event.pos[1] - self.staff_rect.bottom) <= 6:
                 self.dragging_staff_height = True
@@ -766,6 +817,9 @@ class Visualizer(Transport):
         keys += [("+ −", "Show more / fewer seconds of notes"), ("Home / R", "Back to the start"),
                  ("M", "Mute / unmute the recording" if self.audio else "Mute / unmute"),
                  ("S", "Show / hide sheet music staff (Shift+S: opacity)"),
+                 ("[ ]", "Zoom the staff out / in (Shift: its size)"),
+                 ("Ctrl+Wheel", "Zoom the staff's notes (on the staff)"),
+                 ("Shift+Wheel", "Zoom the staff's size (on the staff)"),
                  ("H", "Show / hide the hands"), ("F", "Show / hide the finger numbers"),
                  ("O", "Open another MIDI file"), ("Esc", "Back to the main menu")]
         return keys
