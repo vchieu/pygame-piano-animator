@@ -255,14 +255,22 @@ Detailed design notes, kept up to date as features were added. Start with `CLAUD
   of drawn heights - a chord of E7 + C6 put the E7 at -1.5 sp and the C6 at -2.5 sp from the
   treble middle line, and a line at a fixed -2.8 sp ran straight through the second one (7 of
   the 8 notes in the test song crossed). `draw_octave_brackets` now takes the panel's
-  `local_rect` and, for each group, computes the line's y from the group's own notes
-  (`note_y`, which is what it must use: it is called before the chord loop fills
-  `notes_info[...]["y_top"]`):
-  - 8va / 15ma: `min(ys) - half a notehead's ink - (a stemLength if the stems point up) - GAP`;
-  - 8vb / 15mb: `max(ys) + half a notehead's ink + (a stemLength if they point down) + GAP`;
-  - `GAP = OCTAVE_GAP_SPACES` 0.35 staff spaces, clamped to the panel (`local_rect.top + GAP` /
-    `local_rect.bottom - GAP`). The clamp wins for the few pitches whose notes sit at the panel's
-    own edge - a bracket off the panel is worse than one crossing a notehead.
+  `local_rect` and, for each group, computes the line's y from the group's own notes. It is
+  called **after** the chord and beam loop, so what it measures is the ink the group really
+  draws (`ink_span`): half a notehead's ink, plus - on the side the bracket is going - the
+  stem the layout settled on (`beam_stem_up` / `chord_stem_up`; `beam_tip_y`, where a beam's
+  bar replaces the tip, or `y_top` / `y_bot`, where a chord's stem does). A stem turned over
+  by the layout to keep off the other hand therefore counts where it is, and a beam hanging
+  off its end too, instead of the line cutting through both. Called on its own - as the
+  label-avoidance path does - it falls back to the engraver's direction (`stem_up_for`), the
+  same one the chord layout starts from.
+  - 8va / 15ma: `min(ink) - GAP`; 8vb / 15mb: `max(ink) + GAP`, where `GAP =
+    OCTAVE_GAP_SPACES` **0.75** staff spaces (raised from 0.35 when the measure became the
+    ink rather than the heads).
+  - Clamped to the panel (`local_rect.top + GAP` / `local_rect.bottom - GAP`). The clamp wins
+    for the few groups whose ink already touches the panel's own edge - a bracket off the
+    panel is worse than one crossing a notehead (one group of `50-nam-ve-sau.mid` at 140 px
+    gives up 0.8 px of its clearance to the panel, to the tip of one stem, that way).
   The bracket's **label** is printed to the left of its group's first note, so it can land on a
   notehead of another group. Every notehead on the system is collected (`ink_bands`, per staff) and
   the bracket moves to keep the label off those - *but only while the result still fits the panel*.
@@ -270,11 +278,14 @@ Detailed design notes, kept up to date as features were added. Start with `CLAUD
   bracket's job, and pushing further to chase a neighbouring notehead lands the whole bracket
   somewhere worse (measured: without that guard the 280 px staff got markedly worse). Measured
   label-over-notehead pairs, before -> after, over both test songs at 90/140/280 px:
-  104 -> 104, 88 -> 40, 88 -> 40 and 7 -> 6, 7 -> 5, 8 -> 4. The hook's tip stops just short of
-  the group's nearest ink, so it keeps pointing at the notes after the bracket moves.
-  The stem direction comes from the same `stem_up_for` the chord layout uses; in practice an
-  8va group is drawn high on the treble staff and stems down, an 8vb group low on the bass staff
-  and stems up, so the stem term usually adds nothing.
+  104 -> 104, 88 -> 40, 88 -> 40 and 7 -> 6, 7 -> 5, 8 -> 4. The hook turns back towards the
+  notes - down for 8va, up for 8vb, a short span of `max(0.7 s, 0.8 GAP)` - and stops just
+  short of the group's nearest ink, so it keeps pointing at the notes wherever the bracket
+  ends up, and never floats off past them on the line's other side.
+  Measured over `50-nam-ve-sau.mid` at 90/140/200 px: every group's line clears its ink by
+  the full GAP now, where it used to sit 0.35 sp off the *noteheads* - which for a stem or a
+  beam pointing at the bracket meant on it (one group at 140 px had its line 0.1 sp *inside*
+  the ink it covered).
 - **A stem or a beam keeps off the other hand's notes** (2026-10-19). Both hands draw at once on
   one grand staff, and a tail is a long thin thing: a beam is a horizontal line, and the wrong
   side of one hand's chord is exactly the height the other hand's note is drawn at. The note
@@ -289,14 +300,26 @@ Detailed design notes, kept up to date as features were added. Start with `CLAUD
     lands on a note, the stems are **turned over and the bar goes with them**: the other side of
     the notes is the side the other hand is not on. What is counted is the whole beam - the
     bar, the second bar of a run of sixteenths, and each stem reaching the bar - not just the
-    bar as before, so the choice is made on what the group would really cover.
-  - A bar hanging off the **staff panel** is worse than one drawn across a note, so turning the
-    stems over is not a licence to leave the panel (`BEAM_OFF_PANEL_W` 4 per pixel in the
-    search, and a hard rule on the choice: a direction whose bar fits beats one whose bar does
-    not, whatever it would have covered; with both fitting, the covering decides and the
-    engraver's direction wins the tie). This matters: the old slide could push a bar off the
-    top of a 140 px panel to dodge a notehead, where it was drawn over the falling notes or not
-    drawn at all.
+    bar as before, so the choice is made on what the group would really cover. The second bar
+    goes **between the first bar and the notes** (MuseScore stacks the beams inboard, and
+    `min_stem_spaces` already leaves room for the stack that way); it used to be drawn
+    outboard, past the ends of the stems with nothing holding it up.
+  - The **staff panel is the paper, not a veto**. The old rule was hard: a direction whose bar
+    would poke out of the panel lost to any drawable direction, however much ink the other one
+    covered - so at small panel heights a perfectly clear engraver's direction was thrown away
+    and its stems turned over onto the other hand's notes (8 / 15 / 18 stems across a foreign
+    notehead on `ke_say_tinh_3.mid` at 90 / 140 / 200 px). Each candidate tip is now **clamped
+    into the panel** and scored where it would really be drawn, and a direction is given up on
+    only when not even that much fits its own group: `tight_reach`, half a notehead plus a
+    stack (`bar + BEAM_WIDTH_SPACES / 2 + BEAM_MIN_HEAD_GAP_SP` 0.35 spaces) past the outer
+    notehead, so the bars can never come to rest on the group's own heads. A direction with no
+    feasible height at all costs `BEAM_OFF_PANEL_COST` 1e6, which no drawable side can lose to;
+    with both drawable the covering decides and the engraver's direction wins the tie. So the
+    stems give up the length the panel takes and the bar lands on the edge of the paper, and
+    only a group that genuinely has nowhere to stand keeps the engraver's full stem length with
+    its bar off the panel (measured: 1 / 3 / 10 at those heights, the rest being groups where a
+    downward bar would sit on the group's own lowest notehead - only moving or scaling the
+    staff block could help those).
   - `place_stem` does the same for a chord with no beam over it: it scores the stem (and its
     flags, from `notation.flag_extent`) pointing up against pointing down, and the stem turns
     over only when that is the better of the two. `compute_notes_info` keeps notes on one
@@ -314,13 +337,37 @@ Detailed design notes, kept up to date as features were added. Start with `CLAUD
     not their own chord's, out of every stem drawn): demo song 276 -> 264 at each height; the
     other 693 -> 687, 699 -> 687, 714 -> 708 (the rest are chord tones an octave apart, where
     the stem's own notehead is in the way either way). Beams drawn off the panel: 3 -> 0 on a
-    run of eighths under a held note.
+    run of eighths under a held note. Counting the same thing the layout scores (a stem's 1 px
+    column crossing any foreign notehead, three songs at 90/140/200 px): 45 -> 14, of which
+    the 14 are the nowhere-to-stand groups above - `demo_song.mid` 0/2/2 -> 0/0/0,
+    `50-nam-ve-sau.mid` 0/0/0 -> 0/0/0, `ke_say_tinh_3.mid` 8/15/18 -> 1/3/10.
+- **Measure bar lines are drawn where their beat is, and nothing touches them** (review,
+  2026-10-19). The line was drawn 10 px short of the moment it stands for - while the playback
+  cursor drew the same moment at the true x, so the two disagreed - and a note that started on
+  the downbeat was placed on the line and printed through it. The `- 10` is gone, and
+  `compute_notes_info` takes the system's bar times (`bar_times`) and keeps every note's ink
+  `NOTE_BAR_DISTANCE_SP` **1.5** staff spaces off them (MuseScore's `noteBarDistance`,
+  styledef.cpp): a cluster that lands on a bar is pushed right by the gap plus its *left* ink -
+  head, ledger line and accidental, so a sharped downbeat carries its sharp past the line - and
+  a cluster whose flag or dot reaches into the next bar is pulled left by the same rule, as far
+  as the note before it leaves room (`cluster_tail`, `min_gap`; the shift never turns a tight
+  passage into a collision). The system's own ending bar line counts too: a note at the very end
+  of a system is drawn at the paper's edge, on the line, and gives up the same distance.
+  Measured over `50-nam-ve-sau.mid` at 90/140/200 px: every note that starts on a downbeat
+  now clears its bar line by the full 1.5 sp - it used to be drawn on it, ink and all. The
+  only ink that still reaches a line is the flag or dot of a note printed right before one,
+  0.2-0.9 sp past it, where the note before leaves no room to pull it further left (2 notes at
+  140 px, 3 at 200 px, and 2 at the end of a system in `ke_say_tinh_3.mid`); the closest pair
+  left clear is 0.5 sp at 90 px. Nothing is drawn *on* a line any more.
 - The hand colours (`HAND_COLORS`) are still the note colour. Tests: `tests/test_notation.py`
   (metrics, the codepoint table, the glyph cache, every glyph at four sizes, the painter's
   geometry, the clef and time-signature painters, the no-font fallback) and `tests/test_staff.py`
-  (the clefs and the digits as really drawn, the bracket clearing its group, the no-font path,
-  a beam turning its stems over to clear another hand's note and one that keeps the engraver's
-  when nothing is in the way, no beam hanging off the panel, a stem's own scoring).
+  (the clefs and the digits as really drawn, the bracket clearing its group's noteheads *and*
+  its stems and beams, the no-font path, a beam turning its stems over to clear another hand's
+  note and one that keeps the engraver's when nothing is in the way, the panel giving way
+  before the engraver's direction does, a sixteenth's second bar inboard of the first, a stem's
+  own scoring, a note keeping `noteBarDistance` off the bar lines and the bar line being drawn
+  where its beat is).
 
 ## Fonts and frame pacing (v26.1.19.SNAPSHOT-14, -15)
 - Every font comes from the bundled typeface: Source Sans Pro, regular and bold (`assets/fonts`, SIL Open Font

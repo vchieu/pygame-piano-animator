@@ -14,8 +14,17 @@ v20YY.MM.DD.HHMM). Newest first.
   ledger lines.
 - The staff's notes are engraved like MuseScore's: real noteheads, flags, accidentals and dots from a proper
   music font, with stems and ledger lines at the same proportions.
+- Measure bar lines stand where their beat is - the same moment the cursor draws - and a note that starts on
+  the downbeat, or whose flag or dot reaches into the next measure, keeps a staff space and a half off them,
+  so nothing is printed on a bar line any more (a flag or dot still brushes one where the notes either side
+  leave no room to pull it further away).
 - Where the two hands play close together, a note's stem and a run of beamed notes now turn the other way rather
-  than be drawn over the other hand's notes, and are never pushed off the staff to get out of the way.
+  than be drawn over the other hand's notes, and are never pushed off the staff to get out of the way. Where the
+  staff panel is too short for the engraver's stems, they shorten so the beam lands on the edge of the paper
+  instead of hanging off it, and the second bar of a run of sixteenths sits between the first bar and the notes
+  instead of floating past the ends of the stems.
+- The 8va / 8vb dashed lines are drawn above or below everything the notes under them really draw - their stems
+  and beams included - and a good half staff space clear of it, rather than just over the noteheads.
 - The sheet music staff is one of the parts the video export can record, and exporting on a small window no longer
   lets the staff squeeze the falling notes away.
 

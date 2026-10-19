@@ -89,6 +89,9 @@ MAX_SCALE = 1.5
 # stops a very fast beat from turning into one endless bar across the whole measure.
 MAX_BEAM_CHORDS = 8
 
+# How far a note's ink stays off a bar line: MuseScore's noteBarDistance (styledef.cpp).
+NOTE_BAR_DISTANCE_SP = 1.5
+
 # These are the values MuseScore engraves with (src/engraving/style/styledef.cpp:
 # stemLength 3.5, stemWidth 0.10, beamWidth 0.5), all measured in staff spaces -
 # and what notation.py draws the notes with.
@@ -574,12 +577,18 @@ def ink_overlap(x0: float, x1: float, y0: float, y1: float, boxes, skip) -> floa
 # is the bound on that, and past it the beam keeps the least bad height it found.
 BEAM_SLIDE_SPACES = 2.0
 
-# What a bar hanging off the top or bottom of the staff panel costs, per pixel it pokes
-# out. Set past any plausible overlap with a notehead (a notehead is ~1 space, tens of
-# pixels, tall), so a bar that would leave the panel only does so when nothing inside it
-# is better - a beam drawn over the falling notes above the staff is worse than one drawn
-# across a note, but it is still a last resort.
-BEAM_OFF_PANEL_W = 4.0
+# What a bar that cannot stay inside the staff panel costs. The panel is the paper: a bar
+# with its outer half cut off is worse than a stem that runs over another hand's notehead,
+# so a direction whose bar fits wins over one whose bar does not. It is still a cost rather
+# than a veto - the stems give way for the panel before the bar leaves it, and only when
+# even the shortest stem the stack allows would not fit is a direction rejected.
+BEAM_OFF_PANEL_COST = 1e6
+
+# The least white a beam leaves between its stack of bars and the group's own noteheads when
+# the panel has to shorten the stems. MuseScore never takes a beamed stem below
+# min_stem_spaces; the panel is the one thing that can force it, and even then the notehead
+# must not sit on the bars.
+BEAM_MIN_HEAD_GAP_SP = 0.35
 
 
 def layout_beam(stops, default_up, reach, beam_w, gap, nw, boxes, own, s, panel=None):
@@ -602,6 +611,13 @@ def layout_beam(stops, default_up, reach, beam_w, gap, nw, boxes, own, s, panel=
     turned the other way and the bar goes with them: the bar is only there to join the
     group's stems, and the other side of the notes is the side the other hand is not on.
 
+    The panel is not a veto, only a bound. If the side that is clear asks for a bar that
+    pokes out of the panel, the stems give up just enough of their length to put the bar on
+    the edge - as long as the stack of bars still clears the group's own noteheads. A beam
+    with its bar cut off at the edge of the paper reads worse than a slightly short stem,
+    but better than a stem printed across the other hand's note, so the clear side wins
+    whenever it can be drawn at all.
+
     The stems and the second bar of a run of sixteenths are counted too, not just the
     outer bar, so the direction is chosen on what the whole beam would cover.
     """
@@ -610,20 +626,24 @@ def layout_beam(stops, default_up, reach, beam_w, gap, nw, boxes, own, s, panel=
     step = max(1, round(s * 0.25))
     slide = max(step, round(s * BEAM_SLIDE_SPACES))
     any16 = any(st[3] for st in stops)
+    bars = 2 if any16 else 1
+
+    # The shortest a stem may get: the whole stack of bars, the notehead, and the little
+    # white that keeps the head off the bars - measured from the notehead's centre.
+    head_half = notation.NOTEHEAD_H_SP * s / 2.0
+    stack = bars * BEAM_STEP_SPACES - 0.25
+    tight_reach = head_half + (stack + BEAM_WIDTH_SPACES / 2.0 + BEAM_MIN_HEAD_GAP_SP) * s
 
     def stem_x(x, up):
         """The x the stems stand on: the notehead's far edge, as `draw_staff_note` puts it."""
         return round(x + nw - 1) if up else round(x - nw + 1)
 
-    def off_panel(tip):
-        """How far a bar at `tip` would hang outside the staff panel (0 when it fits)."""
-        if panel is None:
-            return 0.0
-        return max(0.0, panel[0] - (tip - half)) + max(0.0, (tip + half) - panel[1])
-
     def run_on(tip, up):
         """What a bar at `tip`, with its stems `up`, would be printed on."""
-        off = -gap if up else gap
+        # The second bar of a sixteenth run sits between the first one and the notes, so the
+        # stems run through it: that is where MuseScore stacks it, and where the reach the
+        # caller asked for already leaves room for it.
+        off = gap if up else -gap
         left, right = stem_x(stops[0][0], up), stem_x(stops[-1][0], up)
         total = ink_overlap(left, right, tip - half, tip + half, boxes, own)
         if any16:
@@ -632,35 +652,45 @@ def layout_beam(stops, default_up, reach, beam_w, gap, nw, boxes, own, s, panel=
             sx = stem_x(x, up)
             far = y_bot if up else y_top          # the stem starts at the chord's far edge
             total += ink_overlap(sx - sw, sx + sw, min(far, tip), max(far, tip), boxes, own)
-        return total + BEAM_OFF_PANEL_W * off_panel(tip)
+        return total
+
+    def clamp(tip):
+        """The nearest bar height that keeps the whole bar inside the staff panel."""
+        if panel is None:
+            return tip
+        lo = math.ceil(panel[0] + half)
+        hi = math.floor(panel[1] - half)
+        return max(lo, min(hi, tip))
+
+    def clears_own(tip, up):
+        """True when the stems still hold the group's own noteheads off the bar stack."""
+        if up:
+            return tip <= min(st[1] for st in stops) - tight_reach
+        return tip >= max(st[2] for st in stops) + tight_reach
 
     def place(up):
         """The bar's height with the stems `up`, and what it would cover there."""
         base = round(min(st[1] for st in stops) - reach) if up \
             else round(max(st[2] for st in stops) + reach)
-        best, best_hit = base, run_on(base, up)
-        if best_hit <= 0.0:
-            return best, best_hit
         away = -1 if up else 1                   # outboard: further from the group's notes
-        for k in range(step, slide + step, step):
-            cand = round(base + away * k)
-            hit = run_on(cand, up)
+        best, best_hit = None, None
+        for k in range(0, slide + step, step):
+            tip = clamp(round(base + away * k))
+            if not clears_own(tip, up):
+                continue
+            hit = run_on(tip, up)
+            if best_hit is None or hit < best_hit:
+                best, best_hit = tip, hit
             if hit <= 0.0:
-                return cand, hit
-            if hit < best_hit:
-                best, best_hit = cand, hit
-        return best, best_hit
+                return best, best_hit
+        if best is not None:
+            return best, best_hit
+        # Even the shortest stem the bars allow does not fit in the panel. Nothing this
+        # direction can draw is acceptable, so it loses to any side that can be drawn.
+        return base, run_on(base, up) + BEAM_OFF_PANEL_COST
 
     first_tip, first_hit = place(default_up)
     other_tip, other_hit = place(not default_up)
-    # A bar drawn off the staff panel is worse than one drawn across a note, so turning
-    # the stems over is not a licence to leave the panel: a direction whose bar fits beats
-    # one whose bar does not, whatever it would have covered. When both fit - the usual
-    # case - it is the covering that decides, and the engraver's direction wins a tie.
-    if off_panel(first_tip) <= 0.0 and off_panel(other_tip) > 0.0:
-        return default_up, first_tip
-    if off_panel(other_tip) <= 0.0 and off_panel(first_tip) > 0.0:
-        return not default_up, other_tip
     if other_hit < first_hit:
         return not default_up, other_tip
     return default_up, first_tip
@@ -694,7 +724,8 @@ def place_stem(up, x, y_top, y_bot, stem_len, flags, sp, boxes, own):
 
 
 def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: float, usable_w: float,
-                       margin_left: float, s: float, beat_len: float = 0.5) -> dict:
+                       margin_left: float, s: float, beat_len: float = 0.5,
+                       bar_times: Optional[List[float]] = None) -> dict:
     """
     Computes rendering info for notes in a system:
     x coordinate (with clashing/overlap offset), clef, step_draw, octave_shift, label_text.
@@ -703,7 +734,10 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
     Only a real clash moves a note sideways:
     - notes a second (or unison) apart in the same clef, which would overlap head-on;
     - notes that follow in time so closely that the second one's sharp or the first one's
-      dot / flag would run into it.
+      dot / flag would run into it;
+    - a note whose ink would be printed on a bar line (MuseScore keeps noteBarDistance
+      between the two, styledef.cpp). `bar_times` is where the system's bar lines stand -
+      the times `StaffView.draw` draws them at; without them no note is moved for a bar.
     The other notes of a chord stay on the same x, so it reads as a chord, not a staircase.
     """
     info = {}
@@ -733,6 +767,7 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
                 "step_draw": step_draw,
                 "octave_shift": oct_shift,
                 "label": label,
+                "value": note_value(n.duration, beat_len),
             }
 
     # Process each cluster for x-offsets when notes clash in same clef
@@ -791,6 +826,42 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
         return tail
 
     min_gap = nw + 1.0
+
+    # A bar line is music too: a note may not be printed on top of it. MuseScore keeps
+    # noteBarDistance (1.5 spaces, styledef.cpp) between a note's ink and the bar line, so a
+    # note at the start of a measure stands off it by its accidental's width plus that gap.
+    if bar_times:
+        bar_gap = NOTE_BAR_DISTANCE_SP * s
+
+        def cluster_left_ink(cluster: List[Note]) -> float:
+            """How far to the left of their x the notes of `cluster` really reach."""
+            reach = 0.0
+            for n in cluster:
+                head = note_shape(n.duration, beat_len)[0]
+                left, _top, right, _bottom = notation.HEAD_BOX[head]
+                half = (right - left) * s / 2.0
+                # ledger lines reach a legerLineExtension past the head on each side
+                r = half + notation.LEDGER_EXT_SP * s
+                if diatonic_step(n.pitch)[1]:       # the sharp, left of the head
+                    r = max(r, half + (right - left) * s + notation.ACC_DIST_SP * s)
+                reach = max(reach, r)
+            return reach
+
+        for cluster in clusters:
+            # the bar line this cluster starts after (a note exactly on it counts as after)
+            before = [bt for bt in bar_times if bt <= cluster[0].start + 1e-9]
+            if not before:
+                continue
+            bx = margin_left + (max(before) - sys_start) / sys_duration * usable_w
+            left_ink = min(info[id(n)]["x"] for n in cluster) - cluster_left_ink(cluster)
+            want = bx + bar_gap
+            if left_ink < want:
+                x_max = max(info[id(n)]["x"] for n in cluster)
+                shift = min(want - left_ink, max(0.0, right_limit - x_max))
+                if shift > 0:
+                    for n in cluster:
+                        info[id(n)]["x"] += shift
+
     for i in range(1, len(clusters)):
         prev_cluster, curr_cluster = clusters[i - 1], clusters[i]
         # Notes on different staves are nowhere near each other: nothing to spread.
@@ -809,6 +880,40 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
             if shift > 0:
                 for n in curr_cluster:
                     info[id(n)]["x"] += shift
+
+    # A note just *before* a bar line: the next bar may not cut through its flag or its
+    # dot either. Proportional spacing can leave only a couple of pixels there, so the
+    # note is pulled left - as far as the note before it leaves room, and no further.
+    def pull_left_of(i: int, cluster: List[Note], bx: float):
+        right_ink = max(info[id(n)]["x"] for n in cluster) + cluster_tail(cluster)
+        over = right_ink - (bx - NOTE_BAR_DISTANCE_SP * s)
+        if over <= 0:
+            return
+        room = float("inf")
+        clefs = {info[id(n)]["clef"] for n in cluster}
+        for j in range(i - 1, -1, -1):
+            prev = clusters[j]
+            if clefs & {info[id(n)]["clef"] for n in prev}:
+                room = (min(info[id(n)]["x"] for n in cluster)
+                        - max(info[id(n)]["x"] for n in prev)
+                        - cluster_tail(prev) - min_gap)
+                break
+        shift = min(over, max(0.0, room))
+        if shift > 0:
+            for n in cluster:
+                info[id(n)]["x"] -= shift
+
+    if bar_times:
+        for i, cluster in enumerate(clusters):
+            after = [bt for bt in bar_times if bt > cluster[0].start + 1e-9]
+            if after:
+                pull_left_of(i, cluster, margin_left
+                             + (min(after) - sys_start) / sys_duration * usable_w)
+
+    # The system's own ending bar line: a note at the very end of the system is drawn at
+    # the paper's edge, right on the bar, so it gives up the noteBarDistance too.
+    for i, cluster in enumerate(clusters):
+        pull_left_of(i, cluster, right_limit - 0.5)
 
     return info
 
@@ -830,9 +935,10 @@ def draw_dashed_line(surf: pygame.Surface, color: Tuple[int, int, int], start_po
         curr += dash_len + space_len
 
 
-# How far the bracket's dashed line keeps off the notes it covers: a bit under a third of a
-# staff space, so it sits close enough to read as part of them and far enough to be clear.
-OCTAVE_GAP_SPACES = 0.35
+# How far the bracket's dashed line keeps off the ink it covers. A stem turned the other
+# way pokes past its notehead, so the line is measured from what the group really draws
+# (heads, stems, beams) and then given this much clear air above or below it.
+OCTAVE_GAP_SPACES = 0.75
 
 
 def draw_octave_brackets(surf: pygame.Surface, notes_info: dict, sys_notes: List[Note],
@@ -843,12 +949,14 @@ def draw_octave_brackets(surf: pygame.Surface, notes_info: dict, sys_notes: List
 
     A group holds notes shifted by their own amount (get_octave_transposition), so it
     covers a range of drawn heights - a chord of E7 + C6 puts the E7 at -1.5 sp and the
-    C6 at -2.5 sp from the treble middle line. The line's height is worked out from the
-    group's own notes, so it always clears all of them: fully above for 8va/15ma (and
-    above an up-stem too, which pokes higher), fully below for 8vb/15mb. `local_rect` is
-    the staff panel, and the line is kept inside it - for the few pitches whose notes sit
-    right at the panel's edge the clamp wins, since a bracket off the panel is worse than
-    one crossing a notehead.
+    C6 at -2.5 sp from the treble middle line. The line's height is worked out from the ink
+    the group really draws - noteheads, and the stems, flags and beams that reach past them
+    on the side the bracket is going - so it always clears all of it: fully above for
+    8va/15ma, fully below for 8vb/15mb. `notes_info` carries the stem directions the layout
+    settled on (call this after the beams are placed); called on its own it falls back to
+    the engraver's directions. `local_rect` is the staff panel, and the line is kept inside
+    it - for the few pitches whose notes sit right at the panel's edge the clamp wins, since
+    a bracket off the panel is worse than one crossing a notehead.
     """
     if not sys_notes:
         return
@@ -887,6 +995,33 @@ def draw_octave_brackets(surf: pygame.Surface, notes_info: dict, sys_notes: List
     head_w = notation.NOTEHEAD_W_SP * s / 2.0
     gap = OCTAVE_GAP_SPACES * s
     stem_len = STEM_LEN_SPACES * s
+    beam_half = max(2, round(BEAM_WIDTH_SPACES * s)) / 2.0
+
+    def ink_span(n: Note, clef: str) -> Tuple[float, float]:
+        """
+        The top and bottom of the ink one note of the group draws.
+
+        A stem reaches well past its notehead, and a beamed one ends on a bar that reaches
+        past the stem, so clearing only the noteheads would leave the line sitting on the
+        stems when they happen to point at it - which is exactly the case the bracket is
+        over. The direction is the one the layout settled on, so a stem turned over to keep
+        off the other hand counts where it really is.
+        """
+        info = notes_info[id(n)]
+        y = note_y(info["step_draw"], clef, treble_mid_y, bass_mid_y, s)
+        top, bot = y - head_h, y + head_h
+        if info.get("value") == WHOLE:                  # a whole note has no stem
+            return top, bot
+        up = info.get("beam_stem_up", info.get("chord_stem_up"))
+        if up is None:                                  # no layout behind us: the engraver's
+            up = stem_up_for([info["step_draw"]],
+                             TREBLE_MID_STEP if clef == CLEF_TREBLE else BASS_MID_STEP)
+        tip = info.get("beam_tip_y")
+        if tip is not None:
+            return min(top, tip - beam_half), max(bot, tip + beam_half)
+        if up:
+            return min(top, info.get("y_top", y) - stem_len), bot
+        return top, max(bot, info.get("y_bot", y) + stem_len)
 
     # Every notehead on this system, per staff: the bracket's own height comes from the notes
     # of its group, but its label sits to the left of them and could land on a notehead from
@@ -912,10 +1047,9 @@ def draw_octave_brackets(surf: pygame.Surface, notes_info: dict, sys_notes: List
         lbl_w = lbl_surf.get_width()
         lbl_h = lbl_surf.get_height()
 
-        steps = [notes_info[id(n)]["step_draw"] for n in grp_notes]
-        ys = [note_y(st, clef, treble_mid_y, bass_mid_y, s) for st in steps]
-        mid_step = TREBLE_MID_STEP if clef == CLEF_TREBLE else BASS_MID_STEP
-        up = stem_up_for(steps, mid_step)
+        spans = [ink_span(n, clef) for n in grp_notes]
+        top_ink = min(sp[0] for sp in spans)
+        bot_ink = max(sp[1] for sp in spans)
 
         # Notes of *other* groups that the label, printed to the left of this group's first
         # note, would print on. (This group's own notes are already accounted for below.)
@@ -923,10 +1057,10 @@ def draw_octave_brackets(surf: pygame.Surface, notes_info: dict, sys_notes: List
                     if band[0] not in grp_ids
                     and band[2] >= x_min - gap and band[1] <= x_min + lbl_w + gap]
         if clef == CLEF_TREBLE:
-            # 8va / 15ma: fully above the notes, and above a stem that pokes further up
-            bracket_y = min(ys) - head_h - (stem_len if up else 0.0) - gap
+            # 8va / 15ma: fully above everything the group draws on that side
+            bracket_y = top_ink - gap
             # ...and, if the panel has room for it, clear of the noteheads the label would
-            # print on. When it does not fit, the height that clears this group's own notes
+            # print on. When it does not fit, the height that clears this group's own ink
             # stands: that is the line's job, and pushing further would only land the whole
             # bracket somewhere worse.
             if touching:
@@ -935,27 +1069,30 @@ def draw_octave_brackets(surf: pygame.Surface, notes_info: dict, sys_notes: List
                     bracket_y = min(bracket_y, want)
             if local_rect is not None:
                 bracket_y = max(bracket_y, local_rect.top + gap)
-            edge = min(ys) - head_h - gap                 # where the hook should stop
+            edge = top_ink                                # the group's own nearest ink
         else:
-            # 8vb / 15mb: fully below the notes, and below a stem that pokes further down
-            bracket_y = max(ys) + head_h + (0.0 if up else stem_len) + gap
+            # 8vb / 15mb: fully below everything the group draws on that side
+            bracket_y = bot_ink + gap
             if touching:
                 want = max(b[4] for b in touching) + lbl_h * 0.5 + gap
                 if local_rect is None or want <= local_rect.bottom - gap:
                     bracket_y = max(bracket_y, want)
             if local_rect is not None:
                 bracket_y = min(bracket_y, local_rect.bottom - gap)
-            edge = max(ys) + head_h + gap
+            edge = bot_ink
 
         surf.blit(lbl_surf, (round(x_min), round(bracket_y - lbl_h * 0.5)))
         line_x_start = x_min + lbl_w + 3
         if x_max > line_x_start:
             draw_dashed_line(surf, color, (line_x_start, bracket_y), (x_max, bracket_y), width=line_w)
-            # The hook points back at the notes: down for 8va, up for 8vb, its tip stopping
-            # just short of the group's nearest ink (never past it, never floating off it).
-            hook_y = (edge if (bracket_y - edge) > s * 0.7 else bracket_y - s * 0.7) \
-                if clef == CLEF_TREBLE else \
-                (edge if (edge - bracket_y) > s * 0.7 else bracket_y + s * 0.7)
+            # The hook points back at the notes: down for 8va, up for 8vb, a short turn that
+            # stops just short of the group's nearest ink (never past it, never floating off
+            # at the line's other side).
+            span = max(s * 0.7, gap * 0.8)
+            if clef == CLEF_TREBLE:
+                hook_y = min(bracket_y + span, edge - max(1.0, s * 0.1))
+            else:
+                hook_y = max(bracket_y - span, edge + max(1.0, s * 0.1))
             pygame.draw.line(surf, color, (round(x_max), round(bracket_y)), (round(x_max), round(hook_y)), line_w)
 
 class StaffView:
@@ -1080,7 +1217,7 @@ class StaffView:
                     for m in sys.measures:
                         if m.index > sys.measures[0].index:
                             frac_bar = (m.start_t - sys.start_t) / sys.duration
-                            bx = round(local_rect.x + MARGIN_LEFT + frac_bar * usable_w - 10)
+                            bx = round(local_rect.x + MARGIN_LEFT + frac_bar * usable_w)
                             pygame.draw.line(staff_surf, BAR_LINE_COLOR, (bx, treble_top), (bx, bass_bot), 1)
                             # Measure number at the top of the bar line
                             num_surf = num_font.render(str(m.index + 1), True, MEASURE_NUM_COLOR)
@@ -1102,9 +1239,9 @@ class StaffView:
                     stem_len = round(STEM_LEN_SPACES * s)
 
                     notes_info = compute_notes_info(sys.notes, sys.start_t, sys.duration, usable_w,
-                                                    MARGIN_LEFT, s, get_beat_duration(self.song))
-                    draw_octave_brackets(staff_surf, notes_info, sys.notes, treble_mid_y, bass_mid_y,
-                                         s, local_rect)
+                                                    MARGIN_LEFT, s, get_beat_duration(self.song),
+                                                    [m.start_t for m in sys.measures[1:]]
+                                                    + [sys.start_t + sys.duration])
 
                     # Group sys.notes into chords, the same way compute_notes_info did
                     sorted_notes = sorted(sys.notes, key=lambda n: (n.start, n.pitch))
@@ -1262,7 +1399,10 @@ class StaffView:
                             inner.append(run)
 
                         pygame.draw.lines(staff_surf, STEM_COLOR, False, outer, beam_w)
-                        off = -gap if beam_stem_up else gap
+                        # A run of sixteenths carries a second bar: it goes between the first
+                        # bar and the notes, so the stems run through it (MuseScore stacks
+                        # the beams inward, and `reach` already leaves room for the stack).
+                        off = gap if beam_stem_up else -gap
                         for run in inner:
                             shifted = [(x, y + off) for x, y in run]
                             if len(run) >= 2:
@@ -1270,6 +1410,12 @@ class StaffView:
                             else:      # a lone 16th gets a short stub of its own
                                 x, y = shifted[0]
                                 pygame.draw.line(staff_surf, STEM_COLOR, (x - round(s * 0.6), y), (x, y), beam_w)
+
+                    # The 8va / 8vb brackets come after the stems: their line is kept off the
+                    # ink the group really draws, stems and beams included, so it has to know
+                    # which way each stem ended up pointing.
+                    draw_octave_brackets(staff_surf, notes_info, sys.notes, treble_mid_y, bass_mid_y,
+                                         s, local_rect)
 
                     # Draw individual notes - through notation.py, which draws Leland's
                     # SMuFL glyphs at MuseScore's metrics (see docs/ARCHITECTURE.md)

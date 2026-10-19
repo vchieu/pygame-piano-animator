@@ -391,6 +391,64 @@ def test_notes_never_past_the_system_edge():
     assert all(info[id(n)]["x"] <= margin_left + usable_w + 1e-6 for n in notes)
 
 
+def test_a_note_at_a_measure_start_keeps_off_the_bar_line():
+    # The bar line of a measure sits where its beat is, and a note that starts on that beat
+    # stands a noteBarDistance off it - which for a sharped note means its accidental, not
+    # just its head, has to clear the line.
+    s = 7.0
+    margin_left, usable_w, sys_duration = staff.MARGIN_LEFT, 1000.0, 10.0
+    n_plain = Note(pitch=64, start=4.0, end=4.4, velocity=80, track=0, hand=RIGHT)
+    n_sharp = Note(pitch=61, start=6.0, end=6.4, velocity=80, track=0, hand=RIGHT)
+    info = staff.compute_notes_info([n_plain, n_sharp], 0.0, sys_duration, usable_w,
+                                    margin_left, s, 0.5, [4.0, 6.0])
+    head_half = notation.HEAD_BOX["black"][2] * s / 2.0          # half a notehead's width
+    gap = staff.NOTE_BAR_DISTANCE_SP * s
+
+    bar_x = margin_left + 4.0 / sys_duration * usable_w
+    # a plain note keeps the whole staff space and a bit of ledger line off the line
+    assert info[id(n_plain)]["x"] - (head_half + notation.LEDGER_EXT_SP * s) >= bar_x + gap - 1e-6
+
+    bar_x = margin_left + 6.0 / sys_duration * usable_w
+    accidental = head_half + notation.NOTEHEAD_W_SP * s + notation.ACC_DIST_SP * s
+    assert info[id(n_sharp)]["x"] - accidental >= bar_x + gap - 1e-6, (
+        "the sharp of a note on a downbeat is printed on the bar line")
+    # and it only ever moves sideways, never off the system
+    assert info[id(n_sharp)]["x"] <= margin_left + usable_w
+
+
+def test_a_bar_line_is_drawn_where_its_beat_is(screen):
+    # The measure line and the playback cursor are two drawings of one moment: the line is
+    # at the beat's x, so the note that starts on it sits a noteBarDistance to its right
+    # rather than on it.
+    notes = [_note(60, 0.0, RIGHT), _note(62, 2.0, RIGHT), _note(64, 6.0, RIGHT)]
+    song = _BracketSong(notes)
+    rect = pygame.Rect(0, 0, 1200, 140)
+    usable_w = rect.w - MARGIN_LEFT - MARGIN_RIGHT
+    s = max(4.0, min(12.0, (rect.h - 26) / 14.0))
+
+    sys0 = StaffView(song).systems[0]
+    assert len(sys0.measures) > 1, "the test song should need a bar line inside a system"
+    wanted = [round(MARGIN_LEFT + (m.start_t - sys0.start_t) / sys0.duration * usable_w)
+              for m in sys0.measures[1:]]
+
+    drawn = []
+    real_line = pygame.draw.line
+
+    def spy(surf, color, a, b, width=1):
+        if abs(a[0] - b[0]) <= 1 and abs(a[1] - b[1]) > 6 * s:      # a full staff height
+            drawn.append(a[0])
+        return real_line(surf, color, a, b, width)
+
+    pygame.draw.line = spy
+    try:
+        StaffView(song).draw(screen, rect, 1.0)
+    finally:
+        pygame.draw.line = real_line
+
+    assert wanted[0] in drawn, f"the bar line is not at {wanted[0]} where its beat is"
+    assert wanted[0] - 10 not in drawn, "the bar line was drawn 10px short of its beat"
+
+
 def test_staff_view_zoom_settings():
     song = load_midi(midi_path("demo_song.mid"))
 
@@ -702,6 +760,93 @@ def test_a_beam_never_hangs_off_the_staff_panel(screen):
                 f"a bar at y={y} hangs off the {height}px staff panel")
 
 
+def test_a_beam_bar_stays_inside_the_panel_when_the_stems_can_give_way():
+    # The panel is the paper, but it is not a veto: a clear direction whose bar would poke
+    # out of the panel has its stems shortened until the bar sits on the edge - as long as
+    # its own noteheads stay clear of the stack. Only when not even that much fits does the
+    # bar stay where the engraver asked for it and the other side win.
+    s = 8.0
+    beam_w, gap, nw = 4.0, 6.0, 6.0
+    reach = round(3.5 * s)
+    head_half = notation.NOTEHEAD_H_SP * s / 2.0
+    tight = head_half + (0.5 + 0.25 + staff.BEAM_MIN_HEAD_GAP_SP) * s   # one bar, no stack
+    panel = (0, 60)
+    no_ink, own = [], frozenset()
+
+    # A group high on a short panel: the engraver's bar lands off the top, the stems give
+    # up the length the panel takes and the bar comes down onto the paper.
+    stops = [(100.0, 20.0, 36.0, False)]
+    up, tip = staff.layout_beam(stops, True, reach, beam_w, gap, nw, no_ink, own, s, panel)
+    assert up, "the engraver's direction still wins when both sides are clear"
+    assert tip - beam_w / 2 >= panel[0], f"the bar at {tip} hangs off the top"
+    assert stops[0][1] - tip >= tight - 1e-6, "the stems were shortened past the notehead"
+
+    # A group so low that even a bar on the edge would sit on its own noteheads: flipping
+    # is not an option, so the bar keeps the engraver's direction (and its full length).
+    stops = [(100.0, 40.0, 56.0, False)]
+    up, tip = staff.layout_beam(stops, True, reach, beam_w, gap, nw, no_ink, own, s, panel)
+    assert up, "a downward bar here would land on the group's own noteheads"
+    assert panel[0] <= tip - beam_w / 2 and tip + beam_w / 2 <= panel[1]
+    assert stops[0][1] - tip >= reach - 1e-6, "the panel stole a stem that had room"
+
+    # And one where no bar fits at all on the engraver's side: the other side draws, and
+    # its bar is the one that has to fit.
+    stops = [(100.0, 4.0, 20.0, False)]
+    up, tip = staff.layout_beam(stops, True, reach, beam_w, gap, nw, no_ink, own, s, panel)
+    assert not up, "the side that can be drawn wins over the side that cannot"
+    assert panel[0] <= tip - beam_w / 2 and tip + beam_w / 2 <= panel[1]
+    assert tip - stops[0][2] >= tight - 1e-6
+
+
+def test_a_sixteenths_second_bar_sits_between_the_first_bar_and_the_notes(screen):
+    # A run of sixteenths carries a second bar. It goes between the first bar and the
+    # noteheads - the stems run through it, and the reach asked of the layout already
+    # leaves room for a stack that way. Drawn on the far side it would float past the end
+    # of the stems with nothing holding it up.
+    song = _BracketSong([_note(64, 0.1 * i, RIGHT, dur=0.1) for i in range(4)])
+    rect = pygame.Rect(0, 0, 1200, 140)
+
+    bars, stems = [], []
+    real_lines, real_line = pygame.draw.lines, pygame.draw.line
+    hand_cols = {staff.HAND_COLORS[RIGHT][0], staff.HAND_COLORS[LEFT][0]}
+
+    def spy_lines(surf, color, closed, pts, width):
+        if color == staff.STEM_COLOR and pts and len(pts) >= 2 \
+                and len({p[1] for p in pts}) == 1:
+            bars.append((pts[0][0], pts[-1][0], pts[0][1]))
+        return real_lines(surf, color, closed, pts, width)
+
+    def spy_line(surf, color, a, b, width):
+        if color in hand_cols and abs(a[0] - b[0]) <= 1 and abs(a[1] - b[1]) > 4:
+            stems.append((a[0], min(a[1], b[1]), max(a[1], b[1])))
+        return real_line(surf, color, a, b, width)
+
+    pygame.draw.lines, pygame.draw.line = spy_lines, spy_line
+    try:
+        screen.fill((255, 255, 255))
+        StaffView(song).draw(screen, rect, 1.0)
+    finally:
+        pygame.draw.lines, pygame.draw.line = real_lines, real_line
+
+    stacks = []
+    for i, first in enumerate(bars):
+        for second in bars[i + 1:]:
+            if abs(first[0] - second[0]) <= 1 and abs(first[1] - second[1]) <= 1:
+                stacks.append((first, second))
+    assert stacks, "the four sixteenths should draw two bars"
+    for first, second in stacks:
+        touched = [st for st in stems
+                   if first[0] - 2 <= st[0] <= first[1] + 2 and st[1] <= first[2] <= st[2]]
+        assert touched, "the primary bar is the one the stems reach"
+        st = touched[0]
+        # the stem's far end is the notehead's: the bar sits at the other one
+        head_side = st[2] if abs(st[2] - first[2]) > abs(st[1] - first[2]) else st[1]
+        assert st[1] <= second[2] <= st[2], (
+            "the second bar floats past the stems' ends with nothing holding it up")
+        assert (second[2] - first[2]) * (head_side - first[2]) > 0, (
+            "the second bar is on the wrong side of the first")
+
+
 def test_a_stem_turns_over_rather_than_run_through_another_note():
     # place_stem scores one stem's ink - and its flags - against the noteheads that are
     # not its own chord's, so the two directions can be compared. A stem up from a note
@@ -984,6 +1129,64 @@ def test_the_octave_bracket_clears_the_notes_it_covers(screen):
     # one notehead per bracket falls under its line (the first note of a group sits under
     # the label, to the left of the line), so all four groups were really checked
     assert checked >= 4, f"the test never really checked a bracket ({checked} notes)"
+
+
+def test_the_octave_bracket_clears_the_stems_and_beams_it_covers(screen):
+    # The layout can turn a stem over to keep it off the other hand, so a group's ink can
+    # reach up towards its bracket - with a beam hanging off the stem's end - and the line
+    # has to go over that, not over the noteheads. Here both groups have a stem pointing
+    # straight at its own bracket: the 8va one beamed above its heads, the 8vb one a single
+    # chord whose stem was turned down. (The heights are the ones the layout leaves room
+    # for: a stem of a space and a half, both well inside the panel.)
+    rect = pygame.Rect(0, 0, 1200, 340)
+    s = max(4.0, min(12.0, (rect.h - 26) / 14.0))
+    center_y = rect.centery
+    treble_mid_y = center_y - round(3.0 * s)
+    bass_mid_y = center_y + round(3.0 * s)
+    beam_half = max(2, round(staff.BEAM_WIDTH_SPACES * s)) / 2.0
+    gap = staff.OCTAVE_GAP_SPACES * s
+
+    up_notes = [_note(93, 0.4, RIGHT), _note(96, 1.0, RIGHT)]     # A6, C7 -> 8va
+    down_notes = [_note(21, 4.0, LEFT), _note(26, 4.6, LEFT)]     # A0, D1 -> 8vb
+    song = _BracketSong(up_notes + down_notes)
+    sys0 = staff.StaffView(song).systems[0]
+    info = staff.compute_notes_info(sys0.notes, sys0.start_t, sys0.duration,
+                                    rect.w - MARGIN_LEFT - MARGIN_RIGHT,
+                                    MARGIN_LEFT, s, staff.get_beat_duration(song))
+
+    heads = {}
+    for n in up_notes + down_notes:
+        i = info[id(n)]
+        heads[n] = staff.note_y(i["step_draw"], i["clef"], treble_mid_y, bass_mid_y, s)
+    beam_up_y = min(heads[n] for n in up_notes) - round(1.5 * s)      # a beam above the heads
+    stem_dn_y = max(heads[n] for n in down_notes)                     # a stem turned down
+    for n in up_notes:                                                # the beamed 8va run
+        info[id(n)]["beam_stem_up"] = True
+        info[id(n)]["beam_tip_y"] = beam_up_y
+    for n in down_notes:                                              # the flipped 8vb chord
+        info[id(n)]["chord_stem_up"] = False
+        info[id(n)]["y_bot"] = stem_dn_y
+
+    lines = []
+    real_dashed = staff.draw_dashed_line
+
+    def spy(surf, color, start_pos, end_pos, width=1, **kw):
+        lines.append(start_pos[1])
+        return real_dashed(surf, color, start_pos, end_pos, width=width, **kw)
+
+    staff.draw_dashed_line = spy
+    try:
+        staff.draw_octave_brackets(screen, info, sys0.notes,
+                                   treble_mid_y, bass_mid_y, s, rect)
+    finally:
+        staff.draw_dashed_line = real_dashed
+
+    assert len(lines) == 2, f"the test song should draw two brackets, got {len(lines)}"
+    above, below = sorted(lines)                        # 8va is over the treble, 8vb under
+    assert above <= beam_up_y - beam_half - gap + 1, (
+        f"the 8va line at y={above} sits on the beam at y={beam_up_y}")
+    assert below >= stem_dn_y + staff.STEM_LEN_SPACES * s + gap - 1, (
+        f"the 8vb line at y={below} sits on the stem that points at it")
 
 
 class _RecordingSurface(pygame.Surface):
