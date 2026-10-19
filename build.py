@@ -123,6 +123,8 @@ def command(console=False, tcl_tk=()):
         "--include-data-files=assets/icon.png=assets/icon.png",        # the window icon
         "--include-data-files=assets/fonts/*.ttf=assets/fonts/",       # the typeface (common.ui_font)
         "--include-data-files=assets/fonts/OFL.txt=assets/fonts/OFL.txt",   # ...and its licence
+        "--include-data-files=assets/fonts/Leland.otf=assets/fonts/Leland.otf",  # the music font (notation.py)
+        "--include-data-files=assets/fonts/LICENSE-Leland.txt=assets/fonts/LICENSE-Leland.txt",   # ...and its licence
         # tools and tests that the app never imports
         "--nofollow-import-to=pig_eval,learn_weights,tests,conftest,pytest",
         "--noinclude-pytest-mode=nofollow",

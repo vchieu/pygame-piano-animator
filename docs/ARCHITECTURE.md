@@ -182,6 +182,59 @@ Detailed design notes, kept up to date as features were added. Start with `CLAUD
 - Pace (this container, 1920 x 1080, the Polonaise, Ninthie): 22 frames/s - the skins' drawing as in playback,
   `tobytes` 7 ms a frame, x264 in its own process alongside; 6:24 of video in about 17 minutes.
 
+## Notation: MuseScore-style note drawing (notation.py, 2026-10-18)
+- The **grand staff's** notes are drawn as **Leland's SMuFL glyphs at MuseScore's metrics**. SMuFL
+  (Standard Music Font Layout) is a set of music symbols in an ordinary font, so a notehead, a flag, an
+  accidental or a dot is a character. Leland is the music font MuseScore engraves with by default:
+  `assets/fonts/Leland.otf` (89 KB, SIL OFL 1.1, `LICENSE-Leland.txt` beside it, both in build.py's
+  `--include-data-files`; the UI typeface is separate and still goes through `common.ui_font`). 89 KB,
+  not Bravura's 512 KB, and there is no font picker - Leland only.
+- The **falling notes over the keyboard and the editor's piano roll are untouched**: they stay the
+  rounded blocks they have always been. A note in those two views is a bar of *time* as much as a
+  note, they follow the lane the key sits in rather than a staff, and the app's own look is what they
+  are for.
+- `notation.py` (flat layout, imported by name like every other module):
+  - `ENGRAVING` - MuseScore's style defaults in staff spaces (sp), read off
+    `src/engraving/style/styledef.cpp:263-313` and Leland's own `engravingDefaults`: stemWidth 0.10,
+    stemLength 3.5, beamWidth 0.5, staffLineWidth 0.11, ledgerLineWidth 0.16, ledgerLineLength 0.33,
+    dotNoteDistance 0.5, dotDotDistance 0.65, accidentalNoteDistance 0.25. SMuFL: one em is four sp
+    (`SP_PER_EM`), so a `pygame.freetype.Font` at 256 px is 64 px/sp.
+  - `GLYPHS` - the SMuFL codepoints (`noteheadBlack` U+E0A4, `flag8thUp` U+E240, `augmentationDot` U+E1E7,
+    ...). A public standard, so they are hardcoded rather than parsed from the 157 KB `leland_metadata.json`
+    (which isn't bundled).
+  - `HEAD_BOX` - each notehead's ink box in sp from that metadata (black and half 1.300 x 1.060, whole
+    1.492 x 1.080; the origin is the notehead's left edge, level with its centre).
+  - the anchors - `stem_up_se_sp()` (1.3, -0.16), `stem_down_nw_sp()` (0, 0.168),
+    the flags' `stemUpNW` / `stemDownSW` - with the y negated, as MuseScore does (it draws y down,
+    SMuFL counts y up; `engravingfont.cpp:696-752`). A stem is placed by its anchor, never by arithmetic.
+  - `glyph(name, sp, color)` - the ink: each glyph is rendered **once** as a white mask at 64 px/sp,
+    `smoothscale`d down to the size asked for and tinted with `fill(color, BLEND_RGBA_MULT)`. Cached in one
+    dict by (name, sp, colour), with `sp` quantised to quarter spaces and the dict emptied past `CACHE_MAX`
+    (the same pattern as `Keyboard._base` and `_pedal_image`); `pygame.quit()` drops the font and the glyphs
+    (a freetype font kept past it crashes when used, and pygame calls a quit function only once, so the hook
+    is registered again whenever the cache starts over - as `common.ui_font` does).
+  - The font is opened **lazily and failure-tolerantly**: importing `notation` touches nothing, and if
+    `Leland.otf` is missing (a stripped build) every painter falls back to the plain shapes it drew before -
+    the staff's ellipses and line. Nothing crashes.
+  - `note_shape(duration, beat_len)` → `(head, flags, dots)`. Its thresholds are the ones `staff.note_value`
+    has always used, so all eight classifications (and every test that pins them) are unchanged;
+    `staff.note_value` is now a lookup on this.
+- `draw_staff_note(surf, x, y, sp, shape, color, stem_up, sounding, stem=, beamed=, sharp=, on_line=)` -
+  drawn in MuseScore's order, accidental → notehead → dots → stem + flag (`TDraw::draw(const
+  ShadowNote*)`, tdraw.cpp:2598-2695). `(x, y)` is the notehead's centre on its line or space. `stem` is the
+  stem's `(from_y, to_y)`, which `staff.py` works out so the notes of a chord share one stem and a beamed
+  note's stem reaches its beam; `beamed` skips the flags (the beam is drawn there), `sharp` draws the
+  accidental left of the head, `on_line` lifts the dot into the space above (tdraw.cpp:2648), and a sounding
+  note is drawn lighter, as before.
+- What did not change in `staff.py`: beams, ledger-line *counting*, clash offsets, clefs, the time
+  signature, the cursor and the paging are all still its own - only the notehead, accidental, flag and dot
+  shapes changed (`draw_sharp` and `draw_flags` are gone), the staff lines are `STAFF_LINE_SP` thick
+  (0.11 sp), ledger lines `LEDGER_SP` (0.16) reaching `LEDGER_EXT_SP` (0.33) past the head on each side
+  (`notation.ledger_line`), and `staff.STEM_WIDTH_SPACES` moved 0.12 → 0.10, MuseScore's value.
+- The hand colours (`HAND_COLORS`) are still the note colour. Tests: `tests/test_notation.py` (metrics,
+  the codepoint table, the glyph cache, every glyph at four sizes, the painter's geometry, the no-font
+  fallback).
+
 ## Fonts and frame pacing (v26.1.19.SNAPSHOT-14, -15)
 - Every font comes from the bundled typeface: Source Sans Pro, regular and bold (`assets/fonts`, SIL Open Font
   License, `OFL.txt` beside them; build.py includes them), through `common.ui_font(size, bold)` at `FONT_SCALE`

@@ -22,8 +22,10 @@ from typing import List, Optional, Tuple
 import pygame
 
 from common import (ACCENT, BAR_BG, BAR_LINE, BG, HAND_COLORS, PANEL_EDGE,
-                    TEXT, TEXT_DIM, mix, ui_font)
+                    TEXT, TEXT_DIM, ui_font)
 from midi_loader import LEFT, RIGHT, Note
+import notation
+from notation import note_shape
 
 CLEF_TREBLE = "treble"
 CLEF_BASS = "bass"
@@ -88,9 +90,10 @@ MAX_SCALE = 1.5
 MAX_BEAM_CHORDS = 8
 
 # These are the values MuseScore engraves with (src/engraving/style/styledef.cpp:
-# stemLength 3.5, stemWidth 0.10, beamWidth 0.5), all measured in staff spaces.
+# stemLength 3.5, stemWidth 0.10, beamWidth 0.5), all measured in staff spaces -
+# and what notation.py draws the notes with.
 STEM_LEN_SPACES = 3.5
-STEM_WIDTH_SPACES = 0.12
+STEM_WIDTH_SPACES = 0.10
 BEAM_WIDTH_SPACES = 0.5
 # The gap between two beam bars: MuseScore's beamsHeight is beamCount * 0.75 - 0.25 spaces
 # for the whole stack, so bar centre to bar centre is 0.75 * (bars - 1).
@@ -194,24 +197,25 @@ def get_beat_duration(song, t: float = 0.0) -> float:
 
 
 def note_value(duration: float, beat_len: float = 0.5) -> str:
-    """Classify note value string based on duration and beat duration."""
-    beats = duration / max(0.001, beat_len)
-    if beats >= 3.2:
-        return WHOLE
-    elif beats >= 2.4:
-        return DOTTED_HALF
-    elif beats >= 1.6:
-        return HALF
-    elif beats >= 1.2:
-        return DOTTED_QUARTER
-    elif beats >= 0.7:
-        return QUARTER
-    elif beats >= 0.55:
-        return DOTTED_EIGHTH
-    elif beats >= 0.35:
-        return EIGHTH
-    else:
-        return SIXTEENTH
+    """Classify note value string based on duration and beat duration.
+
+    The thresholds live in notation.note_shape (the drawing core); this keeps the
+    names the staff has always used.
+    """
+    return _NOTE_VALUES[note_shape(duration, beat_len)]
+
+
+# the eight note values, by the shape notation.note_shape gives for them
+_NOTE_VALUES = {
+    ("whole", 0, 0): WHOLE,
+    ("half", 0, 1): DOTTED_HALF,
+    ("half", 0, 0): HALF,
+    ("black", 0, 1): DOTTED_QUARTER,
+    ("black", 0, 0): QUARTER,
+    ("black", 1, 1): DOTTED_EIGHTH,
+    ("black", 1, 0): EIGHTH,
+    ("black", 2, 0): SIXTEENTH,
+}
 
 
 class Measure:
@@ -359,18 +363,6 @@ def draw_bass_clef(surf: pygame.Surface, x: float, mid_y: float, s: float, color
     pygame.draw.circle(surf, color, (dot_x, round(f_line_y + s * 0.5)), dot_r)
 
 
-def draw_sharp(surf: pygame.Surface, x: float, y: float, s: float, color: Tuple[int, int, int]):
-    """Draw a musical sharp (♯) accidental at (x, y)."""
-    h = s * 0.9
-    w = s * 0.5
-    # Two vertical lines
-    pygame.draw.line(surf, color, (round(x - w * 0.3), round(y - h)), (round(x - w * 0.3), round(y + h)), 1)
-    pygame.draw.line(surf, color, (round(x + w * 0.3), round(y - h)), (round(x + w * 0.3), round(y + h)), 1)
-    # Two slanted cross bars
-    pygame.draw.line(surf, color, (round(x - w * 0.8), round(y - h * 0.2)), (round(x + w * 0.8), round(y - h * 0.5)), 2)
-    pygame.draw.line(surf, color, (round(x - w * 0.8), round(y + h * 0.4)), (round(x + w * 0.8), round(y + h * 0.1)), 2)
-
-
 def draw_arpeggio_wavy_line(surf: pygame.Surface, x: float, y_top: float, y_bottom: float, s: float, color: Tuple[int, int, int]):
     """Draw a vertical squiggly arpeggio line ('con giun') to the left of a rolled chord."""
     if y_bottom <= y_top:
@@ -397,33 +389,6 @@ def draw_arpeggio_wavy_line(surf: pygame.Surface, x: float, y_top: float, y_bott
             (top_x + round(s * 0.35), top_y + round(s * 0.2)),
         ]
         pygame.draw.polygon(surf, color, ah_pts)
-
-
-def draw_flags(surf: pygame.Surface, tip_x: float, tip_y: float, s: float, stem_up: bool, color: Tuple[int, int, int], count: int = 1):
-    """Draw 1 or 2 flags on the tip of a stem swooping to the right using elegant curved lines."""
-    flag_spacing = max(3.5, s * 0.48)
-    line_w = max(1, round(s * 0.18))
-    for f in range(count):
-        dy = (f * flag_spacing) if stem_up else (-f * flag_spacing)
-        y0 = tip_y + dy
-        if stem_up:
-            p0 = (tip_x, y0)
-            p1 = (tip_x + s * 0.85, y0 + s * 0.5)
-            p2 = (tip_x + s * 0.65, y0 + s * 1.8)
-        else:
-            p0 = (tip_x, y0)
-            p1 = (tip_x + s * 0.85, y0 - s * 0.5)
-            p2 = (tip_x + s * 0.65, y0 - s * 1.8)
-
-        pts = []
-        for i in range(16):
-            t = i / 15.0
-            bx = (1 - t) ** 2 * p0[0] + 2 * (1 - t) * t * p1[0] + t ** 2 * p2[0]
-            by = (1 - t) ** 2 * p0[1] + 2 * (1 - t) * t * p1[1] + t ** 2 * p2[1]
-            pts.append((round(bx), round(by)))
-
-        if len(pts) >= 2:
-            pygame.draw.lines(surf, color, False, pts, line_w)
 
 
 def get_octave_transposition(n: Note, clef: str) -> Tuple[int, int, str]:
@@ -807,12 +772,13 @@ class StaffView:
         left_x = local_rect.x + 18
         right_x = local_rect.right - 12
 
-        # 3. Staff lines (5 for Treble, 5 for Bass)
+        # 3. Staff lines (5 for Treble, 5 for Bass) - MuseScore's thickness (staffLineThickness)
+        line_w = max(1, round(notation.STAFF_LINE_SP * s))
         for i in range(-2, 3):
             ty = round(treble_mid_y + i * s)
-            pygame.draw.line(staff_surf, line_color, (left_x, ty), (right_x, ty), 1)
+            pygame.draw.line(staff_surf, line_color, (left_x, ty), (right_x, ty), line_w)
             by = round(bass_mid_y + i * s)
-            pygame.draw.line(staff_surf, line_color, (left_x, by), (right_x, by), 1)
+            pygame.draw.line(staff_surf, line_color, (left_x, by), (right_x, by), line_w)
 
         # Left connecting bar and bracket
         treble_top = round(treble_mid_y - 2 * s)
@@ -1045,7 +1011,8 @@ class StaffView:
                                 x, y = shifted[0]
                                 pygame.draw.line(staff_surf, STEM_COLOR, (x - round(s * 0.6), y), (x, y), beam_w)
 
-                    # Draw individual notes
+                    # Draw individual notes - through notation.py, which draws Leland's
+                    # SMuFL glyphs at MuseScore's metrics (see docs/ARCHITECTURE.md)
                     rendered_chord_stems = set()
                     for n in sorted_notes:
                         n_info = notes_info[id(n)]
@@ -1056,103 +1023,66 @@ class StaffView:
                         ny = note_y(step, clef, treble_mid_y, bass_mid_y, s)
 
                         sounding = (id(n) in active_ids) or (n.start <= t < n.end)
-
                         hand_col = HAND_COLORS.get(n.hand, HAND_COLORS[RIGHT])[0]
-                        color = mix(hand_col, (255, 255, 255), 0.5) if sounding else hand_col
 
                         b_len = get_beat_duration(self.song, n.start)
-                        nv = note_value(n.duration, b_len)
+                        shape = note_shape(n.duration, b_len)
+                        head_half = notation.HEAD_BOX[shape[0]][2] * 0.5 * s
 
-                        is_hollow = nv in (WHOLE, DOTTED_HALF, HALF)
-                        has_stem = (nv != WHOLE)
-                        has_dot = nv in (DOTTED_HALF, DOTTED_QUARTER, DOTTED_EIGHTH)
-                        flags = 2 if nv == SIXTEENTH else (1 if nv in (EIGHTH, DOTTED_EIGHTH) else 0)
+                        # A sounding note keeps the red halo it had before (drawn under
+                        # the notehead, so it shows around it)
+                        if sounding:
+                            pad = max(2, round(s * 0.25))
+                            halo = pygame.Rect(round(nx - head_half - pad), round(ny - nh - pad),
+                                               round(2 * head_half + 2 * pad), round(2 * nh + 2 * pad))
+                            pygame.draw.ellipse(staff_surf, CURSOR_COLOR, halo, 2)
 
-                        # Accidental (sharp ♯)
-                        if is_sharp:
-                            sharp_col = CURSOR_COLOR if sounding else (30, 30, 40)
-                            draw_sharp(staff_surf, nx - nw - round(s * 0.8), ny, s, sharp_col)
-
-                        # Ledger lines
+                        # Ledger lines: MuseScore's thickness, reaching a ledgerLineLength
+                        # past the notehead on each side (ChordLayout::updateLedgerLines)
                         ledger_col = line_color
-                        lx0, lx1 = round(nx - nw - 3), round(nx + nw + 3)
+                        ext = notation.LEDGER_EXT_SP * s
+                        lx0, lx1 = nx - head_half - ext, nx + head_half + ext
                         if clef == CLEF_TREBLE:
                             if step <= 28:  # Middle C and below
                                 for st in range(28, step - 1, -2):
                                     ly = round(treble_mid_y - (st - TREBLE_MID_STEP) * (s * 0.5))
-                                    pygame.draw.line(staff_surf, ledger_col, (lx0, ly), (lx1, ly), 1)
+                                    notation.ledger_line(staff_surf, lx0, lx1, ly, s, ledger_col)
                             elif step >= 40:  # A5 and above
                                 for st in range(40, step + 1, 2):
                                     ly = round(treble_mid_y - (st - TREBLE_MID_STEP) * (s * 0.5))
-                                    pygame.draw.line(staff_surf, ledger_col, (lx0, ly), (lx1, ly), 1)
+                                    notation.ledger_line(staff_surf, lx0, lx1, ly, s, ledger_col)
                         else:  # Bass clef
                             if step >= 28:  # Middle C and above
                                 for st in range(28, step + 1, 2):
                                     ly = round(bass_mid_y - (st - BASS_MID_STEP) * (s * 0.5))
-                                    pygame.draw.line(staff_surf, ledger_col, (lx0, ly), (lx1, ly), 1)
+                                    notation.ledger_line(staff_surf, lx0, lx1, ly, s, ledger_col)
                             elif step <= 16:  # E2 and below
                                 for st in range(16, step - 1, -2):
                                     ly = round(bass_mid_y - (st - BASS_MID_STEP) * (s * 0.5))
-                                    pygame.draw.line(staff_surf, ledger_col, (lx0, ly), (lx1, ly), 1)
+                                    notation.ledger_line(staff_surf, lx0, lx1, ly, s, ledger_col)
 
                         # Stem and flags
                         stem_up = n_info.get("beam_stem_up", n_info.get("chord_stem_up", (step < TREBLE_MID_STEP if clef == CLEF_TREBLE else step < BASS_MID_STEP)))
                         y_top = n_info.get("y_top", ny)
                         y_bot = n_info.get("y_bot", ny)
-                        stem_col = mix(STEM_COLOR, color, 0.5) if sounding else STEM_COLOR
 
                         # One stem for the whole chord: notes struck together on one staff
                         # share a single stem, all pointing the same way.
                         stem_key = n_info.get("stem_key", (id(n), clef))
-                        if has_stem and stem_key not in rendered_chord_stems:
+                        stem = None
+                        if shape[0] != "whole" and stem_key not in rendered_chord_stems:
                             rendered_chord_stems.add(stem_key)
                             if stem_up:
-                                sx = round(nx + nw - 1)
                                 tip_y = n_info.get("beam_tip_y", round(y_top - stem_len))
-                                pygame.draw.line(staff_surf, stem_col, (sx, round(y_bot)), (sx, tip_y), max(1, round(STEM_WIDTH_SPACES * s)))
-                                if flags > 0 and id(n) not in beamed_note_ids:
-                                    draw_flags(staff_surf, sx, tip_y, s, True, stem_col, flags)
+                                stem = (round(y_bot), tip_y)
                             else:
-                                sx = round(nx - nw + 1)
                                 tip_y = n_info.get("beam_tip_y", round(y_bot + stem_len))
-                                pygame.draw.line(staff_surf, stem_col, (sx, round(y_top)), (sx, tip_y), max(1, round(STEM_WIDTH_SPACES * s)))
-                                if flags > 0 and id(n) not in beamed_note_ids:
-                                    draw_flags(staff_surf, sx, tip_y, s, False, stem_col, flags)
+                                stem = (round(y_top), tip_y)
 
-                        # Notehead
-                        head_w = round(nw * 1.15) if nv == WHOLE else nw
-                        note_rect = pygame.Rect(round(nx - head_w), round(ny - nh), round(2 * head_w), round(2 * nh))
-
-                        if is_hollow:
-                            th = max(2, int(s * 0.28))
-                            border_col = mix(color, (0, 0, 0), 0.3)
-                            inner_col = mix(color, (255, 255, 255), 0.75) if sounding else STAFF_BG
-                            pygame.draw.ellipse(staff_surf, border_col, note_rect)
-                            inner_rect = note_rect.inflate(-round(2 * th), -round(2 * th))
-                            if inner_rect.w > 0 and inner_rect.h > 0:
-                                pygame.draw.ellipse(staff_surf, inner_col, inner_rect)
-                            if sounding:
-                                glow_rect = note_rect.inflate(4, 4)
-                                pygame.draw.ellipse(staff_surf, CURSOR_COLOR, glow_rect, 2)
-                        else:  # solid
-                            pygame.draw.ellipse(staff_surf, color, note_rect)
-                            border_col = (25, 25, 35) if sounding else mix(color, (0, 0, 0), 0.4)
-                            pygame.draw.ellipse(staff_surf, border_col, note_rect, 1)
-                            if sounding:
-                                center_rect = note_rect.inflate(-round(nw * 0.7), -round(nh * 0.7))
-                                if center_rect.w > 0 and center_rect.h > 0:
-                                    pygame.draw.ellipse(staff_surf, (255, 255, 255), center_rect)
-                                glow_rect = note_rect.inflate(4, 4)
-                                pygame.draw.ellipse(staff_surf, CURSOR_COLOR, glow_rect, 2)
-
-                        # Dot (chấm dôi)
-                        if has_dot:
-                            dot_x = round(nx + head_w + max(3, int(s * 0.35)))
-                            # On a line -> place dot in space above
-                            dot_y = round(ny - s * 0.5) if (step % 2 == 0) else round(ny)
-                            dot_r = max(2, int(s * 0.22))
-                            dot_col = CURSOR_COLOR if sounding else mix(color, (0, 0, 0), 0.2)
-                            pygame.draw.circle(staff_surf, dot_col, (dot_x, dot_y), dot_r)
+                        notation.draw_staff_note(staff_surf, nx, ny, s, shape, hand_col, stem_up,
+                                                 sounding, stem=stem,
+                                                 beamed=id(n) in beamed_note_ids,
+                                                 sharp=is_sharp, on_line=(step % 2 == 0))
 
                     # 8. Playback cursor
                     cx = round(self.cursor_x(t, local_rect))

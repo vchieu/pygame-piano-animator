@@ -12,6 +12,8 @@ v20YY.MM.DD.HHMM). Newest first.
 - Notes of a chord share one vertical line, only notes a second apart step aside, and closely following notes keep
   room for their sharp, dot or flag; notes are transposed to 8va / 8vb / 15ma / 15mb where they'd need too many
   ledger lines.
+- The staff's notes are engraved like MuseScore's: real noteheads, flags, accidentals and dots from a proper
+  music font, with stems and ledger lines at the same proportions.
 - The sheet music staff is one of the parts the video export can record, and exporting on a small window no longer
   lets the staff squeeze the falling notes away.
 

@@ -55,6 +55,7 @@ gestures, editor state after scripted keys). Keep tests fast and free of local d
 | `pianist.py` | `Pianist` model (anatomy, behaviour settings, skin), storage in `pianists/` |
 | `hand_editor.py` | "Pianists & hands" studio (browser, overview - with fingers curled by the wheel, `hands.bend_chain` - anatomy, behaviour pages) |
 | `editor.py` | Fingering editor (piano roll, context menus, undo, sequential mode, difficulty, export) |
+| `notation.py` | Drawing staff notes the way MuseScore does: Leland's SMuFL glyphs (bundled, OFL) at MuseScore's metrics and anchors; `staff.py` draws its notes through it, `note_shape` (duration → head/flags/dots) is what `staff.note_value` looks up. Without the font the staff falls back to plain shapes. The falling notes and the editor's roll keep their own blocks |
 | `paths.py` | Where bundled files are (`resource()`) and where the user's data goes (`DATA_DIR`: beside the code from source; `%APPDATA%\Hand-thesia` or a portable `pianists` folder beside the .exe when compiled) |
 | `build.py` | Nuitka single-file build (`dist/Hand-thesia.exe`); `requirements-build.txt`, `assets/` (icon, from `tools/make_icon.py`) |
 | `version.py` | `VERSION` (`vYY.MAJOR.MINOR`, e.g. `v26.1.0`), shown in the window title and bottom-left corner |
@@ -112,6 +113,8 @@ gestures, editor state after scripted keys). Keep tests fast and free of local d
   `pygame.font.SysFont` - the bundled typeface (assets/fonts, OFL) looks the same on every system, unless the
   user chose another (Settings > Font, `common.set_font_choice`; characters it lacks are borrowed from the bundled
   one, `FallbackFont`). Text must fit any font: shorten with `fit_text`.
+  This is about text; the music font (Leland, SMuFL glyphs - noteheads, flags, accidentals) is
+  `notation.py`'s own `pygame.freetype.Font`, not a UI font.
 - Don't commit third-party data (MIDI collections, PIG files, PDFs, reference images) or
   personal `pianists/` files; `.gitignore` covers them.
 - Windows is the main target (the author's machine); paths go through `os.path`, and file
