@@ -100,6 +100,27 @@ BEAM_STEP_SPACES = 0.75
 BEAM_CLEARANCE_SPACES = (2.5, 2.25, 2.0, 1.75)
 
 
+def stem_up_for(steps, mid_step: int) -> bool:
+    """
+    Which way the stems of these notes point on one staff.
+
+    This is MuseScore's ChordLayout::computeAutoStemDirection. Counting lines from the top
+    (line 0 is the top line, the middle line is 2), the two outer notes decide: if they
+    sit on average below the middle line the stems go up, above it they go down, and when
+    the two cancel out you look one note further in.
+    """
+    lines = sorted(((mid_step - st) / 2.0 for st in steps), reverse=True)   # low note first
+    left, right = 0, len(lines) - 1
+    while left <= right:
+        net = lines[left] + lines[right]
+        if net == 0:
+            left += 1
+            right -= 1
+            continue
+        return net > 0
+    return False
+
+
 def min_stem_spaces(beam_count: int) -> float:
     """
     Shortest a beamed note's stem may be, in staff spaces, measured from the notehead's
@@ -869,9 +890,9 @@ class StaffView:
                         for c, c_notes in by_c.items():
                             if not c_notes:
                                 continue
-                            avg_step = sum(notes_info[id(n)]["step_draw"] for n in c_notes) / len(c_notes)
                             mid_step = TREBLE_MID_STEP if c == CLEF_TREBLE else BASS_MID_STEP
-                            chord_stem_up = (avg_step < mid_step)
+                            chord_stem_up = stem_up_for(
+                                [notes_info[id(n)]["step_draw"] for n in c_notes], mid_step)
 
                             ny_list = [note_y(notes_info[id(n)]["step_draw"], c, treble_mid_y, bass_mid_y, s) for n in c_notes]
                             y_top = min(ny_list)
@@ -913,6 +934,19 @@ class StaffView:
                     beam_groups = group_beams(time_clusters, notes_info,
                                              lambda st_: get_beat_duration(self.song, st_), measure_of)
 
+                    # Where every notehead sits. A beam is not allowed to run over one of these that
+                    # belongs to another chord - not even one on the other staff, since a
+                    # bar reaching out of one staff can cross the gap and land on the other.
+                    # MuseScore runs the same check (beamlayout.cpp, checkBeamNoteOverlap)
+                    # and moves the beam clear of the note.
+                    all_heads = []
+                    for n in sys.notes:
+                        i = notes_info[id(n)]
+                        ny_ = note_y(i["step_draw"], i["clef"], treble_mid_y, bass_mid_y, s)
+                        hw = round(nw * 1.15) if note_value(n.duration,
+                                                             get_beat_duration(self.song, n.start)) == WHOLE else nw
+                        all_heads.append((i["x"] - hw, i["x"] + hw, ny_ - nh, ny_ + nh, id(n)))
+
                     # Draw the beams: a bar along the stems, plus a second, shorter bar
                     # inwards for the 16th notes of the run.
                     for c, bg in beam_groups:
@@ -920,9 +954,9 @@ class StaffView:
                         for n in notes_here:
                             beamed_note_ids.add(id(n))
 
-                        avg_step = sum(notes_info[id(n)]["step_draw"] for n in notes_here) / len(notes_here)
                         mid_step = TREBLE_MID_STEP if c == CLEF_TREBLE else BASS_MID_STEP
-                        beam_stem_up = (avg_step < mid_step)
+                        beam_stem_up = stem_up_for(
+                            {notes_info[id(n)]["step_draw"] for n in notes_here}, mid_step)
 
                         # Where each chord's stem starts, and whether the chord needs a second bar.
                         stops = []
@@ -944,6 +978,44 @@ class StaffView:
                         reach = max(stem_len, round(min_stem_spaces(bars) * s))
                         tip = (round(min(st["near"] for st in stops) - reach) if beam_stem_up
                                else round(max(st["near"] for st in stops) + reach))
+
+                        beam_w = max(2, round(BEAM_WIDTH_SPACES * s))
+                        bx0, bx1 = stops[0]["x"], stops[-1]["x"]
+                        own = {id(n) for sub in bg for n in sub}
+
+                        def beam_overlap(y_at):
+                            """How far the bar would sit on top of other chords' noteheads."""
+                            half = beam_w / 2.0
+                            total = 0.0
+                            for hx0, hx1, hy0, hy1, nid in all_heads:
+                                if nid in own:
+                                    continue
+                                # only a note the bar really runs over counts; a head
+                                # grazed at the very tip of the bar is beside it, not on it
+                                if min(hx1, bx1) - max(hx0, bx0) < nw * 0.5:
+                                    continue
+                                ov = min(hy1, y_at + half) - max(hy0, y_at - half)
+                                if ov > 0:
+                                    total += ov
+                            return total
+
+                        # Slide the bar outboard, away from the notes it belongs to, until it
+                        # runs over nothing else. Outboard always keeps clear of its own
+                        # notes, so this can only improve things; if even after a couple of
+                        # spaces something is in the way, take the least bad spot rather than
+                        # the one we started from.
+                        away = -1 if beam_stem_up else 1
+                        step = max(1, round(s * 0.25))
+                        best_tip, best_ov = tip, beam_overlap(tip)
+                        for k in range(1, round(s * 2) + step, step):
+                            cand = round(tip + away * k)
+                            ov = beam_overlap(cand)
+                            if ov <= 0:
+                                best_tip, best_ov = cand, ov
+                                break
+                            if ov < best_ov:
+                                best_tip, best_ov = cand, ov
+                        tip = best_tip
 
                         outer, inner = [], []
                         run = []

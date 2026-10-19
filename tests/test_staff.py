@@ -684,6 +684,34 @@ def test_a_beamed_notehead_never_sits_on_the_beam(screen):
     assert 2 in bars_seen, f"the test never drew a two-bar beam (saw {sorted(bars_seen)})"
 
 
+def test_stem_direction_follows_the_engraver():
+    # MuseScore's ChordLayout::computeAutoStemDirection: counting lines from the top
+    # (line 0 is the top line, the middle line is 2), the two outer notes decide. Below the
+    # middle line the stems go up, above it they go down, and when the two cancel out you
+    # look one note further in.
+    mid = staff.TREBLE_MID_STEP          # B4, the treble middle line
+    top, bottom = mid + 4, mid - 4       # F5 on the top line, E4 on the bottom one
+
+    assert staff.stem_up_for([mid - 3], mid) is True       # low note -> stem up
+    assert staff.stem_up_for([mid + 3], mid) is False      # high note -> stem down
+    assert staff.stem_up_for([mid], mid) is False          # on the line -> down
+    assert staff.stem_up_for([bottom, mid - 2], mid) is True
+    assert staff.stem_up_for([mid + 2, top], mid) is False
+
+    # a chord whose two outer notes cancel falls through to the next pair in
+    assert staff.stem_up_for([mid - 2, mid + 1], mid) is True
+    assert staff.stem_up_for([mid - 1, mid + 2], mid) is False
+
+    # the order the notes come in must not matter
+    steps = [bottom, mid - 2, mid + 2]
+    assert staff.stem_up_for(steps, mid) == staff.stem_up_for(list(reversed(steps)), mid)
+
+    # and it is symmetric about the middle line: swap the clefs' middle lines
+    bmid = staff.BASS_MID_STEP
+    assert staff.stem_up_for([bmid - 3], bmid) is True
+    assert staff.stem_up_for([bmid + 3], bmid) is False
+
+
 def test_beam_and_stem_constants_match_the_engraver():
     # MuseScore engraves with these (src/engraving/style/styledef.cpp, stemlayout.cpp):
     # a 3.5-space stem, a half-space thick bar, and bars 0.75 space apart.
