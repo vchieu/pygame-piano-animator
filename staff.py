@@ -83,9 +83,9 @@ MAX_TARGET_DUR = 20.0
 MIN_SCALE = 0.6
 MAX_SCALE = 1.5
 
-# How many notes one beam may join: a beam is a handful of notes at most, so it never
-# reaches across a passage and ties together notes that have nothing to do with each other.
-MAX_BEAM_CHORDS = 4
+# Upper limit on the notes one beam may join. In practice a beat decides it and this only
+# stops a very fast beat from turning into one endless bar across the whole measure.
+MAX_BEAM_CHORDS = 8
 
 
 def clamp_target_dur(value) -> float:
@@ -433,6 +433,55 @@ def group_chords(sorted_notes: List[Note], beat_len: float) -> List[List[Note]]:
     if curr:
         clusters.append(curr)
     return clusters
+
+
+def is_beamable(sub: List[Note], beat_of) -> bool:
+    """True when a chord is short enough to be joined to its neighbours by a beam."""
+    return note_value(sub[0].duration, beat_of(sub[0].start)) in (EIGHTH, DOTTED_EIGHTH, SIXTEENTH)
+
+
+def group_beams(chords: List[List[Note]], notes_info: dict, beat_of, measure_of) -> List[Tuple[str, List[List[Note]]]]:
+    """
+    Decide which chords a beam joins.
+
+    This follows what an engraver does: a beam gathers the short notes of one beat on
+    one hand of one staff, and stops there. A rest, a longer note, a bar line or the
+    start of the next beat breaks the group, and a group never grows past
+    MAX_BEAM_CHORDS notes - so a beam always reads as one beat's worth of notes and
+    never drags along notes that have nothing to do with each other.
+    """
+    beam_groups: List[Tuple[str, List[List[Note]]]] = []
+    for hand in (RIGHT, LEFT):
+        for c in (CLEF_TREBLE, CLEF_BASS):
+            on_staff = [[n for n in sub if n.hand == hand and notes_info[id(n)]["clef"] == c] for sub in chords]
+            on_staff = [sub for sub in on_staff if sub]
+
+            curr: List[List[Note]] = []
+            for sub in on_staff:
+                n0 = sub[0]
+                b_dur = beat_of(n0.start)
+                m = measure_of.get(id(n0))
+                beat_i = int((n0.start - m.start_t) / b_dur) if m is not None else None
+
+                joined = False
+                if curr and is_beamable(sub, beat_of):
+                    prev = curr[-1][0]
+                    p_m = measure_of.get(id(prev))
+                    p_beat = int((prev.start - p_m.start_t) / b_dur) if p_m is not None else None
+                    # straight on from the note before: no rest and no longer note in between
+                    gap_ok = (n0.start - prev.start) <= max(prev.duration, n0.duration) * 1.6
+                    joined = (p_m is not None and p_m.index == m.index and p_beat == beat_i
+                              and gap_ok and len(curr) < MAX_BEAM_CHORDS)
+
+                if joined:
+                    curr.append(sub)
+                    continue
+                if len(curr) >= 2:
+                    beam_groups.append((c, curr))
+                curr = [sub] if is_beamable(sub, beat_of) else []
+            if len(curr) >= 2:
+                beam_groups.append((c, curr))
+    return beam_groups
 
 
 def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: float, usable_w: float,
@@ -832,47 +881,14 @@ class StaffView:
                     # longer note, a bar line) end the group, so no beam ever reaches
                     # across notes that have nothing to do with each other.
                     beamed_note_ids = set()
-                    beam_groups = []
                     measure_of = {}
                     for m in sys.measures:
                         for n in sys.notes:
                             if m.start_t <= n.start < m.end_t:
                                 measure_of[id(n)] = m
 
-                    def beamable(sub):
-                        b_dur = get_beat_duration(self.song, sub[0].start)
-                        return note_value(sub[0].duration, b_dur) in (EIGHTH, DOTTED_EIGHTH, SIXTEENTH)
-
-                    for hand in (RIGHT, LEFT):
-                        for c in (CLEF_TREBLE, CLEF_BASS):
-                            # one entry per chord, in time order, on this hand and staff
-                            chords = []
-                            for tc in time_clusters:
-                                sub = [n for n in tc if n.hand == hand and notes_info[id(n)]["clef"] == c]
-                                if sub:
-                                    chords.append(sub)
-                            curr_bg = []
-                            for sub in chords:
-                                if not beamable(sub):
-                                    if len(curr_bg) >= 2:
-                                        beam_groups.append((c, curr_bg))
-                                    curr_bg = []
-                                    continue
-                                if curr_bg:
-                                    prev = curr_bg[-1][0]
-                                    gap = sub[0].start - prev.start
-                                    step = max(prev.duration, sub[0].duration)
-                                    m, p_m = measure_of.get(id(sub[0])), measure_of.get(id(prev))
-                                    joined = (p_m is not None and m is not None and p_m.index == m.index
-                                              and gap <= step * 1.6)
-                                    if joined and len(curr_bg) < MAX_BEAM_CHORDS:
-                                        curr_bg.append(sub)
-                                        continue
-                                    if len(curr_bg) >= 2:
-                                        beam_groups.append((c, curr_bg))
-                                curr_bg = [sub]
-                            if len(curr_bg) >= 2:
-                                beam_groups.append((c, curr_bg))
+                    beam_groups = group_beams(time_clusters, notes_info,
+                                             lambda st_: get_beat_duration(self.song, st_), measure_of)
 
                     # Draw the beams: a bar along the stems, plus a second, shorter bar
                     # inwards for the 16th notes of the run.
@@ -885,43 +901,34 @@ class StaffView:
                         mid_step = TREBLE_MID_STEP if c == CLEF_TREBLE else BASS_MID_STEP
                         beam_stem_up = (avg_step < mid_step)
 
-                        # Where the stem of each chord starts and how long it would be.
+                        # Where each chord's stem starts, and whether the chord needs a second bar.
                         stops = []
                         for sub in bg:
                             x = notes_info[id(sub[0])]["x"]
                             y_top = min(notes_info[id(n)]["y_top"] for n in sub)
                             y_bot = max(notes_info[id(n)]["y_bot"] for n in sub)
                             sx = round(x + nw - 1) if beam_stem_up else round(x - nw + 1)
-                            near = y_top if beam_stem_up else y_bot
                             is16 = any(note_value(n.duration, get_beat_duration(self.song, n.start)) == SIXTEENTH
                                        for n in sub)
-                            stops.append({"x": sx, "near": near, "is16": is16, "notes": sub})
+                            stops.append({"x": sx, "near": y_top if beam_stem_up else y_bot,
+                                          "is16": is16, "notes": sub})
 
-                        # The bar follows the notes but not too steeply: a run that dives
-                        # gets a flatter slope and longer stems rather than one long
-                        # diagonal that would stretch the stems out of shape.
-                        xs = [st["x"] for st in stops]
-                        ys = [st["near"] - stem_len if beam_stem_up else st["near"] + stem_len for st in stops]
-                        want = ys[-1] - ys[0]
-                        limit = max(s * 1.5, (xs[-1] - xs[0]) * 0.35)
-                        slope = want
-                        if abs(want) > limit:
-                            slope = math.copysign(limit, want)
-                        span = xs[-1] - xs[0]
+                        # The bar is dead level, so the stems are the ones that give way: it
+                        # sits one stem-length clear of the notehead nearest to it in the
+                        # whole run, and every other stem is lengthened to reach it.
+                        tip = (round(min(st["near"] for st in stops) - stem_len) if beam_stem_up
+                               else round(max(st["near"] for st in stops) + stem_len))
 
                         outer, inner = [], []
                         run = []
-                        for st, y in zip(stops, ys):
-                            x = st["x"]
-                            tip = round(y if span == 0 else y + slope * (x - xs[0]) / span)
-                            st["tip"] = tip
-                            outer.append((x, tip))
+                        for st in stops:
+                            outer.append((st["x"], tip))
                             for n in st["notes"]:
                                 notes_info[id(n)]["beam_stem_up"] = beam_stem_up
                                 notes_info[id(n)]["beam_tip_y"] = tip
                             # the second bar covers only the stretch of 16th notes
                             if st["is16"]:
-                                run.append((x, tip))
+                                run.append((st["x"], tip))
                             elif run:
                                 inner.append(run)
                                 run = []

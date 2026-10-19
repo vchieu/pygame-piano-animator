@@ -546,53 +546,93 @@ def test_staff_height_dragging_and_clamping(screen):
     assert vis.dragging_staff_height is False
 
 
+def _beam_groups_of(song):
+    """Chay group_beams that cua StaffView.draw, lay ra de kiem tra."""
+    out = []
+    for sys0 in staff.StaffView(song).systems:
+        notes = sorted(sys0.notes, key=lambda n: (n.start, n.pitch))
+        b_len = staff.get_beat_duration(song)
+        clusters = staff.group_chords(notes, b_len)
+        info = {}
+        for tc in clusters:
+            for n in tc:
+                c = staff.clef_for_note(n)
+                sd, _sh, _lb = staff.get_octave_transposition(n, c)
+                info[id(n)] = {"clef": c, "step_draw": sd}
+        mo = {}
+        for m in sys0.measures:
+            for n in sys0.notes:
+                if m.start_t <= n.start < m.end_t:
+                    mo[id(n)] = m
+        out += [(clef, bg, sys0)
+                for clef, bg in staff.group_beams(clusters, info,
+                                                  lambda t: staff.get_beat_duration(song, t), mo)]
+    return out
+
+
 def test_a_beam_never_reaches_across_unrelated_notes():
-    # A beam joins a few short notes that follow straight on from each other. It must stop
-    # at anything else - a longer note, a rest, a bar line - and never tie more than a
-    # handful together, or it drags notes that have nothing to do with each other along.
-    assert staff.MAX_BEAM_CHORDS <= 4
-
+    # A beam gathers the short notes of one beat. It must stop at a longer note, a rest, a
+    # bar line or the next beat, or it would drag along notes that have nothing to do with
+    # each other.
     song = load_midi(midi_path("demo_song.mid"))
-    sys0 = staff.StaffView(song).systems[0]
-    b_len = staff.get_beat_duration(song)
-    notes = sorted(sys0.notes, key=lambda n: (n.start, n.pitch))
-    clusters = staff.group_chords(notes, b_len)
-
-    beamable = []
-    for tc in clusters:
-        nv = staff.note_value(tc[0].duration, b_len)
-        beamable.append((tc, nv in (staff.EIGHTH, staff.DOTTED_EIGHTH, staff.SIXTEENTH)))
-
-    # replay the grouping rule and check every group it produces
-    groups = []
-    curr = []
-    for tc, ok in beamable:
-        if not ok:
-            if len(curr) >= 2:
-                groups.append(curr)
-            curr = []
-            continue
-        if curr:
-            prev = curr[-1][0][0]
-            gap = tc[0].start - prev.start
-            step = max(prev.duration, tc[0].duration)
-            if gap <= step * 1.6 and len(curr) < staff.MAX_BEAM_CHORDS:
-                curr.append((tc, ok))
-                continue
-            if len(curr) >= 2:
-                groups.append(curr)
-        curr = [(tc, ok)]
-    if len(curr) >= 2:
-        groups.append(curr)
-
+    groups = _beam_groups_of(song)
     assert groups, "the test song should contain at least one beam"
-    for g in groups:
-        assert 2 <= len(g) <= staff.MAX_BEAM_CHORDS, f"beam of {len(g)} notes"
-        # consecutive in time: nothing long or empty in between
-        for (a, _), (b, _) in zip(g, g[1:]):
-            step = max(a[0].duration, b[0].duration)
-            assert b[0].start - a[0].start <= step * 1.6, "a beam skipped over something else"
-            assert a[0].hand == b[0].hand, "a beam crossed from one hand to the other"
+
+    for clef, bg, sys0 in groups:
+        assert 2 <= len(bg) <= staff.MAX_BEAM_CHORDS, f"beam of {len(bg)} notes"
+        hand = bg[0][0].hand
+        for sub in bg:
+            assert all(n.hand == hand for n in sub), "a beam crossed from one hand to the other"
+            assert all(staff.clef_for_note(n) == clef for n in sub), "a beam crossed between staves"
+            assert staff.note_value(sub[0].duration, staff.get_beat_duration(song, sub[0].start)) \
+                in (staff.EIGHTH, staff.DOTTED_EIGHTH, staff.SIXTEENTH), "a longer note got beamed"
+        # the whole group sits inside a single beat of a single bar
+        beats, bars = set(), set()
+        for sub in bg:
+            n0 = sub[0]
+            m = next((m for m in sys0.measures if m.start_t <= n0.start < m.end_t), None)
+            assert m is not None, "a beamed note fell outside every bar"
+            bars.add(m.index)
+            beats.add(int((n0.start - m.start_t) / staff.get_beat_duration(song, n0.start)))
+        assert len(bars) == 1, "a beam reached across a bar line"
+        assert len(beats) == 1, "a beam reached across a beat"
+
+
+def test_beam_is_dead_level_and_stems_stretch_to_meet_it(screen):
+    # A beam runs dead level, so it is the stems that give way: each one stretches or is
+    # trimmed to meet the same bar. Check it on the real drawing, not just on the numbers.
+    song = load_midi(midi_path("demo_song.mid"))
+    rect = pygame.Rect(0, 0, screen.get_width(), 140)
+
+    levels, stems = [], []
+    real_lines, real_line = pygame.draw.lines, pygame.draw.line
+
+    def spy_lines(surf, color, closed, pts, width):
+        if pts and len(pts) >= 2:
+            ys = [p[1] for p in pts]
+            if len(set(ys)) == 1:          # dead level
+                levels.append((pts[0][0], pts[-1][0], ys[0]))
+        return real_lines(surf, color, closed, pts, width)
+
+    def spy_line(surf, color, a, b, width):
+        if abs(a[0] - b[0]) <= 1 and abs(a[1] - b[1]) > 4:
+            stems.append((a[0], min(a[1], b[1]), max(a[1], b[1])))
+        return real_line(surf, color, a, b, width)
+
+    pygame.draw.lines, pygame.draw.line = spy_lines, spy_line
+    try:
+        for t in (1.0, 2.5, 4.0):
+            screen.fill((255, 255, 255))
+            staff.StaffView(song).draw(screen, rect, t, active_notes=song.notes[:5])
+    finally:
+        pygame.draw.lines, pygame.draw.line = real_lines, real_line
+
+    assert levels, "no level beam was drawn"
+    for x0, x1, y in levels:
+        assert x1 > x0
+        # the stems of this beam all end on it, and none of them stops short
+        under = [st for st in stems if x0 - 2 <= st[0] <= x1 + 2 and st[1] <= y <= st[2]]
+        assert under, f"beam at y={y} has no stem reaching it"
 
 
 def test_draw_arpeggio_wavy_line_and_chord_stems(screen):
