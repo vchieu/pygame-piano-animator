@@ -261,26 +261,46 @@ def test_note_clashing_offset():
 
 
 def test_octave_transposition_8va_8vb_15ma_15mb():
-    n_high_8va = Note(pitch=81, start=0.0, end=1.0, velocity=80, track=0, hand=RIGHT)   # A5 (pitch 81)
-    n_high_15ma = Note(pitch=93, start=0.0, end=1.0, velocity=80, track=0, hand=RIGHT)  # A6 (pitch 93)
-    n_low_8vb = Note(pitch=43, start=0.0, end=1.0, velocity=80, track=0, hand=LEFT)    # G2 (pitch 43)
-    n_low_15mb = Note(pitch=31, start=0.0, end=1.0, velocity=80, track=0, hand=LEFT)   # G1 (pitch 31)
+    n_high_8va = Note(pitch=88, start=0.0, end=1.0, velocity=80, track=0, hand=RIGHT)   # E6 (pitch 88)
+    n_high_15ma = Note(pitch=100, start=0.0, end=1.0, velocity=80, track=0, hand=RIGHT) # E7 (pitch 100)
+    n_low_8vb = Note(pitch=28, start=0.0, end=1.0, velocity=80, track=0, hand=LEFT)    # E1 (pitch 28)
+    n_low_15mb = Note(pitch=16, start=0.0, end=1.0, velocity=80, track=0, hand=LEFT)   # E0 (pitch 16)
+    n_normal_bass = Note(pitch=43, start=0.0, end=1.0, velocity=80, track=0, hand=LEFT) # G2 (pitch 43)
     n_normal = Note(pitch=60, start=0.0, end=1.0, velocity=80, track=0, hand=RIGHT)   # C4
 
     step_draw, shift, label = staff.get_octave_transposition(n_high_8va, CLEF_TREBLE)
-    assert shift == -1 and label == "8va" and step_draw == staff.diatonic_step(81)[0] - 7
+    assert shift == -1 and label == "8va" and step_draw == staff.diatonic_step(88)[0] - 7
 
     step_draw, shift, label = staff.get_octave_transposition(n_high_15ma, CLEF_TREBLE)
-    assert shift == -2 and label == "15ma" and step_draw == staff.diatonic_step(93)[0] - 14
+    assert shift == -2 and label == "15ma" and step_draw == staff.diatonic_step(100)[0] - 14
 
     step_draw, shift, label = staff.get_octave_transposition(n_low_8vb, CLEF_BASS)
-    assert shift == 1 and label == "8vb" and step_draw == staff.diatonic_step(43)[0] + 7
+    assert shift == 1 and label == "8vb" and step_draw == staff.diatonic_step(28)[0] + 7
 
     step_draw, shift, label = staff.get_octave_transposition(n_low_15mb, CLEF_BASS)
-    assert shift == 2 and label == "15mb" and step_draw == staff.diatonic_step(31)[0] + 14
+    assert shift == 2 and label == "15mb" and step_draw == staff.diatonic_step(16)[0] + 14
+
+    # G2 (pitch 43) is comfortably on 2 ledger lines below bass clef: no 8vb needed
+    step_draw, shift, label = staff.get_octave_transposition(n_normal_bass, CLEF_BASS)
+    assert shift == 0 and label == "" and step_draw == staff.diatonic_step(43)[0]
 
     step_draw, shift, label = staff.get_octave_transposition(n_normal, CLEF_TREBLE)
     assert shift == 0 and label == "" and step_draw == staff.diatonic_step(60)[0]
+
+
+def test_octave_chord_does_not_collapse_in_cluster():
+    # An octave chord in bass clef: C1 (pitch 24, 8vb threshold) + C2 (pitch 36).
+    # Transposing C1 up 8vb would move it to step 14 (C2), collapsing the chord into unison.
+    # compute_notes_info revokes C1's 8vb so the octave retains its vertical span.
+    s = 7.0
+    c1 = Note(pitch=24, start=0.0, end=1.0, velocity=80, track=0, hand=LEFT)
+    c2 = Note(pitch=36, start=0.0, end=1.0, velocity=80, track=0, hand=LEFT)
+    info = staff.compute_notes_info([c1, c2], 0.0, 5.0, 1000.0, staff.MARGIN_LEFT, s)
+
+    i1, i2 = info[id(c1)], info[id(c2)]
+    assert i1["step_draw"] != i2["step_draw"], "Octave chord notes must not collapse onto the same step"
+    assert i1["x"] == i2["x"], "Octave chord notes stay on the same x line"
+    assert i1["octave_shift"] == 0 and i1["label"] == ""
 
 
 def test_chord_notes_line_up_vertically():
@@ -320,13 +340,14 @@ def test_unison_notes_also_step_aside():
 
 
 def test_time_sequential_notes_keep_minimum_spacing():
-    # A note right on the heels of the previous one, and a sharp of its own on the left:
-    # the two must not run into each other.
+    # A note a real step along in the beat from the previous one, with a sharp of its own on
+    # the left: the two must not run into each other.
     s = 7.0
     nw = round(s * 0.75)
+    beat = 0.5
     n1 = Note(pitch=60, start=0.0, end=0.4, velocity=80, track=0, hand=RIGHT)
-    n2 = Note(pitch=61, start=0.05, end=0.45, velocity=80, track=0, hand=RIGHT)   # C#4
-    info = staff.compute_notes_info([n1, n2], 0.0, 5.0, 1000.0, staff.MARGIN_LEFT, s)
+    n2 = Note(pitch=61, start=0.3, end=0.7, velocity=80, track=0, hand=RIGHT)   # C#4, a sixteenth later
+    info = staff.compute_notes_info([n1, n2], 0.0, 5.0, 1000.0, staff.MARGIN_LEFT, s, beat)
 
     x1, x2 = info[id(n1)]["x"], info[id(n2)]["x"]
     assert x2 > x1, "Notes too close in time are spread apart"
@@ -338,6 +359,26 @@ def test_time_sequential_notes_keep_minimum_spacing():
     far2 = Note(pitch=60, start=2.0, end=2.4, velocity=80, track=0, hand=RIGHT)
     far = staff.compute_notes_info([far1, far2], 0.0, 5.0, 1000.0, staff.MARGIN_LEFT, s)
     assert far[id(far2)]["x"] == far[id(far2)]["base_x"]
+
+
+def test_notes_a_hair_apart_are_one_chord():
+    # A chord in a piano roll often comes back with its notes a few tens of milliseconds
+    # apart instead of at exactly one moment. That is one chord, so it shares one x
+    # (and therefore one stem), not a little cascade of separate notes.
+    s = 7.0
+    beat = 0.909
+    c5 = Note(pitch=72, start=14.545, end=15.907, velocity=80, track=0, hand=RIGHT)
+    e5 = Note(pitch=76, start=14.610, end=15.905, velocity=80, track=0, hand=RIGHT)
+    b5 = Note(pitch=83, start=14.676, end=15.909, velocity=80, track=0, hand=RIGHT)
+    info = staff.compute_notes_info([c5, e5, b5], 14.545, 3.636, 1000.0, staff.MARGIN_LEFT, s, beat)
+
+    xs = [info[id(n)]["x"] for n in (c5, e5, b5)]
+    assert len(set(xs)) == 1, f"A staggered chord shares one x, got {xs}"
+    assert xs[0] == info[id(c5)]["base_x"], "The chord sits at the moment its first note sounds"
+
+    # the spread that counts as a chord is a fraction of the beat, not a fixed slice of time
+    assert staff.chord_spread(beat) < 0.25 * beat
+    assert staff.chord_spread(0.25) >= 0.035      # a slow piece still gets a floor
 
 
 def test_notes_never_past_the_system_edge():
@@ -503,3 +544,64 @@ def test_staff_height_dragging_and_clamping(screen):
     # MOUSEBUTTONUP resets dragging state
     app.handle_event(pygame.event.Event(pygame.MOUSEBUTTONUP, button=1, pos=(200, 100)))
     assert vis.dragging_staff_height is False
+
+
+def test_a_beam_never_reaches_across_unrelated_notes():
+    # A beam joins a few short notes that follow straight on from each other. It must stop
+    # at anything else - a longer note, a rest, a bar line - and never tie more than a
+    # handful together, or it drags notes that have nothing to do with each other along.
+    assert staff.MAX_BEAM_CHORDS <= 4
+
+    song = load_midi(midi_path("demo_song.mid"))
+    sys0 = staff.StaffView(song).systems[0]
+    b_len = staff.get_beat_duration(song)
+    notes = sorted(sys0.notes, key=lambda n: (n.start, n.pitch))
+    clusters = staff.group_chords(notes, b_len)
+
+    beamable = []
+    for tc in clusters:
+        nv = staff.note_value(tc[0].duration, b_len)
+        beamable.append((tc, nv in (staff.EIGHTH, staff.DOTTED_EIGHTH, staff.SIXTEENTH)))
+
+    # replay the grouping rule and check every group it produces
+    groups = []
+    curr = []
+    for tc, ok in beamable:
+        if not ok:
+            if len(curr) >= 2:
+                groups.append(curr)
+            curr = []
+            continue
+        if curr:
+            prev = curr[-1][0][0]
+            gap = tc[0].start - prev.start
+            step = max(prev.duration, tc[0].duration)
+            if gap <= step * 1.6 and len(curr) < staff.MAX_BEAM_CHORDS:
+                curr.append((tc, ok))
+                continue
+            if len(curr) >= 2:
+                groups.append(curr)
+        curr = [(tc, ok)]
+    if len(curr) >= 2:
+        groups.append(curr)
+
+    assert groups, "the test song should contain at least one beam"
+    for g in groups:
+        assert 2 <= len(g) <= staff.MAX_BEAM_CHORDS, f"beam of {len(g)} notes"
+        # consecutive in time: nothing long or empty in between
+        for (a, _), (b, _) in zip(g, g[1:]):
+            step = max(a[0].duration, b[0].duration)
+            assert b[0].start - a[0].start <= step * 1.6, "a beam skipped over something else"
+            assert a[0].hand == b[0].hand, "a beam crossed from one hand to the other"
+
+
+def test_draw_arpeggio_wavy_line_and_chord_stems(screen):
+    # Test that draw_arpeggio_wavy_line runs without error
+    staff.draw_arpeggio_wavy_line(screen, 100, 50, 120, 7.0, (50, 50, 65))
+
+    # Test staff view draw on a song with chords & fast notes
+    song = load_midi(midi_path("demo_song.mid"))
+    rect = pygame.Rect(0, 34, screen.get_width(), 140)
+    sv = staff.StaffView(song)
+    sv.draw(screen, rect, 1.0, active_notes=song.notes[:3])
+

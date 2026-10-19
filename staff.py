@@ -83,6 +83,10 @@ MAX_TARGET_DUR = 20.0
 MIN_SCALE = 0.6
 MAX_SCALE = 1.5
 
+# How many notes one beam may join: a beam is a handful of notes at most, so it never
+# reaches across a passage and ties together notes that have nothing to do with each other.
+MAX_BEAM_CHORDS = 4
+
 
 def clamp_target_dur(value) -> float:
     """Keep the seconds of music per system inside the range the staff draws well at."""
@@ -323,6 +327,34 @@ def draw_sharp(surf: pygame.Surface, x: float, y: float, s: float, color: Tuple[
     pygame.draw.line(surf, color, (round(x - w * 0.8), round(y + h * 0.4)), (round(x + w * 0.8), round(y + h * 0.1)), 2)
 
 
+def draw_arpeggio_wavy_line(surf: pygame.Surface, x: float, y_top: float, y_bottom: float, s: float, color: Tuple[int, int, int]):
+    """Draw a vertical squiggly arpeggio line ('con giun') to the left of a rolled chord."""
+    if y_bottom <= y_top:
+        return
+    amp = s * 0.42
+    wave_h = s * 0.7
+    y_curr = y_bottom
+    pts = []
+    phase = 0
+    while y_curr >= y_top - 2:
+        dx = amp if (phase % 2 == 0) else -amp
+        pts.append((round(x + dx), round(y_curr)))
+        y_curr -= wave_h / 2
+        phase += 1
+    line_w = max(1, int(s * 0.18))
+    if len(pts) >= 2:
+        pygame.draw.lines(surf, color, False, pts, line_w)
+    # Arrowhead at top
+    if pts:
+        top_x, top_y = pts[-1]
+        ah_pts = [
+            (top_x, top_y - round(s * 0.45)),
+            (top_x - round(s * 0.35), top_y + round(s * 0.2)),
+            (top_x + round(s * 0.35), top_y + round(s * 0.2)),
+        ]
+        pygame.draw.polygon(surf, color, ah_pts)
+
+
 def draw_flags(surf: pygame.Surface, tip_x: float, tip_y: float, s: float, stem_up: bool, color: Tuple[int, int, int], count: int = 1):
     """Draw 1 or 2 flags on the tip of a stem swooping to the right using elegant curved lines."""
     flag_spacing = max(3.5, s * 0.48)
@@ -354,19 +386,53 @@ def get_octave_transposition(n: Note, clef: str) -> Tuple[int, int, str]:
     """
     Returns (step_draw, octave_shift, label_text) for a note.
     octave_shift is in octaves (-2, -1, 0, +1, +2).
+    Thresholds are set so normal piano ranges use standard ledger lines (easy to read),
+    and 8va/8vb is reserved for extreme pitches (> 3-4 ledger lines).
     """
     step, _ = diatonic_step(n.pitch)
     if clef == CLEF_TREBLE:
-        if n.pitch >= 93:
+        if n.pitch >= 100:            # E7 and above (> 6 ledger lines)
             return step - 14, -2, "15ma"
-        elif n.pitch >= 81:
+        elif n.pitch >= 88:           # E6 and above (> 3 ledger lines)
             return step - 7, -1, "8va"
     elif clef == CLEF_BASS:
-        if n.pitch <= 31:
+        if n.pitch <= 16:             # E0 and below (> 7 ledger lines)
             return step + 14, 2, "15mb"
-        elif n.pitch <= 43:
+        elif n.pitch <= 28:           # E1 and below (> 4 ledger lines)
             return step + 7, 1, "8vb"
     return step, 0, ""
+
+
+def chord_spread(beat_len: float) -> float:
+    """
+    How far apart two notes may start and still count as one chord.
+
+    A chord written on a piano roll is often a hair spread out: the same chord
+    comes back from a file a few tens of milliseconds apart instead of at exactly
+    one moment (and a strummed chord is spread on purpose). That spread is far
+    smaller than a rhythm, so anything inside this much of a beat is one chord.
+    Notes a real step apart in the beat - a run of sixteenths, say - are further
+    apart than this and stay separate notes.
+    """
+    return max(0.035, 0.2 * beat_len)
+
+
+def group_chords(sorted_notes: List[Note], beat_len: float) -> List[List[Note]]:
+    """Split notes in time order into chords: each chord is one moment's worth of notes."""
+    tol = chord_spread(beat_len)
+    clusters: List[List[Note]] = []
+    curr: List[Note] = []
+    for n in sorted_notes:
+        if not curr:
+            curr.append(n)
+        elif n.start - curr[0].start < tol:
+            curr.append(n)
+        else:
+            clusters.append(curr)
+            curr = [n]
+    if curr:
+        clusters.append(curr)
+    return clusters
 
 
 def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: float, usable_w: float,
@@ -390,36 +456,26 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
     right_limit = margin_left + usable_w
     sorted_notes = sorted(sys_notes, key=lambda n: (n.start, n.pitch))
 
-    # Pre-calculate base attributes
-    for n in sorted_notes:
-        frac_n = (n.start - sys_start) / sys_duration
-        base_x = margin_left + frac_n * usable_w
-        clef = clef_for_note(n)
-        step_draw, oct_shift, label = get_octave_transposition(n, clef)
-        info[id(n)] = {
-            "n": n,
-            "base_x": base_x,
-            "x": base_x,
-            "clef": clef,
-            "step_draw": step_draw,
-            "octave_shift": oct_shift,
-            "label": label,
-        }
+    # A chord is one moment: its notes share one x, even when the file staggered
+    # their onsets a little, so it is drawn as a chord and not as a little cascade.
+    clusters = group_chords(sorted_notes, beat_len)
 
-    # Group notes into time clusters (|n1.start - n2.start| < 0.03)
-    clusters = []
-    curr_cluster = []
-    for n in sorted_notes:
-        if not curr_cluster:
-            curr_cluster.append(n)
-        else:
-            if abs(n.start - curr_cluster[0].start) < 0.03:
-                curr_cluster.append(n)
-            else:
-                clusters.append(curr_cluster)
-                curr_cluster = [n]
-    if curr_cluster:
-        clusters.append(curr_cluster)
+    # Pre-calculate base attributes
+    for cluster in clusters:
+        chord_t = cluster[0].start
+        chord_x = margin_left + (chord_t - sys_start) / sys_duration * usable_w
+        for n in cluster:
+            clef = clef_for_note(n)
+            step_draw, oct_shift, label = get_octave_transposition(n, clef)
+            info[id(n)] = {
+                "n": n,
+                "base_x": chord_x,
+                "x": chord_x,
+                "clef": clef,
+                "step_draw": step_draw,
+                "octave_shift": oct_shift,
+                "label": label,
+            }
 
     # Process each cluster for x-offsets when notes clash in same clef
     for cluster in clusters:
@@ -431,6 +487,17 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
         for c, c_notes in by_clef.items():
             if len(c_notes) <= 1:
                 continue
+            # Revoke octave transposition if it causes notes in the same chord/clef to collide
+            for n in c_notes:
+                n_info = info[id(n)]
+                if n_info["octave_shift"] != 0:
+                    other_steps = [info[id(other)]["step_draw"] for other in c_notes if other is not n]
+                    if any(abs(n_info["step_draw"] - ost) <= 1 for ost in other_steps):
+                        step_nat, _ = diatonic_step(n.pitch)
+                        n_info["step_draw"] = step_nat
+                        n_info["octave_shift"] = 0
+                        n_info["label"] = ""
+
             # Sort notes in clef by step_draw
             c_notes_sorted = sorted(c_notes, key=lambda n: info[id(n)]["step_draw"])
             for i in range(1, len(c_notes_sorted)):
@@ -465,6 +532,7 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
                 tail = max(tail, nw + s * 0.9)
         return tail
 
+    min_gap = nw + 1.0
     for i in range(1, len(clusters)):
         prev_cluster, curr_cluster = clusters[i - 1], clusters[i]
         # Notes on different staves are nowhere near each other: nothing to spread.
@@ -474,17 +542,15 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
             continue
 
         head = cluster_head(curr_cluster)
-        min_spacing = nw * 2.2 + head
-        if cluster_tail(prev_cluster) > nw:
-            min_spacing += s * 0.5              # room for the previous note's dot or flag
         prev_right = max(info[id(n)]["x"] for n in prev_cluster) + cluster_tail(prev_cluster)
         curr_left = min(info[id(n)]["x"] for n in curr_cluster) - head
-        shift = prev_right + min_spacing - curr_left
-        if shift <= 0:
-            continue
-        shift = min(shift, max(0.0, right_limit - curr_left))   # never past the system's edge
-        for n in curr_cluster:
-            info[id(n)]["x"] += shift
+        if curr_left < prev_right + min_gap:
+            shift = (prev_right + min_gap) - curr_left
+            curr_x_min = min(info[id(n)]["x"] for n in curr_cluster)
+            shift = min(shift, max(0.0, right_limit - curr_x_min))
+            if shift > 0:
+                for n in curr_cluster:
+                    info[id(n)]["x"] += shift
 
     return info
 
@@ -716,9 +782,167 @@ class StaffView:
                                                     MARGIN_LEFT, s, get_beat_duration(self.song))
                     draw_octave_brackets(staff_surf, notes_info, sys.notes, treble_mid_y, bass_mid_y, s)
 
-                    # Sort notes so lower notes draw first
-                    notes_sorted = sorted(sys.notes, key=lambda n: (n.start, n.pitch))
-                    for n in notes_sorted:
+                    # Group sys.notes into chords, the same way compute_notes_info did
+                    sorted_notes = sorted(sys.notes, key=lambda n: (n.start, n.pitch))
+                    beat_len = get_beat_duration(self.song)
+                    time_clusters = group_chords(sorted_notes, beat_len)
+
+                    # Compute chord-level stem direction and y-bounds for each cluster
+                    for tc_idx, tc in enumerate(time_clusters):
+                        by_c = {CLEF_TREBLE: [], CLEF_BASS: []}
+                        for n in tc:
+                            c = notes_info[id(n)]["clef"]
+                            by_c[c].append(n)
+
+                        for c, c_notes in by_c.items():
+                            if not c_notes:
+                                continue
+                            avg_step = sum(notes_info[id(n)]["step_draw"] for n in c_notes) / len(c_notes)
+                            mid_step = TREBLE_MID_STEP if c == CLEF_TREBLE else BASS_MID_STEP
+                            chord_stem_up = (avg_step < mid_step)
+
+                            ny_list = [note_y(notes_info[id(n)]["step_draw"], c, treble_mid_y, bass_mid_y, s) for n in c_notes]
+                            y_top = min(ny_list)
+                            y_bot = max(ny_list)
+
+                            for n in c_notes:
+                                info_n = notes_info[id(n)]
+                                info_n["chord_stem_up"] = chord_stem_up
+                                info_n["y_top"] = y_top
+                                info_n["y_bot"] = y_bot
+                                info_n["chord_size"] = len(c_notes)
+                                # the notes struck together on one staff share a single stem
+                                info_n["stem_key"] = (tc_idx, c)
+
+                            # A rolled chord ("arpeggio") is written with its notes
+                            # slightly staggered - they are plucked or swept one after
+                            # another, not all together. That stagger is what marks it,
+                            # so a plain block chord of three or more notes is left alone.
+                            rolled = len(c_notes) >= 3 and (c_notes[-1].start - c_notes[0].start) >= 0.04 * beat_len
+                            if rolled:
+                                chord_x = min(notes_info[id(n)]["x"] for n in c_notes)
+                                arp_col = CURSOR_COLOR if any((id(n) in active_ids) or (n.start <= t < n.end)
+                                                              for n in c_notes) else (60, 60, 75)
+                                draw_arpeggio_wavy_line(staff_surf, chord_x - nw - round(s * 0.6),
+                                                        y_top - s * 0.4, y_bot + s * 0.4, s, arp_col)
+
+                    # Beaming: short notes of one hand on one staff are joined, but only the
+                    # ones that follow straight on from each other, and only a few at a
+                    # time. Notes that are a real step apart in the rhythm (a rest, a
+                    # longer note, a bar line) end the group, so no beam ever reaches
+                    # across notes that have nothing to do with each other.
+                    beamed_note_ids = set()
+                    beam_groups = []
+                    measure_of = {}
+                    for m in sys.measures:
+                        for n in sys.notes:
+                            if m.start_t <= n.start < m.end_t:
+                                measure_of[id(n)] = m
+
+                    def beamable(sub):
+                        b_dur = get_beat_duration(self.song, sub[0].start)
+                        return note_value(sub[0].duration, b_dur) in (EIGHTH, DOTTED_EIGHTH, SIXTEENTH)
+
+                    for hand in (RIGHT, LEFT):
+                        for c in (CLEF_TREBLE, CLEF_BASS):
+                            # one entry per chord, in time order, on this hand and staff
+                            chords = []
+                            for tc in time_clusters:
+                                sub = [n for n in tc if n.hand == hand and notes_info[id(n)]["clef"] == c]
+                                if sub:
+                                    chords.append(sub)
+                            curr_bg = []
+                            for sub in chords:
+                                if not beamable(sub):
+                                    if len(curr_bg) >= 2:
+                                        beam_groups.append((c, curr_bg))
+                                    curr_bg = []
+                                    continue
+                                if curr_bg:
+                                    prev = curr_bg[-1][0]
+                                    gap = sub[0].start - prev.start
+                                    step = max(prev.duration, sub[0].duration)
+                                    m, p_m = measure_of.get(id(sub[0])), measure_of.get(id(prev))
+                                    joined = (p_m is not None and m is not None and p_m.index == m.index
+                                              and gap <= step * 1.6)
+                                    if joined and len(curr_bg) < MAX_BEAM_CHORDS:
+                                        curr_bg.append(sub)
+                                        continue
+                                    if len(curr_bg) >= 2:
+                                        beam_groups.append((c, curr_bg))
+                                curr_bg = [sub]
+                            if len(curr_bg) >= 2:
+                                beam_groups.append((c, curr_bg))
+
+                    # Draw the beams: a bar along the stems, plus a second, shorter bar
+                    # inwards for the 16th notes of the run.
+                    for c, bg in beam_groups:
+                        notes_here = [n for sub in bg for n in sub]
+                        for n in notes_here:
+                            beamed_note_ids.add(id(n))
+
+                        avg_step = sum(notes_info[id(n)]["step_draw"] for n in notes_here) / len(notes_here)
+                        mid_step = TREBLE_MID_STEP if c == CLEF_TREBLE else BASS_MID_STEP
+                        beam_stem_up = (avg_step < mid_step)
+
+                        # Where the stem of each chord starts and how long it would be.
+                        stops = []
+                        for sub in bg:
+                            x = notes_info[id(sub[0])]["x"]
+                            y_top = min(notes_info[id(n)]["y_top"] for n in sub)
+                            y_bot = max(notes_info[id(n)]["y_bot"] for n in sub)
+                            sx = round(x + nw - 1) if beam_stem_up else round(x - nw + 1)
+                            near = y_top if beam_stem_up else y_bot
+                            is16 = any(note_value(n.duration, get_beat_duration(self.song, n.start)) == SIXTEENTH
+                                       for n in sub)
+                            stops.append({"x": sx, "near": near, "is16": is16, "notes": sub})
+
+                        # The bar follows the notes but not too steeply: a run that dives
+                        # gets a flatter slope and longer stems rather than one long
+                        # diagonal that would stretch the stems out of shape.
+                        xs = [st["x"] for st in stops]
+                        ys = [st["near"] - stem_len if beam_stem_up else st["near"] + stem_len for st in stops]
+                        want = ys[-1] - ys[0]
+                        limit = max(s * 1.5, (xs[-1] - xs[0]) * 0.35)
+                        slope = want
+                        if abs(want) > limit:
+                            slope = math.copysign(limit, want)
+                        span = xs[-1] - xs[0]
+
+                        outer, inner = [], []
+                        run = []
+                        for st, y in zip(stops, ys):
+                            x = st["x"]
+                            tip = round(y if span == 0 else y + slope * (x - xs[0]) / span)
+                            st["tip"] = tip
+                            outer.append((x, tip))
+                            for n in st["notes"]:
+                                notes_info[id(n)]["beam_stem_up"] = beam_stem_up
+                                notes_info[id(n)]["beam_tip_y"] = tip
+                            # the second bar covers only the stretch of 16th notes
+                            if st["is16"]:
+                                run.append((x, tip))
+                            elif run:
+                                inner.append(run)
+                                run = []
+                        if run:
+                            inner.append(run)
+
+                        beam_w = max(2, round(s * 0.42))
+                        pygame.draw.lines(staff_surf, STEM_COLOR, False, outer, beam_w)
+                        gap = round(s * 0.55)
+                        off = -gap if beam_stem_up else gap
+                        for run in inner:
+                            shifted = [(x, y + off) for x, y in run]
+                            if len(run) >= 2:
+                                pygame.draw.lines(staff_surf, STEM_COLOR, False, shifted, beam_w)
+                            else:      # a lone 16th gets a short stub of its own
+                                x, y = shifted[0]
+                                pygame.draw.line(staff_surf, STEM_COLOR, (x - round(s * 0.6), y), (x, y), beam_w)
+
+                    # Draw individual notes
+                    rendered_chord_stems = set()
+                    for n in sorted_notes:
                         n_info = notes_info[id(n)]
                         nx = n_info["x"]
                         clef = n_info["clef"]
@@ -767,21 +991,27 @@ class StaffView:
                                     pygame.draw.line(staff_surf, ledger_col, (lx0, ly), (lx1, ly), 1)
 
                         # Stem and flags
-                        stem_up = (step < TREBLE_MID_STEP) if clef == CLEF_TREBLE else (step < BASS_MID_STEP)
+                        stem_up = n_info.get("beam_stem_up", n_info.get("chord_stem_up", (step < TREBLE_MID_STEP if clef == CLEF_TREBLE else step < BASS_MID_STEP)))
+                        y_top = n_info.get("y_top", ny)
+                        y_bot = n_info.get("y_bot", ny)
                         stem_col = mix(STEM_COLOR, color, 0.5) if sounding else STEM_COLOR
 
-                        if has_stem:
+                        # One stem for the whole chord: notes struck together on one staff
+                        # share a single stem, all pointing the same way.
+                        stem_key = n_info.get("stem_key", (id(n), clef))
+                        if has_stem and stem_key not in rendered_chord_stems:
+                            rendered_chord_stems.add(stem_key)
                             if stem_up:
                                 sx = round(nx + nw - 1)
-                                tip_y = round(ny - stem_len)
-                                pygame.draw.line(staff_surf, stem_col, (sx, round(ny)), (sx, tip_y), max(1, int(s * 0.16)))
-                                if flags > 0:
+                                tip_y = n_info.get("beam_tip_y", round(y_top - stem_len))
+                                pygame.draw.line(staff_surf, stem_col, (sx, round(y_bot)), (sx, tip_y), max(1, int(s * 0.16)))
+                                if flags > 0 and id(n) not in beamed_note_ids:
                                     draw_flags(staff_surf, sx, tip_y, s, True, stem_col, flags)
                             else:
                                 sx = round(nx - nw + 1)
-                                tip_y = round(ny + stem_len)
-                                pygame.draw.line(staff_surf, stem_col, (sx, round(ny)), (sx, tip_y), max(1, int(s * 0.16)))
-                                if flags > 0:
+                                tip_y = n_info.get("beam_tip_y", round(y_bot + stem_len))
+                                pygame.draw.line(staff_surf, stem_col, (sx, round(y_top)), (sx, tip_y), max(1, int(s * 0.16)))
+                                if flags > 0 and id(n) not in beamed_note_ids:
                                     draw_flags(staff_surf, sx, tip_y, s, False, stem_col, flags)
 
                         # Notehead

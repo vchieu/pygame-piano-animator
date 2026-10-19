@@ -648,10 +648,9 @@ def sanitize_notes(notes, min_duration: float = 0.05):
     out = []
     for n in ok:
         v, p = min(127, max(1, int(n.velocity))), _fit_to_piano(int(n.pitch))
-        end = max(n.end, n.start + min_duration)
-        if (v, p, end) != (n.velocity, n.pitch, n.end):
-            fixed += n.velocity != v or n.pitch != p
-            n = replace(n, velocity=v, pitch=p, end=end)
+        if (v, p) != (n.velocity, n.pitch):
+            fixed += 1
+            n = replace(n, velocity=v, pitch=p)
         out.append(n)
     if fixed:
         report.append("brought %d velocit(ies) / pitch(es) into range" % fixed)
@@ -671,7 +670,19 @@ def sanitize_notes(notes, min_duration: float = 0.05):
             if kept and n.start < kept[-1].end:
                 kept[-1] = replace(kept[-1], end=max(kept[-1].start + 1e-3, n.start))
                 cut += 1
+            if kept:
+                prev = kept[-1]
+                target_end = max(prev.end, prev.start + min_duration)
+                if target_end > prev.end:
+                    if n.start > prev.start:
+                        target_end = min(target_end, max(prev.start + 1e-3, n.start if n.start <= prev.end else n.start - 1e-3))
+                    kept[-1] = replace(prev, end=target_end)
             kept.append(n)
+        if kept:
+            prev = kept[-1]
+            target_end = max(prev.end, prev.start + min_duration)
+            if target_end > prev.end:
+                kept[-1] = replace(prev, end=target_end)
         result += kept
     if dup:
         report.append("merged %d doubled note(s)" % dup)
