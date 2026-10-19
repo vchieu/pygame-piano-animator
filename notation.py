@@ -354,6 +354,28 @@ def _flag(surf, sp, x_stem, y_tip, count, up, color):
     g.draw(surf, x_stem + (w / 2.0 if up else -w / 2.0), y_tip + ay * sp)
 
 
+def flag_extent(sp, count, up):
+    """
+    The ink a stem's flags cover, as (left, top, right, bottom) in pixels from the point
+    `_flag` hangs them on - the stem's anchor and the stem's tip. None when the note has
+    no flags, or the font or the glyph is missing.
+
+    A flag is part of a note's tail and reaches out beside the notehead, so `staff.py`
+    counts it when it decides which way a stem points. The box follows the glyph rather
+    than a guessed size, so it is right for whichever music font is installed.
+    """
+    kind = FLAGS.get(count)
+    if not kind:
+        return None
+    g = glyph(f"flag{kind}{'Up' if up else 'Down'}", sp, (255, 255, 255))
+    if g is None:
+        return None
+    w, h = g.size
+    _, ay = FLAG_UP_NW if up else FLAG_DOWN_SW
+    dx = max(1, round(STEM_SP * sp)) / 2.0 * (1 if up else -1)
+    return (g.ox + dx, g.oy + ay * sp, g.ox + w + dx, g.oy + h + ay * sp)
+
+
 def _dots(surf, sp, x_head_right, y, count, color):
     """The augmentation dots, the first one dotNoteDistance right of the notehead."""
     g = glyph("augmentationDot", sp, color)

@@ -14,6 +14,8 @@ v20YY.MM.DD.HHMM). Newest first.
   ledger lines.
 - The staff's notes are engraved like MuseScore's: real noteheads, flags, accidentals and dots from a proper
   music font, with stems and ledger lines at the same proportions.
+- Where the two hands play close together, a note's stem and a run of beamed notes now turn the other way rather
+  than be drawn over the other hand's notes, and are never pushed off the staff to get out of the way.
 - The sheet music staff is one of the parts the video export can record, and exporting on a small window no longer
   lets the staff squeeze the falling notes away.
 

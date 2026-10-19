@@ -275,10 +275,52 @@ Detailed design notes, kept up to date as features were added. Start with `CLAUD
   The stem direction comes from the same `stem_up_for` the chord layout uses; in practice an
   8va group is drawn high on the treble staff and stems down, an 8vb group low on the bass staff
   and stems up, so the stem term usually adds nothing.
+- **A stem or a beam keeps off the other hand's notes** (2026-10-19). Both hands draw at once on
+  one grand staff, and a tail is a long thin thing: a beam is a horizontal line, and the wrong
+  side of one hand's chord is exactly the height the other hand's note is drawn at. The note
+  whose notehead a tail would be printed on is found the same way everywhere - `all_heads`, one
+  `(x0, x1, y0, y1, id)` box per notehead of the system, on either staff, held in a `NoteHeads`
+  index - and `ink_overlap` adds up how much of a piece of ink would land on the boxes that
+  are not its own chord's, in pixels, so two placements can be compared.
+  - `layout_beam` lays the bar out **for both stem directions** and takes the one that covers
+    less. The engraver's direction (`stem_up_for`) is placed first, one stem length - or
+    `min_stem_spaces` for a stack of bars - off the notes' own edge, and pushed up to
+    `BEAM_SLIDE_SPACES` 2 spaces further outboard if something is in the way. If the bar still
+    lands on a note, the stems are **turned over and the bar goes with them**: the other side of
+    the notes is the side the other hand is not on. What is counted is the whole beam - the
+    bar, the second bar of a run of sixteenths, and each stem reaching the bar - not just the
+    bar as before, so the choice is made on what the group would really cover.
+  - A bar hanging off the **staff panel** is worse than one drawn across a note, so turning the
+    stems over is not a licence to leave the panel (`BEAM_OFF_PANEL_W` 4 per pixel in the
+    search, and a hard rule on the choice: a direction whose bar fits beats one whose bar does
+    not, whatever it would have covered; with both fitting, the covering decides and the
+    engraver's direction wins the tie). This matters: the old slide could push a bar off the
+    top of a 140 px panel to dodge a notehead, where it was drawn over the falling notes or not
+    drawn at all.
+  - `place_stem` does the same for a chord with no beam over it: it scores the stem (and its
+    flags, from `notation.flag_extent`) pointing up against pointing down, and the stem turns
+    over only when that is the better of the two. `compute_notes_info` keeps notes on one
+    staff far enough apart that this rarely bites - it is for where it does not, the two hands'
+    notes drawn together with the clash offsets out of room at the end of a system.
+  - **Cost** (the staff is redrawn every frame, and a beam is scored at several candidate
+    heights): the notehead boxes go through `NoteHeads`, sorted by their left edge, and
+    `near(x0, x1)` hands back only the few a stem or a bar at those x could reach - a walk
+    over the whole system per candidate was 4x the frame's draw time. `group_beams` also runs
+    before the chord loop, so a beamed chord (whose stems its group settles anyway) is not
+    looked at twice. Frame times for a staff draw, before -> after: 7.4/9.6/8.8/9.4 ms ->
+    8.0/9.2/7.1/9.0 ms over the two test songs at 140 and 280 px (measured on the development
+    container; the numbers wander by a millisecond or so between runs).
+  - Measured over the two test songs at 90/140/280 px (stems drawn across a notehead that is
+    not their own chord's, out of every stem drawn): demo song 276 -> 264 at each height; the
+    other 693 -> 687, 699 -> 687, 714 -> 708 (the rest are chord tones an octave apart, where
+    the stem's own notehead is in the way either way). Beams drawn off the panel: 3 -> 0 on a
+    run of eighths under a held note.
 - The hand colours (`HAND_COLORS`) are still the note colour. Tests: `tests/test_notation.py`
   (metrics, the codepoint table, the glyph cache, every glyph at four sizes, the painter's
   geometry, the clef and time-signature painters, the no-font fallback) and `tests/test_staff.py`
-  (the clefs and the digits as really drawn, the bracket clearing its group, the no-font path).
+  (the clefs and the digits as really drawn, the bracket clearing its group, the no-font path,
+  a beam turning its stems over to clear another hand's note and one that keeps the engraver's
+  when nothing is in the way, no beam hanging off the panel, a stem's own scoring).
 
 ## Fonts and frame pacing (v26.1.19.SNAPSHOT-14, -15)
 - Every font comes from the bundled typeface: Source Sans Pro, regular and bold (`assets/fonts`, SIL Open Font

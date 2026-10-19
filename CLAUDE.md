@@ -70,6 +70,11 @@ gestures, editor state after scripted keys). Keep tests fast and free of local d
   room - don't give either a fixed height, and don't push past the panel edge.
   `get_octave_transposition` shifts each note of a group by its own amount so one group spans
   several drawn heights. See `docs/ARCHITECTURE.md`.
+- A stem or a beam is drawn on the wrong side only when nothing is in the way, and it stays
+  inside the staff panel: `all_heads` (one box per notehead of the system, either staff) plus
+  `ink_overlap` are how `layout_beam` and `place_stem` decide to turn a tail over. Keep the
+  engraver's direction as the default and tie-break - and never let the fix push a bar off the
+  panel to dodge a notehead.
 - The left hand is solved as a mirrored right hand (`fingering.mirror_pitch`, about D4); the
   keyboard pattern is symmetric about D, so white/black properties survive mirroring.
 - Behaviour settings live in `pianist.BEHAVIORS`; the studio's behaviour page lists them

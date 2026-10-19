@@ -636,6 +636,89 @@ def test_beam_is_dead_level_and_stems_stretch_to_meet_it(screen):
         assert under, f"beam at y={y} has no stem reaching it"
 
 
+def test_a_beam_turns_its_stems_over_to_keep_off_the_other_hand():
+    # A beam is a horizontal line and the two hands draw at the same time: when the wrong
+    # side of one hand's chord is exactly the height the other hand's note is drawn at, the
+    # bar lands on it. Here two chords a step apart low on the treble staff - the engraver's
+    # stems point up - and another chord's notehead drawn exactly where that bar would go.
+    s = 8.0
+    nw = round(s * 0.75)
+    beam_w = max(2, round(staff.BEAM_WIDTH_SPACES * s))
+    gap = round(staff.BEAM_STEP_SPACES * s)
+    reach = round(staff.STEM_LEN_SPACES * s)
+    y_low, y_high = 100.0, 96.0
+    stops = [(200.0, y_high, y_high, False), (240.0, y_low, y_low, False)]
+    default_up = staff.stem_up_for({staff.TREBLE_MID_STEP - 2, staff.TREBLE_MID_STEP - 1},
+                                   staff.TREBLE_MID_STEP)
+    assert default_up is True
+
+    # nobody there: the engraver's direction stands, with the bar where he asked for it
+    up, tip = staff.layout_beam(stops, default_up, reach, beam_w, gap, nw, [], set(), s)
+    assert up is default_up and tip == round(y_high - reach)
+
+    # the other hand's note, at the height of the bar that direction puts there: the stems
+    # turn over and the bar goes with them, below the chords and clear of the note
+    heads = [(205.0, 235.0, y_high - reach - 4, y_high - reach + 4, 1)]
+    up, tip = staff.layout_beam(stops, default_up, reach, beam_w, gap, nw, heads, set(), s)
+    assert up is False
+    assert tip >= round(y_low + reach)
+    assert staff.ink_overlap(200, 240, tip - beam_w / 2, tip + beam_w / 2, heads, set()) == 0
+
+    # a bar that has to leave the staff panel to clear a note is not worth it
+    tight = [(205.0, 235.0, y_low + reach + 20, y_low + reach + 24, 1)]
+    up, tip = staff.layout_beam(stops, default_up, reach, beam_w, gap, nw, tight, set(), s,
+                                 panel=(0, 140))
+    assert up is default_up, "the stems turned over into a bar outside the staff panel"
+    assert tip == round(y_high - reach)
+
+
+def test_a_beam_never_hangs_off_the_staff_panel(screen):
+    # The same on a real drawing: a run of the left hand's eighths with the right hand
+    # holding a note at the height their bar would take. Nothing may be pushed outside the
+    # staff panel to dodge it - on a small panel that pushes the bar off the screen.
+    notes = [_note(p, 0.25 * i, LEFT, dur=0.22) for i, p in enumerate((69, 71, 69, 71))]
+    notes.append(_note(81, 0.55, RIGHT, dur=0.45))       # A5: two ledger lines above the treble
+    song = _BracketSong(notes)
+
+    for height in (90, 140, 280):
+        rect = pygame.Rect(0, 0, 1200, height)
+        bars = []
+        real_lines = pygame.draw.lines
+
+        def spy(surf, color, closed, pts, width):
+            if pts and len(pts) >= 2 and len(set(p[1] for p in pts)) == 1:
+                bars.append((pts[0][1], width))
+            return real_lines(surf, color, closed, pts, width)
+
+        pygame.draw.lines = spy
+        try:
+            staff.StaffView(song).draw(screen, rect, 1.0)
+        finally:
+            pygame.draw.lines = real_lines
+
+        assert bars, f"the test song should draw a beam at {height}px"
+        for y, w in bars:
+            assert rect.top <= y - w / 2 and y + w / 2 <= rect.bottom, (
+                f"a bar at y={y} hangs off the {height}px staff panel")
+
+
+def test_a_stem_turns_over_rather_than_run_through_another_note():
+    # place_stem scores one stem's ink - and its flags - against the noteheads that are
+    # not its own chord's, so the two directions can be compared. A stem up from a note
+    # below the middle line lands on a note a fourth above it; turned down it does not.
+    s = 7.0
+    stem_len = round(staff.STEM_LEN_SPACES * s)
+    x, y = 200.0, 100.0
+    y_f5 = y - 7 * s * 0.5                               # a fifth up: exactly a stem's reach
+    heads = [(x - 30, x + 30, y_f5 - 5, y_f5 + 5, 1)]    # another chord's note, up there
+
+    assert staff.place_stem(True, x, y, y, stem_len, 0, s, heads, set()) > 0
+    assert staff.place_stem(False, x, y, y, stem_len, 0, s, heads, set()) == 0
+    # the chord's own notehead is never in the way, either way
+    own = [(x - 5, x + 5, y - 5, y + 5, 2)]
+    assert staff.place_stem(True, x, y, y, stem_len, 0, s, own, {2}) == 0
+
+
 def test_a_beamed_notehead_never_sits_on_the_beam(screen):
     # A beamed note's stem may not be so short that the notehead runs into the bars. The
     # bars are a stack (a run of sixteenths carries two), so a sixteenth run needs a

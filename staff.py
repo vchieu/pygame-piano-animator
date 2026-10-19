@@ -528,6 +528,171 @@ def group_beams(chords: List[List[Note]], notes_info: dict, beat_of, measure_of)
     return beam_groups
 
 
+class NoteHeads:
+    """
+    Where every notehead of a system sits, and a quick way to ask which of them a piece of
+    ink could be printed on.
+
+    The boxes are one (x0, x1, y0, y1, id(note)) each, on either staff, sorted by their
+    left edge - they are all about a notehead wide, so the right edges are sorted too -
+    which turns "what could this stem or bar run over" into a short run of them instead of
+    a walk over the whole system. The staff is redrawn every frame and a beam is scored
+    against several candidate heights, so that walk is what the frame time is made of.
+    """
+
+    def __init__(self, boxes):
+        self.boxes = sorted(boxes)
+        self._left = [b[0] for b in self.boxes]
+        self._widest = max((b[1] - b[0] for b in self.boxes), default=0.0)
+
+    def near(self, x0: float, x1: float):
+        """The noteheads a piece of ink from `x0` to `x1` could reach."""
+        lo = bisect.bisect_left(self._left, x0)
+        hi = bisect.bisect_right(self._left, x1 + self._widest)
+        return [b for b in self.boxes[lo:hi] if b[1] >= x0]
+
+
+def ink_overlap(x0: float, x1: float, y0: float, y1: float, boxes, skip) -> float:
+    """
+    How much of a piece of ink would be printed on top of the noteheads in `boxes`, and
+    `skip` (the ids of the notes the ink belongs to) is left out of it.
+
+    Overlap is measured in pixels, so the two directions a stem or a beam can take can be
+    compared with each other. `boxes` is what `NoteHeads.near` hands back - a few noteheads
+    around the ink, not the whole system.
+    """
+    total = 0.0
+    for hx0, hx1, hy0, hy1, nid in boxes:
+        if nid in skip or x1 <= hx0 or hx1 <= x0:
+            continue
+        total += max(0.0, min(y1, hy1) - max(y0, hy0))
+    return total
+
+
+# How far a beam may be pushed outboard to get off a notehead, in staff spaces. MuseScore
+# slides a beam clear of what it runs over (beamlayout.cpp, Beam::calculateBeamStart); this
+# is the bound on that, and past it the beam keeps the least bad height it found.
+BEAM_SLIDE_SPACES = 2.0
+
+# What a bar hanging off the top or bottom of the staff panel costs, per pixel it pokes
+# out. Set past any plausible overlap with a notehead (a notehead is ~1 space, tens of
+# pixels, tall), so a bar that would leave the panel only does so when nothing inside it
+# is better - a beam drawn over the falling notes above the staff is worse than one drawn
+# across a note, but it is still a last resort.
+BEAM_OFF_PANEL_W = 4.0
+
+
+def layout_beam(stops, default_up, reach, beam_w, gap, nw, boxes, own, s, panel=None):
+    """
+    Where a beam's bar goes and which way its stems point: (stems_up, bar_y).
+
+    `stops` is one (x, y_top, y_bot, is16) per chord of the group - the note's own x and
+    the top and bottom of its noteheads - and `default_up` the direction the engraver
+    asked for (`stem_up_for`). `boxes` is the noteheads near the group (`NoteHeads.near`),
+    and `panel` the staff panel's (top, bottom) when there is one, so a bar cannot be pushed
+    off it.
+
+    A beam is a horizontal line, and the two hands draw at the same time, so the bar has
+    to keep off the noteheads of the chords it does not belong to - on either staff,
+    since a bar reaching out of one staff can cross the gap and land on the other. It is
+    placed one stem length (more for a stack of bars) off the notes' own edge, on the
+    side the stems point to, and pushed a little further that way if something is in the
+    way. When it still lands on a note - which is what happens when the wrong side of one
+    hand's chord is exactly the height the other hand's note is drawn at - the stems are
+    turned the other way and the bar goes with them: the bar is only there to join the
+    group's stems, and the other side of the notes is the side the other hand is not on.
+
+    The stems and the second bar of a run of sixteenths are counted too, not just the
+    outer bar, so the direction is chosen on what the whole beam would cover.
+    """
+    half = beam_w / 2.0
+    sw = max(1, round(STEM_WIDTH_SPACES * s)) / 2.0
+    step = max(1, round(s * 0.25))
+    slide = max(step, round(s * BEAM_SLIDE_SPACES))
+    any16 = any(st[3] for st in stops)
+
+    def stem_x(x, up):
+        """The x the stems stand on: the notehead's far edge, as `draw_staff_note` puts it."""
+        return round(x + nw - 1) if up else round(x - nw + 1)
+
+    def off_panel(tip):
+        """How far a bar at `tip` would hang outside the staff panel (0 when it fits)."""
+        if panel is None:
+            return 0.0
+        return max(0.0, panel[0] - (tip - half)) + max(0.0, (tip + half) - panel[1])
+
+    def run_on(tip, up):
+        """What a bar at `tip`, with its stems `up`, would be printed on."""
+        off = -gap if up else gap
+        left, right = stem_x(stops[0][0], up), stem_x(stops[-1][0], up)
+        total = ink_overlap(left, right, tip - half, tip + half, boxes, own)
+        if any16:
+            total += ink_overlap(left, right, tip + off - half, tip + off + half, boxes, own)
+        for x, y_top, y_bot, _ in stops:
+            sx = stem_x(x, up)
+            far = y_bot if up else y_top          # the stem starts at the chord's far edge
+            total += ink_overlap(sx - sw, sx + sw, min(far, tip), max(far, tip), boxes, own)
+        return total + BEAM_OFF_PANEL_W * off_panel(tip)
+
+    def place(up):
+        """The bar's height with the stems `up`, and what it would cover there."""
+        base = round(min(st[1] for st in stops) - reach) if up \
+            else round(max(st[2] for st in stops) + reach)
+        best, best_hit = base, run_on(base, up)
+        if best_hit <= 0.0:
+            return best, best_hit
+        away = -1 if up else 1                   # outboard: further from the group's notes
+        for k in range(step, slide + step, step):
+            cand = round(base + away * k)
+            hit = run_on(cand, up)
+            if hit <= 0.0:
+                return cand, hit
+            if hit < best_hit:
+                best, best_hit = cand, hit
+        return best, best_hit
+
+    first_tip, first_hit = place(default_up)
+    other_tip, other_hit = place(not default_up)
+    # A bar drawn off the staff panel is worse than one drawn across a note, so turning
+    # the stems over is not a licence to leave the panel: a direction whose bar fits beats
+    # one whose bar does not, whatever it would have covered. When both fit - the usual
+    # case - it is the covering that decides, and the engraver's direction wins a tie.
+    if off_panel(first_tip) <= 0.0 and off_panel(other_tip) > 0.0:
+        return default_up, first_tip
+    if off_panel(other_tip) <= 0.0 and off_panel(first_tip) > 0.0:
+        return not default_up, other_tip
+    if other_hit < first_hit:
+        return not default_up, other_tip
+    return default_up, first_tip
+
+
+def place_stem(up, x, y_top, y_bot, stem_len, flags, sp, boxes, own):
+    """
+    What a lone stem at `x`, with its flags, would be printed on if it pointed `up`:
+    the pixels it covers among the noteheads in `boxes` that are not its own chord's (so
+    `boxes` is the short list `NoteHeads.near` hands back, not the whole system).
+
+    A stem is 3.5 spaces long, so it reaches well past its own note. Usually the notes
+    beside it are spread far enough not to care (compute_notes_info keeps them a notehead
+    and a half apart), but where they are not - the two hands' notes drawn together where
+    the clash offsets have run out of room - the stem runs straight across another hand's
+    notehead. This is what tells the chord layout which way to turn it.
+    """
+    head_w = notation.NOTEHEAD_W_SP * sp
+    ax, _ = notation.STEM_UP_SE if up else notation.STEM_DOWN_NW
+    anchor = x - head_w / 2.0 + ax * sp         # draw_staff_note's stem anchor
+    stem_w = max(1, round(notation.STEM_SP * sp)) / 2.0
+    sx = anchor - (stem_w if up else 0.0)
+    tip = round(y_top - stem_len) if up else round(y_bot + stem_len)
+    far = y_bot if up else y_top                 # the stem starts at the chord's far edge
+    total = ink_overlap(sx - stem_w, sx + stem_w, min(far, tip), max(far, tip), boxes, own)
+    box = notation.flag_extent(sp, flags, up)
+    if box is not None:
+        total += ink_overlap(anchor + box[0], anchor + box[2],
+                             tip + box[1], tip + box[3], boxes, own)
+    return total
+
+
 def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: float, usable_w: float,
                        margin_left: float, s: float, beat_len: float = 0.5) -> dict:
     """
@@ -946,6 +1111,41 @@ class StaffView:
                     beat_len = get_beat_duration(self.song)
                     time_clusters = group_chords(sorted_notes, beat_len)
 
+                    # Where every notehead sits. A stem or a beam is not allowed to run over
+                    # one of these that belongs to another chord - not even one on the other
+                    # staff, since a bar reaching out of one staff can cross the gap and
+                    # land on the other. MuseScore runs the same check (beamlayout.cpp,
+                    # checkBeamNoteOverlap) and moves the beam clear of the note; here it is
+                    # read before the chords are drawn, so a stem that would be printed on
+                    # another hand's note can be turned the other way as well.
+                    all_heads = []
+                    for n in sys.notes:
+                        i = notes_info[id(n)]
+                        ny_ = note_y(i["step_draw"], i["clef"], treble_mid_y, bass_mid_y, s)
+                        hw = round(nw * 1.15) if note_value(n.duration,
+                                                             get_beat_duration(self.song, n.start)) == WHOLE else nw
+                        all_heads.append((i["x"] - hw, i["x"] + hw, ny_ - nh, ny_ + nh, id(n)))
+                    heads = NoteHeads(all_heads)
+
+                    # Beaming: short notes of one hand on one staff are joined, but only the
+                    # ones that follow straight on from each other, and only a few at a
+                    # time. Notes that are a real step apart in the rhythm (a rest, a
+                    # longer note, a bar line) end the group, so no beam ever reaches
+                    # across notes that have nothing to do with each other. Grouped here,
+                    # before the chords: a beamed chord's stems are settled with its group,
+                    # so its own stem is not looked at twice.
+                    beamed_note_ids = set()
+                    measure_of = {}
+                    for m in sys.measures:
+                        for n in sys.notes:
+                            if m.start_t <= n.start < m.end_t:
+                                measure_of[id(n)] = m
+
+                    beam_groups = group_beams(time_clusters, notes_info,
+                                              lambda st_: get_beat_duration(self.song, st_), measure_of)
+                    for bg in (g[1] for g in beam_groups):
+                        beamed_note_ids.update(id(n) for sub in bg for n in sub)
+
                     # Compute chord-level stem direction and y-bounds for each cluster
                     for tc_idx, tc in enumerate(time_clusters):
                         by_c = {CLEF_TREBLE: [], CLEF_BASS: []}
@@ -963,6 +1163,27 @@ class StaffView:
                             ny_list = [note_y(notes_info[id(n)]["step_draw"], c, treble_mid_y, bass_mid_y, s) for n in c_notes]
                             y_top = min(ny_list)
                             y_bot = max(ny_list)
+
+                            # A stem 3.5 spaces long reaches well past its own notehead, and
+                            # where the notes around it are too close - the two hands'
+                            # notes drawn together, with the clash offsets out of room - it
+                            # runs across the other hand's. Turn it over when that happens
+                            # and the other side is clear, and only then, so a chord with
+                            # nothing in the way keeps the direction the engraver chose.
+                            # A beamed chord is settled with its group instead (below).
+                            if (note_value(c_notes[0].duration, beat_len) != WHOLE
+                                    and not any(id(n) in beamed_note_ids for n in c_notes)):
+                                own_c = {id(n) for n in c_notes}
+                                cx = notes_info[id(c_notes[0])]["x"]
+                                flags = max(notation.note_shape(n.duration, beat_len)[1]
+                                            for n in c_notes)
+                                near = heads.near(cx - nw - s, cx + nw + 2 * s)
+                                up_hit = place_stem(chord_stem_up, cx, y_top, y_bot,
+                                                   stem_len, flags, s, near, own_c)
+                                down_hit = place_stem(not chord_stem_up, cx, y_top, y_bot,
+                                                      stem_len, flags, s, near, own_c)
+                                if down_hit < up_hit:
+                                    chord_stem_up = not chord_stem_up
 
                             for n in c_notes:
                                 info_n = notes_info[id(n)]
@@ -985,123 +1206,62 @@ class StaffView:
                                 draw_arpeggio_wavy_line(staff_surf, chord_x - nw - round(s * 0.6),
                                                         y_top - s * 0.4, y_bot + s * 0.4, s, arp_col)
 
-                    # Beaming: short notes of one hand on one staff are joined, but only the
-                    # ones that follow straight on from each other, and only a few at a
-                    # time. Notes that are a real step apart in the rhythm (a rest, a
-                    # longer note, a bar line) end the group, so no beam ever reaches
-                    # across notes that have nothing to do with each other.
-                    beamed_note_ids = set()
-                    measure_of = {}
-                    for m in sys.measures:
-                        for n in sys.notes:
-                            if m.start_t <= n.start < m.end_t:
-                                measure_of[id(n)] = m
-
-                    beam_groups = group_beams(time_clusters, notes_info,
-                                             lambda st_: get_beat_duration(self.song, st_), measure_of)
-
-                    # Where every notehead sits. A beam is not allowed to run over one of these that
-                    # belongs to another chord - not even one on the other staff, since a
-                    # bar reaching out of one staff can cross the gap and land on the other.
-                    # MuseScore runs the same check (beamlayout.cpp, checkBeamNoteOverlap)
-                    # and moves the beam clear of the note.
-                    all_heads = []
-                    for n in sys.notes:
-                        i = notes_info[id(n)]
-                        ny_ = note_y(i["step_draw"], i["clef"], treble_mid_y, bass_mid_y, s)
-                        hw = round(nw * 1.15) if note_value(n.duration,
-                                                             get_beat_duration(self.song, n.start)) == WHOLE else nw
-                        all_heads.append((i["x"] - hw, i["x"] + hw, ny_ - nh, ny_ + nh, id(n)))
-
                     # Draw the beams: a bar along the stems, plus a second, shorter bar
-                    # inwards for the 16th notes of the run.
+                    # inwards for the 16th notes of the run. The groups were decided above.
                     for c, bg in beam_groups:
                         notes_here = [n for sub in bg for n in sub]
-                        for n in notes_here:
-                            beamed_note_ids.add(id(n))
 
                         mid_step = TREBLE_MID_STEP if c == CLEF_TREBLE else BASS_MID_STEP
-                        beam_stem_up = stem_up_for(
+                        default_up = stem_up_for(
                             {notes_info[id(n)]["step_draw"] for n in notes_here}, mid_step)
 
-                        # Where each chord's stem starts, and whether the chord needs a second bar.
+                        # Where each chord's noteheads are, and whether it needs a second bar.
                         stops = []
                         for sub in bg:
                             x = notes_info[id(sub[0])]["x"]
                             y_top = min(notes_info[id(n)]["y_top"] for n in sub)
                             y_bot = max(notes_info[id(n)]["y_bot"] for n in sub)
-                            sx = round(x + nw - 1) if beam_stem_up else round(x - nw + 1)
                             is16 = any(note_value(n.duration, get_beat_duration(self.song, n.start)) == SIXTEENTH
                                        for n in sub)
-                            stops.append({"x": sx, "near": y_top if beam_stem_up else y_bot,
-                                          "is16": is16, "notes": sub})
+                            stops.append((x, y_top, y_bot, is16))
 
                         # The bar is dead level, so it is the stems that give way. How far
                         # it stands off the notes depends on how many bars are stacked: a
                         # run of sixteenths carries a second bar under the first, and the
                         # stem has to be long enough that the notehead never sits on them.
-                        bars = 2 if any(st["is16"] for st in stops) else 1
+                        bars = 2 if any(st[3] for st in stops) else 1
                         reach = max(stem_len, round(min_stem_spaces(bars) * s))
-                        tip = (round(min(st["near"] for st in stops) - reach) if beam_stem_up
-                               else round(max(st["near"] for st in stops) + reach))
-
                         beam_w = max(2, round(BEAM_WIDTH_SPACES * s))
-                        bx0, bx1 = stops[0]["x"], stops[-1]["x"]
-                        own = {id(n) for sub in bg for n in sub}
+                        gap = round(BEAM_STEP_SPACES * s)
+                        own = {id(n) for n in notes_here}
 
-                        def beam_overlap(y_at):
-                            """How far the bar would sit on top of other chords' noteheads."""
-                            half = beam_w / 2.0
-                            total = 0.0
-                            for hx0, hx1, hy0, hy1, nid in all_heads:
-                                if nid in own:
-                                    continue
-                                # only a note the bar really runs over counts; a head
-                                # grazed at the very tip of the bar is beside it, not on it
-                                if min(hx1, bx1) - max(hx0, bx0) < nw * 0.5:
-                                    continue
-                                ov = min(hy1, y_at + half) - max(hy0, y_at - half)
-                                if ov > 0:
-                                    total += ov
-                            return total
-
-                        # Slide the bar outboard, away from the notes it belongs to, until it
-                        # runs over nothing else. Outboard always keeps clear of its own
-                        # notes, so this can only improve things; if even after a couple of
-                        # spaces something is in the way, take the least bad spot rather than
-                        # the one we started from.
-                        away = -1 if beam_stem_up else 1
-                        step = max(1, round(s * 0.25))
-                        best_tip, best_ov = tip, beam_overlap(tip)
-                        for k in range(1, round(s * 2) + step, step):
-                            cand = round(tip + away * k)
-                            ov = beam_overlap(cand)
-                            if ov <= 0:
-                                best_tip, best_ov = cand, ov
-                                break
-                            if ov < best_ov:
-                                best_tip, best_ov = cand, ov
-                        tip = best_tip
+                        # The engraver's direction first; turned over only if the bar it
+                        # puts there would run over another chord's notehead (the other
+                        # hand's, most of the time - see layout_beam).
+                        near = heads.near(min(st[0] for st in stops) - nw,
+                                          max(st[0] for st in stops) + nw)
+                        beam_stem_up, tip = layout_beam(stops, default_up, reach, beam_w,
+                                                        gap, nw, near, own, s,
+                                                        (local_rect.top, local_rect.bottom))
 
                         outer, inner = [], []
                         run = []
-                        for st in stops:
-                            outer.append((st["x"], tip))
-                            for n in st["notes"]:
+                        for sub, (x, _y_top, _y_bot, is16) in zip(bg, stops):
+                            sx = round(x + nw - 1) if beam_stem_up else round(x - nw + 1)
+                            outer.append((sx, tip))
+                            for n in sub:
                                 notes_info[id(n)]["beam_stem_up"] = beam_stem_up
                                 notes_info[id(n)]["beam_tip_y"] = tip
                             # the second bar covers only the stretch of 16th notes
-                            if st["is16"]:
-                                run.append((st["x"], tip))
+                            if is16:
+                                run.append((sx, tip))
                             elif run:
                                 inner.append(run)
                                 run = []
                         if run:
                             inner.append(run)
 
-                        beam_w = max(2, round(BEAM_WIDTH_SPACES * s))
                         pygame.draw.lines(staff_surf, STEM_COLOR, False, outer, beam_w)
-                        gap = round(BEAM_STEP_SPACES * s)
                         off = -gap if beam_stem_up else gap
                         for run in inner:
                             shifted = [(x, y + off) for x, y in run]
