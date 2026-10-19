@@ -55,7 +55,7 @@ gestures, editor state after scripted keys). Keep tests fast and free of local d
 | `pianist.py` | `Pianist` model (anatomy, behaviour settings, skin), storage in `pianists/` |
 | `hand_editor.py` | "Pianists & hands" studio (browser, overview - with fingers curled by the wheel, `hands.bend_chain` - anatomy, behaviour pages) |
 | `editor.py` | Fingering editor (piano roll, context menus, undo, sequential mode, difficulty, export) |
-| `notation.py` | Drawing staff notes the way MuseScore does: Leland's SMuFL glyphs (bundled, OFL) at MuseScore's metrics and anchors; `staff.py` draws its notes through it, `note_shape` (duration → head/flags/dots) is what `staff.note_value` looks up. Without the font the staff falls back to plain shapes. The falling notes and the editor's roll keep their own blocks |
+| `notation.py` | Drawing staff notes the way MuseScore does: Leland's SMuFL glyphs (bundled, OFL) at MuseScore's metrics and anchors - noteheads, flags, accidentals, dots, the treble and bass clefs (each on the staff line it names) and the 4/4 time signature; `staff.py` draws them all through it, `note_shape` (duration → head/flags/dots) is what `staff.note_value` looks up. Without the font every painter falls back to the plain shape it drew before (the staff keeps its hand-drawn clefs and the UI font's digits). The falling notes and the editor's roll keep their own blocks |
 | `paths.py` | Where bundled files are (`resource()`) and where the user's data goes (`DATA_DIR`: beside the code from source; `%APPDATA%\Hand-thesia` or a portable `pianists` folder beside the .exe when compiled) |
 | `build.py` | Nuitka single-file build (`dist/Hand-thesia.exe`); `requirements-build.txt`, `assets/` (icon, from `tools/make_icon.py`) |
 | `version.py` | `VERSION` (`vYY.MAJOR.MINOR`, e.g. `v26.1.0`), shown in the window title and bottom-left corner |
@@ -63,6 +63,13 @@ gestures, editor state after scripted keys). Keep tests fast and free of local d
 
 ## Conventions and gotchas
 
+- The staff's music (noteheads, clefs, the time signature) is Leland's, drawn through
+  `notation.py`; the 8va/8vb bracket's line is placed from the notes it covers
+  (`draw_octave_brackets`: fully above for 8va/15ma, fully below for 8vb/15mb, clamped to
+  the panel) and its label is kept off other groups' noteheads, but only while the panel has
+  room - don't give either a fixed height, and don't push past the panel edge.
+  `get_octave_transposition` shifts each note of a group by its own amount so one group spans
+  several drawn heights. See `docs/ARCHITECTURE.md`.
 - The left hand is solved as a mirrored right hand (`fingering.mirror_pitch`, about D4); the
   keyboard pattern is symmetric about D, so white/black properties survive mirroring.
 - Behaviour settings live in `pianist.BEHAVIORS`; the studio's behaviour page lists them
@@ -113,8 +120,8 @@ gestures, editor state after scripted keys). Keep tests fast and free of local d
   `pygame.font.SysFont` - the bundled typeface (assets/fonts, OFL) looks the same on every system, unless the
   user chose another (Settings > Font, `common.set_font_choice`; characters it lacks are borrowed from the bundled
   one, `FallbackFont`). Text must fit any font: shorten with `fit_text`.
-  This is about text; the music font (Leland, SMuFL glyphs - noteheads, flags, accidentals) is
-  `notation.py`'s own `pygame.freetype.Font`, not a UI font.
+  This is about text; the music font (Leland, SMuFL glyphs - noteheads, flags, accidentals, clefs,
+  time-signature digits) is `notation.py`'s own `pygame.freetype.Font`, not a UI font.
 - Don't commit third-party data (MIDI collections, PIG files, PDFs, reference images) or
   personal `pianists/` files; `.gitignore` covers them.
 - Windows is the main target (the author's machine); paths go through `os.path`, and file

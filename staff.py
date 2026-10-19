@@ -294,7 +294,11 @@ def build_systems(song, target_dur: float = 10.0) -> List[StaffSystem]:
 # --------------------------------------------------------------------------- #
 
 def draw_treble_clef(surf: pygame.Surface, x: float, mid_y: float, s: float, color: Tuple[int, int, int]):
-    """Draw a G clef centered around B4 (mid_y) with inner spiral wrapping G4 (mid_y + s)."""
+    """A G clef on the line it names: G4, mid_y + s (SMuFL puts a clef's origin there).
+    The hand-drawn shape below is what it falls back to without the music font."""
+    if notation.draw_clef(surf, x, mid_y + s, s, color, "gClef"):
+        return
+
     spine_x = x + s * 1.15
     y_top = mid_y - s * 2.8
     y_bot = mid_y + s * 2.7
@@ -337,7 +341,11 @@ def draw_treble_clef(surf: pygame.Surface, x: float, mid_y: float, s: float, col
 
 
 def draw_bass_clef(surf: pygame.Surface, x: float, mid_y: float, s: float, color: Tuple[int, int, int]):
-    """Draw an F clef with starting dot on F3 (mid_y - s) and two dots in surrounding spaces."""
+    """An F clef on the line it names: F3, mid_y - s. Without the music font it falls back
+    to the hand-drawn shape below - a dot on that line and an arc off it."""
+    if notation.draw_clef(surf, x, mid_y - s, s, color, "fClef"):
+        return
+
     f_line_y = mid_y - s
     r_dot = max(2, int(s * 0.45))
     line_w = max(2, int(s * 0.22))
@@ -361,6 +369,33 @@ def draw_bass_clef(surf: pygame.Surface, x: float, mid_y: float, s: float, color
     dot_x = round(x + s * 1.8)
     pygame.draw.circle(surf, color, (dot_x, round(f_line_y - s * 0.5)), dot_r)
     pygame.draw.circle(surf, color, (dot_x, round(f_line_y + s * 0.5)), dot_r)
+
+
+def clef_ink_w(sp: float) -> float:
+    """How wide the widest clef's ink is at `sp` staff spaces, so the time signature
+    can be placed clear of it (a treble clef is 2.56 sp wide, a bass one 2.66)."""
+    w = 0.0
+    for name in ("gClef", "fClef"):
+        g = notation.glyph(name, sp, CLEF_COLOR)
+        if g is not None:
+            w = max(w, g.size[0])
+    return w or float(round(sp * 2.0))       # the hand-drawn clefs, without the font
+
+
+# The gap the time signature's column keeps off the clefs, in staff spaces.
+TIME_SIG_GAP_SPACES = 0.35
+
+
+def time_sig_x(left_x: float, sp: float) -> float:
+    """
+    Where the time signature's column sits: `left_x + 4.6 sp`, or further right if the
+    clefs would run into it (a 2.66 sp bass clef at `left_x + 8` reaches `left_x + 4.6 sp`
+    at the smallest staff sizes, s = 4). The left margin is only so wide - the first note
+    is at MARGIN_LEFT - so the column does not move further than it has to.
+    """
+    half = notation.TIME_SIG_HALF_W_SP * sp
+    return max(left_x + round(sp * 4.6),
+               left_x + 8 + round(clef_ink_w(sp) + (TIME_SIG_GAP_SPACES * sp + half)))
 
 
 def draw_arpeggio_wavy_line(surf: pygame.Surface, x: float, y_top: float, y_bottom: float, s: float, color: Tuple[int, int, int]):
@@ -630,7 +665,26 @@ def draw_dashed_line(surf: pygame.Surface, color: Tuple[int, int, int], start_po
         curr += dash_len + space_len
 
 
-def draw_octave_brackets(surf: pygame.Surface, notes_info: dict, sys_notes: List[Note], treble_mid_y: float, bass_mid_y: float, s: float):
+# How far the bracket's dashed line keeps off the notes it covers: a bit under a third of a
+# staff space, so it sits close enough to read as part of them and far enough to be clear.
+OCTAVE_GAP_SPACES = 0.35
+
+
+def draw_octave_brackets(surf: pygame.Surface, notes_info: dict, sys_notes: List[Note],
+                         treble_mid_y: float, bass_mid_y: float, s: float,
+                         local_rect: Optional[pygame.Rect] = None):
+    """
+    The 8va / 15ma and 8vb / 15mb brackets over each group of transposed notes.
+
+    A group holds notes shifted by their own amount (get_octave_transposition), so it
+    covers a range of drawn heights - a chord of E7 + C6 puts the E7 at -1.5 sp and the
+    C6 at -2.5 sp from the treble middle line. The line's height is worked out from the
+    group's own notes, so it always clears all of them: fully above for 8va/15ma (and
+    above an up-stem too, which pokes higher), fully below for 8vb/15mb. `local_rect` is
+    the staff panel, and the line is kept inside it - for the few pitches whose notes sit
+    right at the panel's edge the clamp wins, since a bracket off the panel is worse than
+    one crossing a notehead.
+    """
     if not sys_notes:
         return
 
@@ -664,9 +718,27 @@ def draw_octave_brackets(surf: pygame.Surface, notes_info: dict, sys_notes: List
     if curr_group:
         groups.append(curr_group)
 
+    head_h = notation.NOTEHEAD_H_SP * s / 2.0        # half a notehead's ink height
+    head_w = notation.NOTEHEAD_W_SP * s / 2.0
+    gap = OCTAVE_GAP_SPACES * s
+    stem_len = STEM_LEN_SPACES * s
+
+    # Every notehead on this system, per staff: the bracket's own height comes from the notes
+    # of its group, but its label sits to the left of them and could land on a notehead from
+    # another group, so those are what the label is kept off as well.
+    ink_bands = {CLEF_TREBLE: [], CLEF_BASS: []}
+    for n in sys_notes:
+        info = notes_info[id(n)]
+        ink_bands[info["clef"]].append((id(n), info["x"] - head_w, info["x"] + head_w,
+                                         note_y(info["step_draw"], info["clef"],
+                                                treble_mid_y, bass_mid_y, s) - head_h,
+                                         note_y(info["step_draw"], info["clef"],
+                                                treble_mid_y, bass_mid_y, s) + head_h))
+
     for grp in groups:
         clef, shift, label = grp[0][1]
         grp_notes = [item[0] for item in grp]
+        grp_ids = {id(n) for n in grp_notes}
         xs = [notes_info[id(n)]["x"] for n in grp_notes]
         x_min = min(xs) - nw - 4
         x_max = max(xs) + nw + 12
@@ -675,26 +747,51 @@ def draw_octave_brackets(surf: pygame.Surface, notes_info: dict, sys_notes: List
         lbl_w = lbl_surf.get_width()
         lbl_h = lbl_surf.get_height()
 
+        steps = [notes_info[id(n)]["step_draw"] for n in grp_notes]
+        ys = [note_y(st, clef, treble_mid_y, bass_mid_y, s) for st in steps]
+        mid_step = TREBLE_MID_STEP if clef == CLEF_TREBLE else BASS_MID_STEP
+        up = stem_up_for(steps, mid_step)
+
+        # Notes of *other* groups that the label, printed to the left of this group's first
+        # note, would print on. (This group's own notes are already accounted for below.)
+        touching = [band for band in ink_bands[clef]
+                    if band[0] not in grp_ids
+                    and band[2] >= x_min - gap and band[1] <= x_min + lbl_w + gap]
         if clef == CLEF_TREBLE:
-            # Above treble staff
-            bracket_y = treble_mid_y - 2.8 * s
-            surf.blit(lbl_surf, (round(x_min), round(bracket_y - lbl_h * 0.5)))
-            line_x_start = x_min + lbl_w + 3
-            if x_max > line_x_start:
-                draw_dashed_line(surf, color, (line_x_start, bracket_y), (x_max, bracket_y), width=line_w)
-                # Downward hook
-                hook_y = bracket_y + s * 0.7
-                pygame.draw.line(surf, color, (round(x_max), round(bracket_y)), (round(x_max), round(hook_y)), line_w)
+            # 8va / 15ma: fully above the notes, and above a stem that pokes further up
+            bracket_y = min(ys) - head_h - (stem_len if up else 0.0) - gap
+            # ...and, if the panel has room for it, clear of the noteheads the label would
+            # print on. When it does not fit, the height that clears this group's own notes
+            # stands: that is the line's job, and pushing further would only land the whole
+            # bracket somewhere worse.
+            if touching:
+                want = min(b[3] for b in touching) - lbl_h * 0.5 - gap
+                if local_rect is None or want >= local_rect.top + gap:
+                    bracket_y = min(bracket_y, want)
+            if local_rect is not None:
+                bracket_y = max(bracket_y, local_rect.top + gap)
+            edge = min(ys) - head_h - gap                 # where the hook should stop
         else:
-            # Below bass staff
-            bracket_y = bass_mid_y + 2.8 * s
-            surf.blit(lbl_surf, (round(x_min), round(bracket_y - lbl_h * 0.5)))
-            line_x_start = x_min + lbl_w + 3
-            if x_max > line_x_start:
-                draw_dashed_line(surf, color, (line_x_start, bracket_y), (x_max, bracket_y), width=line_w)
-                # Upward hook
-                hook_y = bracket_y - s * 0.7
-                pygame.draw.line(surf, color, (round(x_max), round(bracket_y)), (round(x_max), round(hook_y)), line_w)
+            # 8vb / 15mb: fully below the notes, and below a stem that pokes further down
+            bracket_y = max(ys) + head_h + (0.0 if up else stem_len) + gap
+            if touching:
+                want = max(b[4] for b in touching) + lbl_h * 0.5 + gap
+                if local_rect is None or want <= local_rect.bottom - gap:
+                    bracket_y = max(bracket_y, want)
+            if local_rect is not None:
+                bracket_y = min(bracket_y, local_rect.bottom - gap)
+            edge = max(ys) + head_h + gap
+
+        surf.blit(lbl_surf, (round(x_min), round(bracket_y - lbl_h * 0.5)))
+        line_x_start = x_min + lbl_w + 3
+        if x_max > line_x_start:
+            draw_dashed_line(surf, color, (line_x_start, bracket_y), (x_max, bracket_y), width=line_w)
+            # The hook points back at the notes: down for 8va, up for 8vb, its tip stopping
+            # just short of the group's nearest ink (never past it, never floating off it).
+            hook_y = (edge if (bracket_y - edge) > s * 0.7 else bracket_y - s * 0.7) \
+                if clef == CLEF_TREBLE else \
+                (edge if (edge - bracket_y) > s * 0.7 else bracket_y + s * 0.7)
+            pygame.draw.line(surf, color, (round(x_max), round(bracket_y)), (round(x_max), round(hook_y)), line_w)
 
 class StaffView:
     """
@@ -790,20 +887,22 @@ class StaffView:
         pygame.draw.line(staff_surf, line_color, (br_x - 3, treble_top - 2), (br_x + 3, treble_top), 2)
         pygame.draw.line(staff_surf, line_color, (br_x - 3, bass_bot + 2), (br_x + 3, bass_bot), 2)
 
-        # 4. Clefs
+        # 4. Clefs - Leland's SMuFL glyphs, each on the staff line it names
         draw_treble_clef(staff_surf, left_x + 8, treble_mid_y, s, CLEF_COLOR)
         draw_bass_clef(staff_surf, left_x + 8, bass_mid_y, s, CLEF_COLOR)
 
-        # 5. Time signature '4/4'
-        ts_x = left_x + round(s * 4.6)
-        ts_font = ui_font(max(10, int(s * 1.6)), bold=True)
-        ts_img = ts_font.render("4", True, TIME_SIG_COLOR)
-        # Treble staff 4/4
-        staff_surf.blit(ts_img, ts_img.get_rect(center=(ts_x, round(treble_mid_y - s * 0.9))))
-        staff_surf.blit(ts_img, ts_img.get_rect(center=(ts_x, round(treble_mid_y + s * 0.9))))
-        # Bass staff 4/4
-        staff_surf.blit(ts_img, ts_img.get_rect(center=(ts_x, round(bass_mid_y - s * 0.9))))
-        staff_surf.blit(ts_img, ts_img.get_rect(center=(ts_x, round(bass_mid_y + s * 0.9))))
+        # 5. Time signature '4/4' - the numerator on the line above the middle one and the
+        # denominator on the line below (notation.draw_time_signature places them). The
+        # old UI-font digits are the fallback for a build without the music font.
+        ts_x = time_sig_x(left_x, s)
+        drawn = [notation.draw_time_signature(staff_surf, ts_x, ts_mid, s, 4, 4, TIME_SIG_COLOR)
+                 for ts_mid in (treble_mid_y, bass_mid_y)]
+        if not all(drawn):
+            ts_font = ui_font(max(10, int(s * 1.6)), bold=True)
+            ts_img = ts_font.render("4", True, TIME_SIG_COLOR)
+            for ts_mid in (treble_mid_y, bass_mid_y):
+                staff_surf.blit(ts_img, ts_img.get_rect(center=(ts_x, round(ts_mid - s * 0.9))))
+                staff_surf.blit(ts_img, ts_img.get_rect(center=(ts_x, round(ts_mid + s * 0.9))))
 
         if self.song and self.systems:
             # 6. Active system
@@ -839,7 +938,8 @@ class StaffView:
 
                     notes_info = compute_notes_info(sys.notes, sys.start_t, sys.duration, usable_w,
                                                     MARGIN_LEFT, s, get_beat_duration(self.song))
-                    draw_octave_brackets(staff_surf, notes_info, sys.notes, treble_mid_y, bass_mid_y, s)
+                    draw_octave_brackets(staff_surf, notes_info, sys.notes, treble_mid_y, bass_mid_y,
+                                         s, local_rect)
 
                     # Group sys.notes into chords, the same way compute_notes_info did
                     sorted_notes = sorted(sys.notes, key=lambda n: (n.start, n.pitch))

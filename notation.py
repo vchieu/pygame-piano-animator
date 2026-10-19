@@ -72,6 +72,22 @@ HEAD_BOX = {                     # head -> (left, top, right, bottom) in sp, y u
 NOTEHEAD_W_SP = HEAD_BOX["black"][2]                                   # 1.300 sp
 NOTEHEAD_H_SP = HEAD_BOX["black"][1] - HEAD_BOX["black"][3]           # 1.060 sp
 
+# SMuFL puts a clef's origin (GlyphOrigin) on the staff line the clef names, so placing
+# one is arithmetic rather than a fudge: gClef on G4 (the treble staff's second line from
+# the bottom, mid_y + s), fClef on F3 (the bass staff's second line from the top,
+# mid_y - s). Each clef's ink, measured from Leland at 256 px: (width, top, bottom) in
+# sp relative to the origin, y up - a treble clef reaches 4.469 sp above its line and
+# 2.672 sp below it, so it fills the whole treble staff and a little more.
+CLEF_BOX = {                    # clef -> (ink width, top, bottom) in sp, y up
+    "gClef": (2.562, 4.469, -2.672),
+    "fClef": (2.656, 1.000, -2.469),
+}
+# A time signature's digits are centred on their own line: a numerator on the staff line
+# above the middle one, a denominator on the line below, each filling the two and a bit
+# spaces either side of it (Leland's digits are 1.30-1.73 sp wide and 1.95-2.03 sp high).
+TIME_SIG_HALF_W_SP = 0.87                               # half the widest digit (a 6)
+DIGIT_GAP_SP = 0.06                                     # a two-digit number's gap
+
 # SMuFL codepoints (a public standard; MuseScore's SymIds for the same glyphs).
 GLYPHS = {
     "noteheadWhole": 0xE0A2,
@@ -85,6 +101,20 @@ GLYPHS = {
     "flag16thDown": 0xE243,
     "flag32ndUp": 0xE244,
     "flag32ndDown": 0xE245,
+    "gClef": 0xE050,
+    "fClef": 0xE062,
+    # The time signature's digits (SMuFL "Time signatures", U+E080-U+E089). There is
+    # no timeSig12 glyph: a 12 is a 1 and a 2 side by side (SMuFL gives them as a ligature).
+    "timeSig0": 0xE080,
+    "timeSig1": 0xE081,
+    "timeSig2": 0xE082,
+    "timeSig3": 0xE083,
+    "timeSig4": 0xE084,
+    "timeSig5": 0xE085,
+    "timeSig6": 0xE086,
+    "timeSig7": 0xE087,
+    "timeSig8": 0xE088,
+    "timeSig9": 0xE089,
 }
 # A stem's flags, by how many the note has: the 16th-note glyph carries both of
 # them, as in MuseScore, where a stem has a single Hook (hook.cpp:symIdForHookIndex).
@@ -127,6 +157,12 @@ class Glyph:
         """Blit the glyph with its origin at (x, y)."""
         surf.blit(self.surface, (round(x + self.ox), round(y + self.oy)))
 
+    def draw_centred(self, surf, x, y):
+        """Blit the glyph with its ink's centre at (x, y) - for a self-centred glyph
+        (a time signature's digit) rather than one placed by its SMuFL origin."""
+        w, h = self.size
+        self.draw(surf, x - (self.ox + w / 2.0), y - (self.oy + h / 2.0))
+
     @property
     def size(self):
         return self.surface.get_size()
@@ -143,9 +179,10 @@ def _load_font():
             pygame.register_quit(clear_cache)
             _quit_hooked = True
         try:
+            pygame.freetype.init()             # in case the app never called pygame.init()
             _font = pygame.freetype.Font(paths.resource("assets", "fonts", FONT_FILE),
                                          int(REF_SP * SP_PER_EM))
-        except (pygame.error, OSError):
+        except (pygame.error, OSError, RuntimeError):
             _font = False                    # tried and missing: don't try again
     return _font or None
 
@@ -251,6 +288,51 @@ def note_shape(duration, beat_len=0.5):
 # --------------------------------------------------------------------------- #
 # Drawing
 # --------------------------------------------------------------------------- #
+def draw_clef(surf, x, line_y, sp, color, name) -> bool:
+    """
+    A clef, placed the way SMuFL means it: its origin on the staff line the clef names
+    (`line_y` - G4 for a treble clef, F3 for a bass one) and its ink's left edge at `x`.
+
+    False when there is no font, or no such glyph in it: the caller then draws the plain
+    shape it drew before Leland was there.
+    """
+    g = glyph(name, sp, color)
+    if g is None:
+        return False
+    g.draw(surf, x - g.ox, line_y)
+    return True
+
+
+def _digit_row(surf, digits, x, y, sp):
+    """A row of already-loaded time-signature digits, centred on (x, y)."""
+    widths = [g.size[0] for g in digits]
+    gap = DIGIT_GAP_SP * sp
+    left = x - (sum(widths) + gap * (len(digits) - 1)) / 2.0
+    for g, w in zip(digits, widths):
+        g.draw_centred(surf, left + w / 2.0, y)
+        left += w + gap
+
+
+def draw_time_signature(surf, x, mid_y, sp, num, den, color) -> bool:
+    """
+    A time signature, as MuseScore writes it (Clef::drawStaffTimeSig, clef.cpp): the
+    numerator centred on the staff line above the middle one and the denominator on the
+    line below, the whole column centred on `x` at the staff's `mid_y`.
+
+    False when there is no font, or no such digit in it: the caller then draws the plain
+    shape it drew before Leland was there.
+    """
+    rows = []
+    for value in (num, den):
+        digits = [glyph(f"timeSig{d}", sp, color) for d in str(value)]
+        if any(g is None for g in digits):
+            return False
+        rows.append(digits)
+    for digits, line_y in zip(rows, (mid_y - sp, mid_y + sp)):
+        _digit_row(surf, digits, x, line_y, sp)
+    return True
+
+
 def _stem(surf, color, x_anchor, y_from, y_to, sp, up):
     """The stem, from a notehead anchor to a tip: MuseScore draws it with a solid pen and
     flat caps, its width stemWidth and its outer edge on the anchor (tdraw.cpp:2850-2922)."""

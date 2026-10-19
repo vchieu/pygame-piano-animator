@@ -6,6 +6,7 @@ import pytest
 from conftest import midi_path
 import main
 from midi_loader import LEFT, RIGHT, Note, load_midi
+import notation
 import pianist
 import staff
 from staff import (BASS_MID_STEP, CLEF_BASS, CLEF_TREBLE, DOTTED_EIGHTH,
@@ -734,3 +735,242 @@ def test_draw_arpeggio_wavy_line_and_chord_stems(screen):
     sv = staff.StaffView(song)
     sv.draw(screen, rect, 1.0, active_notes=song.notes[:3])
 
+
+# --------------------------------------------------------------------------- #
+# The clefs, the time signature and the octave brackets
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def no_font():
+    """The music font isn't there (or can't be opened) - a stripped build."""
+    notation.clear_cache()
+    notation._font = False
+    notation._quit_hooked = True
+    yield
+    notation.clear_cache()
+
+
+def _draw_staff_to(song, rect, t=1.0):
+    """Draw one staff panel onto a surface of its own and hand back the pixels."""
+    out = pygame.Surface(rect.size)
+    out.fill((0, 0, 0))
+    staff.StaffView(song).draw(out, rect, t)
+    return out
+
+
+def test_the_clefs_and_the_time_signature_are_drawn(screen):
+    song = load_midi(midi_path("demo_song.mid"))
+    rect = pygame.Rect(0, 0, 1200, 140)
+    out = _draw_staff_to(song, rect)
+
+    s = max(4.0, min(12.0, (rect.h - 26) / 14.0))
+    center_y = rect.centery
+    treble_mid_y = center_y - round(3.0 * s)
+    bass_mid_y = center_y + round(3.0 * s)
+    left_x = rect.x + 18
+
+    def ink(box):
+        return sum(1 for x in range(box.left, box.right) for y in range(box.top, box.bottom)
+                   if out.get_at((x, y))[:3] != staff.STAFF_BG)
+
+    # each clef is drawn on the line it names: G4 (mid + s) for the treble one, F3 (mid - s)
+    # for the bass one, and its ink hangs off that line by what Leland's glyph does.
+    for mid_y, name in ((treble_mid_y, "gClef"), (bass_mid_y, "fClef")):
+        ref = mid_y + s if name == "gClef" else mid_y - s
+        _w, top, bottom = notation.CLEF_BOX[name]
+        box = pygame.Rect(round(left_x + 8), round(ref - top * s),
+                          round(2.7 * s), round((top - bottom) * s))
+        assert ink(box) > 0.2 * box.w * box.h, f"no {name} around y={mid_y}"
+
+    # the 4/4 column: four digits, one on the line above the middle one and one below, on
+    # both staves. It sits clear of the clefs, which reach to 2.66 sp wide.
+    ts_x = staff.time_sig_x(left_x, s)
+    assert ts_x - notation.TIME_SIG_HALF_W_SP * s > left_x + 8 + staff.clef_ink_w(s) - 1
+    for mid_y in (treble_mid_y, bass_mid_y):
+        box = pygame.Rect(round(ts_x - 1.1 * s), round(mid_y - 2.1 * s),
+                          round(2.2 * s), round(4.2 * s))
+        assert ink(box) > 0.05 * box.w * box.h, f"no time signature around y={mid_y}"
+
+
+def test_the_time_signature_column_fits_between_the_clefs_and_the_first_note(screen):
+    # At every staff size the column clears the clefs; the left margin (the first note is
+    # at MARGIN_LEFT) is only wide enough for it up to about s = 10, and past that it stays
+    # where the old UI-font digits were rather than pushing further into the notes.
+    left_x = 18.0
+    for s in (4.0, 5.0, 6.0, 8.0, 10.0, 12.0):
+        ts_x = staff.time_sig_x(left_x, s)
+        half = notation.TIME_SIG_HALF_W_SP * s
+        assert ts_x - half > left_x + 8 + staff.clef_ink_w(s) - 1, f"clef runs into the digits at s={s}"
+        if s <= 10.0:
+            assert ts_x + half <= MARGIN_LEFT, f"the digits reach the first note at s={s}"
+    assert staff.time_sig_x(left_x, 12.0) == left_x + round(12.0 * 4.6)
+
+
+def test_the_staff_falls_back_to_its_own_clefs_and_digits_without_a_font(no_font, screen):
+    # A stripped build (no Leland.otf): the staff still draws - through the hand-drawn clefs
+    # and the UI font's 4/4 it fell back to.
+    song = load_midi(midi_path("demo_song.mid"))
+    rect = pygame.Rect(0, 0, 1200, 140)
+    out = _draw_staff_to(song, rect)
+
+    s = max(4.0, min(12.0, (rect.h - 26) / 14.0))
+    center_y = rect.centery
+    left_x = rect.x + 18
+
+    def ink(box):
+        return sum(1 for x in range(box.left, box.right) for y in range(box.top, box.bottom)
+                   if out.get_at((x, y))[:3] != staff.STAFF_BG)
+
+    for mid_y in (center_y - round(3.0 * s), center_y + round(3.0 * s)):
+        box = pygame.Rect(round(left_x + 8), round(mid_y - 2.9 * s), round(2.0 * s), round(5.7 * s))
+        assert ink(box) > 0.01 * box.w * box.h, "the hand-drawn clef is missing"
+    ts_x = staff.time_sig_x(left_x, s)
+    for mid_y in (center_y - round(3.0 * s), center_y + round(3.0 * s)):
+        box = pygame.Rect(round(ts_x - 1.2 * s), round(mid_y - 2.0 * s),
+                          round(2.4 * s), round(4.0 * s))
+        assert ink(box) > 0.02 * box.w * box.h, "the UI font's digits are missing"
+
+
+class _BracketSong:
+    """Just enough song for StaffView to lay out: notes, a duration and bar lines."""
+
+    def __init__(self, notes, duration=10.0, bar=2.0):
+        self.notes = notes
+        self.duration = duration
+        self.bar_times = [i * bar for i in range(int(duration / bar) + 1)]
+        self.beat_times = []
+
+
+def _note(pitch, start, hand, dur=0.4):
+    return Note(pitch=pitch, start=start, end=start + dur, velocity=80, track=0, hand=hand)
+
+
+def test_the_octave_bracket_clears_the_notes_it_covers(screen):
+    # get_octave_transposition shifts each note by its own amount, so one group covers a
+    # range of drawn heights: a chord of A6 + C7 (both 8va) is drawn at -3 sp and -4 sp from
+    # the treble middle line, and A0 + D1 (8vb) at +5 sp and +3.5 sp below the bass one. The
+    # bracket's line is worked out from the notes under it, so it clears all of them.
+    pitches = ((RIGHT, (100, 104), 0.4),      # E7 then G7  -> 15ma
+               (RIGHT, (93, 96), 2.0),        # A6 then C7  -> 8va
+               (LEFT, (21, 26), 3.6),         # A0 then D1  -> 8vb
+               (LEFT, (12, 16), 5.2))         # C0 then E0  -> 15mb
+    notes = [_note(p, t0 + 0.6 * j, hand)
+             for hand, ps, t0 in pitches for j, p in enumerate(ps)]
+    song = _BracketSong(notes)
+
+    rect = pygame.Rect(0, 0, 1200, 100)
+    lines = []
+    real_dashed = staff.draw_dashed_line
+
+    def spy(surf, color, start_pos, end_pos, width=1, **kw):
+        lines.append((start_pos, end_pos))
+        return real_dashed(surf, color, start_pos, end_pos, width=width, **kw)
+
+    staff.draw_dashed_line = spy
+    try:
+        staff.StaffView(song).draw(screen, rect, 1.0)
+    finally:
+        staff.draw_dashed_line = real_dashed
+
+    assert len(lines) == 4, f"the test song should draw one bracket per group, got {len(lines)}"
+
+    s = max(4.0, min(12.0, (rect.h - 26) / 14.0))
+    center_y = rect.centery
+    treble_mid_y = center_y - round(3.0 * s)
+    bass_mid_y = center_y + round(3.0 * s)
+    sys0 = staff.StaffView(song).systems[0]
+    info = staff.compute_notes_info(sys0.notes, sys0.start_t, sys0.duration,
+                                    rect.w - MARGIN_LEFT - MARGIN_RIGHT,
+                                    MARGIN_LEFT, s, staff.get_beat_duration(song))
+    head_h = notation.NOTEHEAD_H_SP * s / 2.0
+    nw = round(s * 0.75)
+    checked = 0
+    for start_pos, end_pos in lines:
+        line_y, x0, x1 = start_pos[1], start_pos[0], end_pos[0]
+        covered = [n for n in sys0.notes if x0 - nw <= info[id(n)]["x"] <= x1 + nw]
+        assert covered, "a bracket was drawn with no notes under it"
+        for n in covered:
+            i = info[id(n)]
+            ny = note_y(i["step_draw"], i["clef"], treble_mid_y, bass_mid_y, s)
+            if i["clef"] == CLEF_TREBLE:                 # 8va / 15ma: fully above
+                assert line_y < ny - head_h, (
+                    f"the bracket at y={line_y} crosses the notehead at y={ny} (pitch {n.pitch})")
+            else:                                        # 8vb / 15mb: fully below
+                assert line_y > ny + head_h, (
+                    f"the bracket at y={line_y} crosses the notehead at y={ny} (pitch {n.pitch})")
+            checked += 1
+    # one notehead per bracket falls under its line (the first note of a group sits under
+    # the label, to the left of the line), so all four groups were really checked
+    assert checked >= 4, f"the test never really checked a bracket ({checked} notes)"
+
+
+class _RecordingSurface(pygame.Surface):
+    """A surface that remembers where each image was blitted, so a test can see
+    where draw_octave_brackets printed its labels."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.blits = []
+
+    def blit(self, src, dest, *args, **kwargs):
+        self.blits.append((src.get_size(), (dest[0], dest[1])))
+        return super().blit(src, dest, *args, **kwargs)
+
+
+def test_an_octave_bracket_label_is_kept_off_other_groups_notes(screen):
+    # A label is printed to the left of its own group's first note, so it can land on a
+    # notehead belonging to another group - the two 8va groups of this song sit one notehead
+    # apart in height. The bracket moves to keep it off, but only while the staff panel has
+    # room: a height that clears its own notes wins over one that chases a neighbour, since
+    # that is the line's job and pushing further would only land it somewhere worse.
+    pitches = ((RIGHT, (100, 104), 0.4),      # E7 then G7  -> 15ma
+               (RIGHT, (93, 96), 2.0),        # A6 then C7  -> 8va
+               (LEFT, (21, 26), 3.6),         # A0 then D1  -> 8vb
+               (LEFT, (12, 16), 5.2))         # C0 then E0  -> 15mb
+    notes = [_note(p, t0 + 0.6 * j, hand)
+             for hand, ps, t0 in pitches for j, p in enumerate(ps)]
+    song = _BracketSong(notes)
+
+    rect = pygame.Rect(0, 0, 1200, 140)       # room in the panel: the labels can move
+    surf = _RecordingSurface(rect.size)
+    surf.fill(staff.STAFF_BG)
+
+    s = max(4.0, min(12.0, (rect.h - 26) / 14.0))
+    center_y = rect.centery
+    treble_mid_y = center_y - round(3.0 * s)
+    bass_mid_y = center_y + round(3.0 * s)
+    head_w = notation.NOTEHEAD_W_SP * s / 2.0
+    head_h = notation.NOTEHEAD_H_SP * s / 2.0
+
+    sys0 = staff.StaffView(song).systems[0]
+    info = staff.compute_notes_info(sys0.notes, sys0.start_t, sys0.duration,
+                                    rect.w - MARGIN_LEFT - MARGIN_RIGHT,
+                                    MARGIN_LEFT, s, staff.get_beat_duration(song))
+    staff.draw_octave_brackets(surf, info, sys0.notes, treble_mid_y, bass_mid_y, s, rect)
+
+    labels = [b for b in surf.blits if 8 <= b[0][1] <= 30 and b[0][0] >= 10]
+    assert len(labels) == 4, f"the four groups should each print a label, got {len(labels)}"
+
+    # Each label's own group: the first note of a group always sits just right of its label
+    # (x_min is the group's left edge less the notehead), so only the *other* groups count.
+    own = {}
+    for n in sys0.notes:
+        i = info[id(n)]
+        own.setdefault((i["clef"], i["octave_shift"], i["label"]), []).append(n)
+
+    checked = 0
+    for (lw, lh), (lx, ly) in labels:
+        label_clef = CLEF_TREBLE if ly < center_y else CLEF_BASS
+        for key, group in own.items():
+            if key[0] != label_clef:
+                continue
+            for n in group:
+                if id(n) == id(min(group, key=lambda m: info[id(m)]["x"])):
+                    continue                  # the group's own first note: beside its label
+                i = info[id(n)]
+                ny = note_y(i["step_draw"], label_clef, treble_mid_y, bass_mid_y, s)
+                if (min(lx + lw, i["x"] + head_w) - max(lx, i["x"] - head_w) > 0
+                        and min(ly + lh, ny + head_h) - max(ly, ny - head_h) > 0):
+                    pytest.fail(f"a {key[2] or 'plain'} label at ({lx},{ly}) is printed on "
+                                f"another group's notehead, pitch {n.pitch}")
+                checked += 1
+    assert checked >= 4, f"the test never really checked a label ({checked} notes)"

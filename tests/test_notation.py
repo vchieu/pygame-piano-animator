@@ -55,6 +55,12 @@ def test_glyph_codepoints_are_smufl():
     assert notation.GLYPHS["accidentalSharp"] == 0xE262
     assert notation.GLYPHS["flag8thUp"] == 0xE240
     assert notation.GLYPHS["flag16thDown"] == 0xE243
+    # the clefs (SMuFL "Clefs"), and the time signature's digits (SMuFL "Time signatures",
+    # U+E080-U+E089 - note timeSig4 is U+E084; U+E082 is a 2)
+    assert notation.GLYPHS["gClef"] == 0xE050
+    assert notation.GLYPHS["fClef"] == 0xE062
+    assert notation.GLYPHS["timeSig4"] == 0xE084
+    assert [notation.GLYPHS[f"timeSig{d}"] for d in range(10)] == list(range(0xE080, 0xE08A))
 
 
 # --------------------------------------------------------------------------- #
@@ -131,13 +137,38 @@ def test_every_glyph_renders_at_several_sizes(screen):
             assert g is not None, f"{name} at {sp} sp"
             w, h = g.size
             assert w >= 1 and h >= 1
-            # about a staff space per sp, give or take the glyph's own proportions
+            # about a staff space per sp, give or take the glyph's own proportions (the
+            # biggest thing here is a treble clef: 2.56 sp wide, 7.14 sp tall, so it fills
+            # a whole staff and reaches 4.5 sp above its own line)
             assert 0.3 * sp <= w <= 3.5 * sp, f"{name} at {sp} sp is {w} px wide"
-            assert 0.3 * sp <= h <= 5.0 * sp, f"{name} at {sp} sp is {h} px tall"
+            assert 0.3 * sp <= h <= 7.5 * sp, f"{name} at {sp} sp is {h} px tall"
             # the ink is within a few staff spaces of its origin (a flag's hangs 3.3 sp
-            # down from it, an accidental's reaches 1.3 sp up)
-            assert -4 * sp <= g.oy and g.oy + h <= 4 * sp, f"{name} at {sp} sp: oy {g.oy}"
+            # down from it, an accidental's reaches 1.3 sp up, a treble clef's 4.5 sp)
+            assert -8 * sp <= g.oy and g.oy + h <= 8 * sp, f"{name} at {sp} sp: oy {g.oy}"
             assert -2 <= g.ox <= w + 2
+
+
+def test_the_clefs_and_time_signature_digits_have_lelands_shapes(screen):
+    # Measured from assets/fonts/Leland.otf with pygame.freetype at 256 px (64 px/sp):
+    # each glyph's ink size in sp, and its origin's own box (what notation.CLEF_BOX says).
+    expected_sp = {
+        "gClef": (2.562, 7.141), "fClef": (2.656, 3.469),
+        "timeSig4": (1.734, 1.984), "timeSig2": (1.469, 1.953),
+    }
+    for name, (w_sp, h_sp) in expected_sp.items():
+        for sp in (6.0, 12.0):
+            w, h = notation.glyph(name, sp, (20, 20, 30)).size
+            assert w == pytest.approx(w_sp * sp, abs=2), f"{name} at {sp} sp: {w} px wide"
+            assert h == pytest.approx(h_sp * sp, abs=2), f"{name} at {sp} sp: {h} px tall"
+
+    # a clef's origin sits on the line it names (SMuFL GlyphOrigin), so the ink reaches
+    # this far above and below that line
+    for name, (w_sp, top, bottom) in notation.CLEF_BOX.items():
+        g = notation.glyph(name, 12.0, (20, 20, 30))
+        sp = 12.0
+        assert g.size[0] == pytest.approx(w_sp * sp, abs=2)
+        assert -g.oy == pytest.approx(top * sp, abs=2)                      # above the origin
+        assert g.oy + g.size[1] == pytest.approx(-bottom * sp, abs=2)      # below it
 
 
 def test_a_glyph_is_drawn_in_its_colour(screen):
@@ -252,6 +283,80 @@ def test_a_ledger_line_is_musescores_thickness(screen):
 
 
 # --------------------------------------------------------------------------- #
+# The clefs and the time signature
+# --------------------------------------------------------------------------- #
+def test_a_clefs_origin_lands_on_the_line_it_names(screen):
+    # SMuFL puts a clef's origin on the staff line it names, so the placement is
+    # arithmetic: the ink hangs off that line by exactly what CLEF_BOX says.
+    sp, x, line_y = 12.0, 100.0, 200.0
+    for name, (w_sp, top, bottom) in notation.CLEF_BOX.items():
+        surf = _paper((400, 400))
+        assert notation.draw_clef(surf, x, line_y, sp, (20, 20, 30), name) is True
+        ink = _ink(surf, PAPER)
+        assert min(xx for xx, _ in ink) == pytest.approx(x, abs=2)          # ink's left edge
+        assert max(xx for xx, _ in ink) - min(xx for xx, _ in ink) == pytest.approx(w_sp * sp, abs=2)
+        assert min(yy for _, yy in ink) == pytest.approx(line_y - top * sp, abs=2)
+        assert max(yy for _, yy in ink) == pytest.approx(line_y - bottom * sp, abs=2)
+
+    # a treble clef fills its staff: from G4 its ink reaches 4.47 sp up and 2.67 sp down,
+    # over the top line (2 sp above G4) and under the bottom one (2 sp below)
+    assert notation.CLEF_BOX["gClef"][1] > 4.0 and notation.CLEF_BOX["gClef"][2] < -2.0
+    # a bass clef sits on F3 (mid - s) with its two dots in the spaces above and below it
+    assert notation.CLEF_BOX["fClef"][1] == pytest.approx(1.0, abs=0.01)
+    assert notation.CLEF_BOX["fClef"][2] == pytest.approx(-2.469, abs=0.01)
+
+
+def test_the_staff_anchors_its_clefs_on_the_lines_they_name(screen):
+    # staff.py draws the treble clef on G4 (mid_y + s) and the bass clef on F3 (mid_y - s)
+    sp, x, mid = 12.0, 100.0, 200.0
+    for draw, name, ref in ((staff.draw_treble_clef, "gClef", mid + sp),
+                            (staff.draw_bass_clef, "fClef", mid - sp)):
+        surf = _paper((400, 400))
+        draw(surf, x, mid, sp, (20, 20, 30))
+        ink = _ink(surf, PAPER)
+        _w, top, bottom = notation.CLEF_BOX[name]
+        assert min(xx for xx, _ in ink) == pytest.approx(x, abs=3)
+        assert min(yy for _, yy in ink) == pytest.approx(ref - top * sp, abs=3)
+        assert max(yy for _, yy in ink) == pytest.approx(ref - bottom * sp, abs=3)
+
+
+def test_a_time_signature_is_a_numeral_over_its_twin(screen):
+    # MuseScore writes the numerator on the staff line above the middle one and the
+    # denominator on the line below (Clef::drawStaffTimeSig), both centred on the column.
+    sp, x, mid = 12.0, 200.0, 200.0
+    surf = _paper((400, 400))
+    assert notation.draw_time_signature(surf, x, mid, sp, 4, 4, (20, 20, 30)) is True
+    ink = _ink(surf, PAPER)
+    ys = [yy for _, yy in ink]
+    half = notation.glyph("timeSig4", sp, (20, 20, 30)).size[1] / 2.0
+
+    above = [yy for yy in ys if yy < mid]
+    below = [yy for yy in ys if yy > mid]
+    assert above and below                       # a 4 over a 4, not one block
+    assert min(above) == pytest.approx(mid - sp - half, abs=3)
+    assert max(above) == pytest.approx(mid - sp + half, abs=3)
+    assert min(below) == pytest.approx(mid + sp - half, abs=3)
+    assert max(below) == pytest.approx(mid + sp + half, abs=3)
+    # and the column is centred on x, half a numeral to either side
+    assert min(xx for xx, _ in ink) == pytest.approx(x - notation.TIME_SIG_HALF_W_SP * sp, abs=3)
+    assert max(xx for xx, _ in ink) == pytest.approx(x + notation.TIME_SIG_HALF_W_SP * sp, abs=3)
+
+
+def test_a_two_digit_time_signature_sets_its_digits_side_by_side(screen):
+    # SMuFL has no timeSig12 glyph - a 12 is a 1 and a 2 next to each other, which is what
+    # draw_time_signature makes of "12".
+    sp, x, mid = 12.0, 200.0, 200.0
+    surf = _paper((400, 400))
+    assert notation.draw_time_signature(surf, x, mid, sp, 12, 8, (20, 20, 30)) is True
+    ink = _ink(surf, PAPER)
+    width = max(xx for xx, _ in ink) - min(xx for xx, _ in ink)
+    one = notation.glyph("timeSig1", sp, (20, 20, 30)).size[0] \
+        + notation.glyph("timeSig2", sp, (20, 20, 30)).size[0] + notation.DIGIT_GAP_SP * sp
+    assert width == pytest.approx(one, abs=4)
+    assert (min(xx for xx, _ in ink) + max(xx for xx, _ in ink)) / 2.0 == pytest.approx(x, abs=3)
+
+
+# --------------------------------------------------------------------------- #
 # With no font at all (a stripped build) every painter still draws
 # --------------------------------------------------------------------------- #
 @pytest.fixture
@@ -278,3 +383,13 @@ def test_the_staff_note_falls_back_to_its_ellipse(no_font, screen):
     ink = _ink(surf, PAPER)
     assert min(y for _, y in ink) == pytest.approx(110, abs=2)    # the stem's tip
     assert min(x for x, _ in ink) < 140                          # and the accidental beside it
+
+
+def test_the_clefs_and_time_signature_draw_nothing_without_a_font(no_font, screen):
+    # they report False and leave the surface alone: staff.py then draws the hand-drawn
+    # clefs and the UI font's "4" it drew before Leland was there
+    surf = _paper((300, 300))
+    assert notation.draw_clef(surf, 40, 100, 12.0, (20, 20, 30), "gClef") is False
+    assert notation.draw_clef(surf, 40, 100, 12.0, (20, 20, 30), "fClef") is False
+    assert notation.draw_time_signature(surf, 150, 150, 12.0, 4, 4, (20, 20, 30)) is False
+    assert not _ink(surf, PAPER)

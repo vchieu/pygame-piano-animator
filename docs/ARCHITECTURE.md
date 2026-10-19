@@ -226,14 +226,59 @@ Detailed design notes, kept up to date as features were added. Start with `CLAUD
   note's stem reaches its beam; `beamed` skips the flags (the beam is drawn there), `sharp` draws the
   accidental left of the head, `on_line` lifts the dot into the space above (tdraw.cpp:2648), and a sounding
   note is drawn lighter, as before.
-- What did not change in `staff.py`: beams, ledger-line *counting*, clash offsets, clefs, the time
-  signature, the cursor and the paging are all still its own - only the notehead, accidental, flag and dot
-  shapes changed (`draw_sharp` and `draw_flags` are gone), the staff lines are `STAFF_LINE_SP` thick
-  (0.11 sp), ledger lines `LEDGER_SP` (0.16) reaching `LEDGER_EXT_SP` (0.33) past the head on each side
-  (`notation.ledger_line`), and `staff.STEM_WIDTH_SPACES` moved 0.12 → 0.10, MuseScore's value.
-- The hand colours (`HAND_COLORS`) are still the note colour. Tests: `tests/test_notation.py` (metrics,
-  the codepoint table, the glyph cache, every glyph at four sizes, the painter's geometry, the no-font
-  fallback).
+- What did not change in `staff.py`: beams, ledger-line *counting*, clash offsets, the cursor
+  and the paging are all still its own - only the notehead, accidental, flag and dot shapes
+  changed (`draw_sharp` and `draw_flags` are gone), the staff lines are `STAFF_LINE_SP` thick
+  (0.11 sp), ledger lines `LEDGER_SP` (0.16) reaching `LEDGER_EXT_SP` (0.33) past the head on
+  each side (`notation.ledger_line`), and `staff.STEM_WIDTH_SPACES` moved 0.12 → 0.10,
+  MuseScore's value.
+- **The clefs and the time signature are glyphs too** (added after the noteheads, 2026-10-18):
+  `gClef` U+E050, `fClef` U+E062 and the time signature's digits `timeSig0`–`timeSig9`
+  U+E080–U+E089 (`timeSig4` is **U+E084**; U+E082 is a 2 - see Deviations in the task plan).
+  `notation.draw_clef(surf, x, line_y, sp, color, name)` puts the ink's left edge at `x` and the
+  glyph's origin on the staff line it names, because SMuFL puts a clef's `GlyphOrigin` there:
+  G4 for the treble one (`treble_mid_y + s`), F3 for the bass one (`bass_mid_y - s`). So the
+  placement is arithmetic, not a fudge - the ink offsets are in `notation.CLEF_BOX`, measured
+  from Leland: a treble clef 2.562 × 7.141 sp, reaching 4.469 sp above G4 and 2.672 sp below
+  it (it fills the whole treble staff), a bass clef 2.656 × 3.469 sp, 1.000 up and 2.469 down.
+  `notation.draw_time_signature(surf, x, mid_y, sp, num, den, color)` writes the numerator
+  centred on the staff line above the middle one and the denominator on the line below
+  (MuseScore's `Clef::drawStaffTimeSig`), the column centred on `x`; `TIME_SIG_HALF_W_SP` (half
+  the widest digit, a 6) is how much room the next thing needs, so `staff.clef_ink_w` measures
+  the clefs and the time signature is pushed right (`max(left_x + 4.6 s, …)`) rather than run
+  into them at the smallest staff sizes. Both painters return False with no font and draw
+  nothing: `staff.draw_treble_clef` / `draw_bass_clef` then draw the hand-drawn polylines they
+  always had, and `StaffView.draw` falls back to the UI font's "4"/"4". The time signature is
+  still a hardcoded 4/4 - the app has no meter model; only its drawing changed.
+- **The 8va / 8vb bracket's height is worked out from the notes it covers** (same task).
+  `get_octave_transposition` shifts *each* note by its own amount, so one group covers a range
+  of drawn heights - a chord of E7 + C6 put the E7 at -1.5 sp and the C6 at -2.5 sp from the
+  treble middle line, and a line at a fixed -2.8 sp ran straight through the second one (7 of
+  the 8 notes in the test song crossed). `draw_octave_brackets` now takes the panel's
+  `local_rect` and, for each group, computes the line's y from the group's own notes
+  (`note_y`, which is what it must use: it is called before the chord loop fills
+  `notes_info[...]["y_top"]`):
+  - 8va / 15ma: `min(ys) - half a notehead's ink - (a stemLength if the stems point up) - GAP`;
+  - 8vb / 15mb: `max(ys) + half a notehead's ink + (a stemLength if they point down) + GAP`;
+  - `GAP = OCTAVE_GAP_SPACES` 0.35 staff spaces, clamped to the panel (`local_rect.top + GAP` /
+    `local_rect.bottom - GAP`). The clamp wins for the few pitches whose notes sit at the panel's
+    own edge - a bracket off the panel is worse than one crossing a notehead.
+  The bracket's **label** is printed to the left of its group's first note, so it can land on a
+  notehead of another group. Every notehead on the system is collected (`ink_bands`, per staff) and
+  the bracket moves to keep the label off those - *but only while the result still fits the panel*.
+  Where it does not fit, the height that clears the group's own notes stands: the line is the
+  bracket's job, and pushing further to chase a neighbouring notehead lands the whole bracket
+  somewhere worse (measured: without that guard the 280 px staff got markedly worse). Measured
+  label-over-notehead pairs, before -> after, over both test songs at 90/140/280 px:
+  104 -> 104, 88 -> 40, 88 -> 40 and 7 -> 6, 7 -> 5, 8 -> 4. The hook's tip stops just short of
+  the group's nearest ink, so it keeps pointing at the notes after the bracket moves.
+  The stem direction comes from the same `stem_up_for` the chord layout uses; in practice an
+  8va group is drawn high on the treble staff and stems down, an 8vb group low on the bass staff
+  and stems up, so the stem term usually adds nothing.
+- The hand colours (`HAND_COLORS`) are still the note colour. Tests: `tests/test_notation.py`
+  (metrics, the codepoint table, the glyph cache, every glyph at four sizes, the painter's
+  geometry, the clef and time-signature painters, the no-font fallback) and `tests/test_staff.py`
+  (the clefs and the digits as really drawn, the bracket clearing its group, the no-font path).
 
 ## Fonts and frame pacing (v26.1.19.SNAPSHOT-14, -15)
 - Every font comes from the bundled typeface: Source Sans Pro, regular and bold (`assets/fonts`, SIL Open Font
