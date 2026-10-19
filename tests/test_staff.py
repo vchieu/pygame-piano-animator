@@ -635,6 +635,67 @@ def test_beam_is_dead_level_and_stems_stretch_to_meet_it(screen):
         assert under, f"beam at y={y} has no stem reaching it"
 
 
+def test_a_beamed_notehead_never_sits_on_the_beam(screen):
+    # A beamed note's stem may not be so short that the notehead runs into the bars. The
+    # bars are a stack (a run of sixteenths carries two), so a sixteenth run needs a
+    # longer stem than an eighth run. Check it against what is really drawn.
+    rect = pygame.Rect(0, 0, screen.get_width(), 140)
+
+    beams, stems, bars_seen = [], [], set()
+    rl, rline = pygame.draw.lines, pygame.draw.line
+
+    def spy_lines(s, c, cl, pts, w):
+        if pts and len(pts) >= 2 and len(set(p[1] for p in pts)) == 1:
+            beams.append((pts[0][0], pts[-1][0], pts[0][1], w))
+        return rl(s, c, cl, pts, w)
+
+    def spy_line(s, c, a, b, w):
+        if abs(a[0] - b[0]) <= 1 and abs(a[1] - b[1]) > 4:
+            stems.append((a[0], min(a[1], b[1]), max(a[1], b[1])))
+        return rline(s, c, a, b, w)
+
+    pygame.draw.lines, pygame.draw.line = spy_lines, spy_line
+    try:
+        # 50-nam-ve-sau has sixteenth runs, so the two-bar case is really exercised
+        for name in ("demo_song.mid", "50-nam-ve-sau.mid"):
+            song = load_midi(midi_path(name))
+            for t in (1.0, 3.0, 6.0, 9.0, 12.0, 15.0):
+                screen.fill((255, 255, 255))
+                beams.clear(); stems.clear()
+                staff.StaffView(song).draw(screen, rect, t, active_notes=song.notes[:5])
+                for x0, x1, y, w in beams:
+                    mine = [st for st in stems
+                            if x0 - 6 <= st[0] <= x1 + 6 and min(st[1], st[2]) <= y <= max(st[1], st[2])]
+                    if not mine:
+                        continue
+                    space = w / staff.BEAM_WIDTH_SPACES      # a bar is half a space thick
+                    bars = len({b[2] for b in beams if b[0] <= x1 and b[1] >= x0
+                                and abs(b[2] - y) <= staff.BEAM_STEP_SPACES * space})
+                    bars_seen.add(bars)
+                    need = staff.min_stem_spaces(bars) * space
+                    for x, y0, y1 in mine:
+                        assert y1 - y0 >= need - 1, (
+                            f"{name}: stem at x={x} is {y1 - y0:.0f}px, but {bars} beam bar(s) "
+                            f"need {need:.0f}px or the notehead would sit on them")
+    finally:
+        pygame.draw.lines, pygame.draw.line = rl, rline
+
+    assert bars_seen, "no beam was drawn"
+    assert 2 in bars_seen, f"the test never drew a two-bar beam (saw {sorted(bars_seen)})"
+
+
+def test_beam_and_stem_constants_match_the_engraver():
+    # MuseScore engraves with these (src/engraving/style/styledef.cpp, stemlayout.cpp):
+    # a 3.5-space stem, a half-space thick bar, and bars 0.75 space apart.
+    assert staff.STEM_LEN_SPACES == 3.5
+    assert staff.BEAM_WIDTH_SPACES == 0.5
+    assert staff.BEAM_STEP_SPACES == 0.75
+    # the stem of a beamed note clears the notehead and the whole stack of bars:
+    # 1 bar -> 3.25, 2 bars -> 3.75, 3 bars -> 4.25 staff spaces
+    assert [round(staff.min_stem_spaces(k), 2) for k in (1, 2, 3)] == [3.25, 3.75, 4.25]
+    assert staff.min_stem_spaces(9) == staff.min_stem_spaces(4)
+
+
 def test_draw_arpeggio_wavy_line_and_chord_stems(screen):
     # Test that draw_arpeggio_wavy_line runs without error
     staff.draw_arpeggio_wavy_line(screen, 100, 50, 120, 7.0, (50, 50, 65))

@@ -87,6 +87,29 @@ MAX_SCALE = 1.5
 # stops a very fast beat from turning into one endless bar across the whole measure.
 MAX_BEAM_CHORDS = 8
 
+# These are the values MuseScore engraves with (src/engraving/style/styledef.cpp:
+# stemLength 3.5, stemWidth 0.10, beamWidth 0.5), all measured in staff spaces.
+STEM_LEN_SPACES = 3.5
+STEM_WIDTH_SPACES = 0.12
+BEAM_WIDTH_SPACES = 0.5
+# The gap between two beam bars: MuseScore's beamsHeight is beamCount * 0.75 - 0.25 spaces
+# for the whole stack, so bar centre to bar centre is 0.75 * (bars - 1).
+BEAM_STEP_SPACES = 0.75
+# How far the notehead must stay clear of the beams, from StemLayout::calcMinStemLength:
+# a beamed note's stem is never allowed to be so short that the head touches the bars.
+BEAM_CLEARANCE_SPACES = (2.5, 2.25, 2.0, 1.75)
+
+
+def min_stem_spaces(beam_count: int) -> float:
+    """
+    Shortest a beamed note's stem may be, in staff spaces, measured from the notehead's
+    centre to the far edge of the stack of beam bars. A run of sixteenths stacks two bars
+    and needs a longer stem than a run of eighths, or the notehead would sit on the bars.
+    """
+    bars = max(1, min(beam_count, len(BEAM_CLEARANCE_SPACES)))
+    stack = bars * BEAM_STEP_SPACES - 0.25          # thickness of the whole stack
+    return BEAM_CLEARANCE_SPACES[bars - 1] + stack + BEAM_WIDTH_SPACES / 2
+
 
 def clamp_target_dur(value) -> float:
     """Keep the seconds of music per system inside the range the staff draws well at."""
@@ -825,7 +848,7 @@ class StaffView:
                     active_ids = {id(n) for n in active_notes} if active_notes is not None else set()
                     nw = round(s * 0.75)
                     nh = round(s * 0.52)
-                    stem_len = round(3.2 * s)
+                    stem_len = round(STEM_LEN_SPACES * s)
 
                     notes_info = compute_notes_info(sys.notes, sys.start_t, sys.duration, usable_w,
                                                     MARGIN_LEFT, s, get_beat_duration(self.song))
@@ -913,11 +936,14 @@ class StaffView:
                             stops.append({"x": sx, "near": y_top if beam_stem_up else y_bot,
                                           "is16": is16, "notes": sub})
 
-                        # The bar is dead level, so the stems are the ones that give way: it
-                        # sits one stem-length clear of the notehead nearest to it in the
-                        # whole run, and every other stem is lengthened to reach it.
-                        tip = (round(min(st["near"] for st in stops) - stem_len) if beam_stem_up
-                               else round(max(st["near"] for st in stops) + stem_len))
+                        # The bar is dead level, so it is the stems that give way. How far
+                        # it stands off the notes depends on how many bars are stacked: a
+                        # run of sixteenths carries a second bar under the first, and the
+                        # stem has to be long enough that the notehead never sits on them.
+                        bars = 2 if any(st["is16"] for st in stops) else 1
+                        reach = max(stem_len, round(min_stem_spaces(bars) * s))
+                        tip = (round(min(st["near"] for st in stops) - reach) if beam_stem_up
+                               else round(max(st["near"] for st in stops) + reach))
 
                         outer, inner = [], []
                         run = []
@@ -935,9 +961,9 @@ class StaffView:
                         if run:
                             inner.append(run)
 
-                        beam_w = max(2, round(s * 0.42))
+                        beam_w = max(2, round(BEAM_WIDTH_SPACES * s))
                         pygame.draw.lines(staff_surf, STEM_COLOR, False, outer, beam_w)
-                        gap = round(s * 0.55)
+                        gap = round(BEAM_STEP_SPACES * s)
                         off = -gap if beam_stem_up else gap
                         for run in inner:
                             shifted = [(x, y + off) for x, y in run]
@@ -1011,13 +1037,13 @@ class StaffView:
                             if stem_up:
                                 sx = round(nx + nw - 1)
                                 tip_y = n_info.get("beam_tip_y", round(y_top - stem_len))
-                                pygame.draw.line(staff_surf, stem_col, (sx, round(y_bot)), (sx, tip_y), max(1, int(s * 0.16)))
+                                pygame.draw.line(staff_surf, stem_col, (sx, round(y_bot)), (sx, tip_y), max(1, round(STEM_WIDTH_SPACES * s)))
                                 if flags > 0 and id(n) not in beamed_note_ids:
                                     draw_flags(staff_surf, sx, tip_y, s, True, stem_col, flags)
                             else:
                                 sx = round(nx - nw + 1)
                                 tip_y = n_info.get("beam_tip_y", round(y_bot + stem_len))
-                                pygame.draw.line(staff_surf, stem_col, (sx, round(y_top)), (sx, tip_y), max(1, int(s * 0.16)))
+                                pygame.draw.line(staff_surf, stem_col, (sx, round(y_top)), (sx, tip_y), max(1, round(STEM_WIDTH_SPACES * s)))
                                 if flags > 0 and id(n) not in beamed_note_ids:
                                     draw_flags(staff_surf, sx, tip_y, s, False, stem_col, flags)
 
