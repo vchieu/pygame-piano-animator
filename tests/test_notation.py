@@ -1,4 +1,6 @@
 """Unit tests for notation.py: MuseScore's metrics, the SMuFL glyphs and the note painters."""
+import math
+
 import pygame
 import pytest
 
@@ -12,7 +14,7 @@ from staff import (DOTTED_EIGHTH, DOTTED_HALF, DOTTED_QUARTER, EIGHTH, HALF,
 # MuseScore's metrics
 # --------------------------------------------------------------------------- #
 def test_engraving_defaults_match_musescore():
-    # src/engraving/style/styledef.cpp:263-313, and Leland's own engravingDefaults
+    # src/engraving/style/styledef.cpp:263-313 and 287-289, 524-526
     assert notation.ENGRAVING == {
         "stemWidth": 0.10,
         "stemLength": 3.5,
@@ -23,6 +25,12 @@ def test_engraving_defaults_match_musescore():
         "dotNoteDistance": 0.5,
         "dotDotDistance": 0.65,
         "accidentalNoteDistance": 0.25,
+        "graceNoteMag": 0.7,
+        "graceToMainNoteDist": 0.45,
+        "graceToGraceNoteDist": 0.3,
+        "stemSlashPosition": 2.0,
+        "stemSlashAngle": 40.0,
+        "stemSlashThickness": 0.125,
     }
     # ...and what the staff engraves with
     assert notation.STAFF_LINE_SP == 0.11
@@ -31,6 +39,12 @@ def test_engraving_defaults_match_musescore():
     assert notation.BEAM_SP == 0.5
     assert notation.LEDGER_SP == 0.16
     assert notation.LEDGER_EXT_SP == 0.33
+    assert notation.GRACE_MAG == 0.7
+    assert notation.GRACE_TO_MAIN_SP == 0.45
+    assert notation.GRACE_TO_GRACE_SP == 0.3
+    # a slash with no hook to reach for is pulled to 0.66 of stemSlashPosition
+    # (TLayout::layoutStemSlash, tlayout.cpp:5393,5408)
+    assert notation.STEM_SLASH_HEIGHT_REDUCTION == 0.66
     assert staff.STEM_WIDTH_SPACES == notation.STEM_SP
     # SMuFL: one em is four staff spaces
     assert notation.SP_PER_EM == 4
@@ -273,6 +287,41 @@ def test_flags_are_skipped_on_a_beamed_note(screen):
 
     assert reaches_right(False)          # the flag reaches right of the notehead
     assert not reaches_right(True)       # a beam does that job instead
+
+
+def test_a_slashed_grace_stroke_sits_a_reduced_position_off_the_tip(screen):
+    # an acciaccatura's stroke starts stemSlashPosition off the stem's tip, scaled to the
+    # grace (0.7) and pulled to 0.66 of it - no hook to reach for
+    # (TLayout::layoutStemSlash, tlayout.cpp:5393,5408)
+    sp, x = 12.0, 200
+    g_sp = sp * notation.GRACE_MAG
+    y_tip = 120
+    surf = _paper((400, 400))
+    notation._stem_slash(surf, g_sp, x, y_tip, True, (20, 20, 30))
+    ink = _ink(surf, PAPER)
+    expected = y_tip + notation.STEM_SLASH_POS_SP * g_sp * notation.STEM_SLASH_HEIGHT_REDUCTION
+    left = min(xx for xx, _ in ink)
+    at_start = [yy for xx, yy in ink if xx <= left + 1]
+    assert min(at_start) == pytest.approx(expected, abs=2)      # y0, the stroke's start
+    # the stroke leans at stemSlashAngle off the horizontal
+    dx = max(xx for xx, _ in ink) - left
+    dy = max(yy for _, yy in ink) - min(yy for _, yy in ink)
+    assert dy / dx == pytest.approx(math.tan(math.radians(notation.STEM_SLASH_ANGLE)), abs=0.2)
+
+
+def test_a_beam_slash_crosses_the_beam_two_spaces_long(screen):
+    # through a beamed run, the stroke is one for the whole group: two spaces long,
+    # crossing the beam's reach at its middle (tlayout.cpp:5423-5434)
+    sp = 12.0
+    y = 200
+    x0, x1 = 100, 160
+    surf = _paper((400, 400))
+    notation.beam_slash(surf, sp, x0, x1, y, True, (20, 20, 30))
+    ink = _ink(surf, PAPER)
+    length = math.hypot(max(xx for xx, _ in ink) - min(xx for xx, _ in ink),
+                        max(yy for _, yy in ink) - min(yy for _, yy in ink))
+    assert length == pytest.approx(2.0 * sp, abs=3)
+    assert (min(xx for xx, _ in ink) + max(xx for xx, _ in ink)) / 2 == pytest.approx((x0 + x1) / 2, abs=2)
 
 
 def test_a_ledger_line_is_musescores_thickness(screen):

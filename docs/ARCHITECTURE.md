@@ -197,8 +197,10 @@ Detailed design notes, kept up to date as features were added. Start with `CLAUD
   - `ENGRAVING` - MuseScore's style defaults in staff spaces (sp), read off
     `src/engraving/style/styledef.cpp:263-313` and Leland's own `engravingDefaults`: stemWidth 0.10,
     stemLength 3.5, beamWidth 0.5, staffLineWidth 0.11, ledgerLineWidth 0.16, ledgerLineLength 0.33,
-    dotNoteDistance 0.5, dotDotDistance 0.65, accidentalNoteDistance 0.25. SMuFL: one em is four sp
-    (`SP_PER_EM`), so a `pygame.freetype.Font` at 256 px is 64 px/sp.
+    dotNoteDistance 0.5, dotDotDistance 0.65, accidentalNoteDistance 0.25 - plus the grace-note and
+    acciaccatura styles (styledef.cpp:287-289, 524-526): graceNoteMag 0.7, graceToMainNoteDist 0.45,
+    graceToGraceNoteDist 0.3, stemSlashPosition 2.0, stemSlashAngle 40.0, stemSlashThickness 0.125.
+    SMuFL: one em is four sp (`SP_PER_EM`), so a `pygame.freetype.Font` at 256 px is 64 px/sp.
   - `GLYPHS` - the SMuFL codepoints (`noteheadBlack` U+E0A4, `flag8thUp` U+E240, `augmentationDot` U+E1E7,
     ...). A public standard, so they are hardcoded rather than parsed from the 157 KB `leland_metadata.json`
     (which isn't bundled).
@@ -219,13 +221,37 @@ Detailed design notes, kept up to date as features were added. Start with `CLAUD
   - `note_shape(duration, beat_len)` → `(head, flags, dots)`. Its thresholds are the ones `staff.note_value`
     has always used, so all eight classifications (and every test that pins them) are unchanged;
     `staff.note_value` is now a lookup on this.
-- `draw_staff_note(surf, x, y, sp, shape, color, stem_up, sounding, stem=, beamed=, sharp=, on_line=)` -
-  drawn in MuseScore's order, accidental → notehead → dots → stem + flag (`TDraw::draw(const
+- `draw_staff_note(surf, x, y, sp, shape, color, stem_up, sounding, stem=, beamed=, sharp=, on_line=,
+  grace=)` - drawn in MuseScore's order, accidental → notehead → dots → stem + flag (`TDraw::draw(const
   ShadowNote*)`, tdraw.cpp:2598-2695). `(x, y)` is the notehead's centre on its line or space. `stem` is the
   stem's `(from_y, to_y)`, which `staff.py` works out so the notes of a chord share one stem and a beamed
   note's stem reaches its beam; `beamed` skips the flags (the beam is drawn there), `sharp` draws the
   accidental left of the head, `on_line` lifts the dot into the space above (tdraw.cpp:2648), and a sounding
-  note is drawn lighter, as before.
+  note is drawn lighter, as before. `grace` marks an acciaccatura: the caller has already drawn it at
+  graceNoteMag and stripped its flags, and a flagless grace that is **not** beamed gets **MuseScore's
+  stroke across its stem** instead - `TLayout::layoutStemSlash` (tlayout.cpp:5377-5447): `stemSlashPosition`
+  off the stem's tip, pulled to **0.66 of it** (`heightReduction`, the no-hook, no-beam branch,
+  tlayout.cpp:5393,5408), `stemSlashAngle` off the horizontal, `stemSlashThickness` wide.
+- **Grace notes (`note hoa mỹ`), added 2026-10-20**: `staff.find_grace_runs` finds, before any layout,
+  the runs of notes shorter than 0.15 of a beat that follow each other without a breath and end on a
+  note of at least 0.4 of a beat (of the *beat*, so it holds at any tempo - a written sixteenth is
+  never caught, whatever the tempo). The run is then drawn and spaced like MuseScore's:
+  everything at `GRACE_MAG` (0.7 - head, accidental, stem, slash), the run kept
+  `GRACE_TO_MAIN_SP` (0.45 sp) off the note it leans on and `GRACE_TO_GRACE_SP` (0.3 sp) between
+  itself, edge of ink to edge of ink (horizontalspacing.cpp:1512-1521). Grace clusters are skipped by
+  the ordinary spacing loop and placed last, from the main note **leftwards**, so the run belongs to the
+  main note's measure: where the file's own onsets put the flick a hair **before the bar line** (as
+  `50-nam-ve-sau` does at 38.873), the run and the note it leans on shift right together - the run past
+  the bar line, the note by the same amount - just as far as `noteBarDistance` demands and no further
+  (`staff.compute_notes_info`, the placement pass). A grace never joins an ordinary beam (`group_beams`
+  ends one there) and keeps its own stem even in a cluster it shares with another note.
+- **A run of grace notes is beamed together**, at graceNoteMag, with **one** stroke through the beam
+  instead of a stroke on each stem - MuseScore's look for two flicked notes
+  (`BeamLayout::beamGraceNotes`, beamlayout.cpp:553-620; the `beam` branch of `layoutStemSlash`,
+  tlayout.cpp:5423, `length = 2 sp`). `staff.group_grace_beams` takes the runs whose graces are two or
+  more flag-carrying chords (eighth or shorter), draws a small level bar joining their stems and a
+  single `notation.beam_slash` across it, and puts the notes in `beamed_note_ids` so they carry no
+  flag and no per-stem stroke. A lone grace, or a run of one, still gets `_stem_slash` on its own stem.
 - What did not change in `staff.py`: beams, ledger-line *counting*, clash offsets, the cursor
   and the paging are all still its own - only the notehead, accidental, flag and dot shapes
   changed (`draw_sharp` and `draw_flags` are gone), the staff lines are `STAFF_LINE_SP` thick

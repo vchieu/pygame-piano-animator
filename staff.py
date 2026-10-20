@@ -613,8 +613,12 @@ def group_beams(chords: List[List[Note]], notes_info: dict, beat_of, measure_of)
                 m = measure_of.get(id(n0))
                 beat_i = int((n0.start - m.start_t) / b_dur) if m is not None else None
 
+                # A grace note hangs off the note it leans on - it is drawn on its own,
+                # with a stroke through its stem, so it never joins a beam and ends one.
+                is_grace = any(notes_info[id(n)].get("grace") for n in sub)
+
                 joined = False
-                if curr and is_beamable(sub, beat_of):
+                if curr and not is_grace and is_beamable(sub, beat_of):
                     prev = curr[-1][0]
                     p_m = measure_of.get(id(prev))
                     p_beat = int((prev.start - p_m.start_t) / b_dur) if p_m is not None else None
@@ -628,10 +632,38 @@ def group_beams(chords: List[List[Note]], notes_info: dict, beat_of, measure_of)
                     continue
                 if len(curr) >= 2:
                     beam_groups.append((c, curr))
-                curr = [sub] if is_beamable(sub, beat_of) else []
+                curr = [] if is_grace else ([sub] if is_beamable(sub, beat_of) else [])
             if len(curr) >= 2:
                 beam_groups.append((c, curr))
     return beam_groups
+
+
+def group_grace_beams(grace_runs, notes_info, beat_of):
+    """
+    The grace runs MuseScore would beam: each run that holds two or more grace chords
+    short enough to carry flags (eighth or shorter) is joined by a small beam at
+    graceNoteMag, and one stroke goes through that beam instead of a stroke on every
+    stem (BeamLayout::beamGraceNotes, beamlayout.cpp:553-620; the `beam` branch of
+    TLayout::layoutStemSlash, tlayout.cpp:5423).
+
+    Returns one (run, clusters) per beamed run: `run` is the graces in played order and
+    `clusters` the chord groups the beam actually joins (a run may open with a quarter
+    grace, which is left out and breaks nothing - it simply has no beam).
+    """
+    beamed = []
+    for run, main in grace_runs:
+        # notes struck together share an x, like the notes of any chord
+        clusters: List[List[Note]] = []
+        for g in run:
+            if clusters and abs(clusters[-1][0].start - g.start) <= 0.05:
+                clusters[-1].append(g)
+            else:
+                clusters.append([g])
+        beamable = [c for c in clusters
+                    if is_beamable(c, beat_of) and notes_info[id(c[0])].get("grace")]
+        if len(beamable) >= 2:
+            beamed.append((run, beamable))
+    return beamed
 
 
 class NoteHeads:
@@ -826,6 +858,55 @@ def place_stem(up, x, y_top, y_bot, stem_len, flags, sp, boxes, own):
     return total
 
 
+# A grace note: shorter than 0.15 of a beat and running straight into a note of at
+# least 0.4 of a beat - the little notes a pianist flicks just before the beat. The
+# bounds are of the beat, so they hold at any tempo: six tenths of a beat is shorter
+# than a written sixteenth at every tempo, while 0.15 of one is well short of it too
+# and a real pickup note comes out longer than that.
+GRACE_MAX = 0.15      # of a beat: above this a note is written out, not a grace
+GRACE_MAIN_MIN = 0.4  # of a beat: the length of the note a grace leans on
+
+
+def find_grace_runs(notes: List[Note], beat_len: float) -> List[Tuple[List[Note], Note]]:
+    """
+    The grace runs of one system: (the grace notes in played order, the note they
+    lead into), found before any layout so they can take their small size and their
+    tight place against that note into every measurement that follows.
+
+    A run is a chain of notes shorter than GRACE_MAX of a beat that follow each other
+    without a breath (never overlapping by more than a hair) and end on a note of at
+    least GRACE_MAIN_MIN of a beat. Only one hand on one staff leads to its own note,
+    so a chord struck together with the main note is never taken for a grace.
+    """
+    runs: List[Tuple[List[Note], Note]] = []
+    by_staff: dict = {}
+    for n in notes:
+        by_staff.setdefault((n.hand, clef_for_note(n)), []).append(n)
+    for staff_notes in by_staff.values():
+        staff_notes.sort(key=lambda n: (n.start, n.pitch))
+        for i, main in enumerate(staff_notes):
+            if main.duration < GRACE_MAIN_MIN * beat_len:
+                continue
+            run: List[Note] = []
+            j = i - 1
+            while j >= 0:
+                g = staff_notes[j]
+                nxt = staff_notes[j + 1]
+                if g.duration >= GRACE_MAX * beat_len:
+                    break
+                # straight on with no breath between them - or struck together with the
+                # next one, so the two are a grace chord and are small together
+                same_onset = 0.0 <= nxt.start - g.start <= 0.05
+                if not (same_onset or -0.02 <= nxt.start - g.end <= 0.08):
+                    break
+                run.append(g)
+                j -= 1
+            if run:
+                run.reverse()
+                runs.append((run, main))
+    return runs
+
+
 def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: float, usable_w: float,
                        margin_left: float, s: float, beat_len: float = 0.5,
                        bar_times: Optional[List[float]] = None) -> dict:
@@ -855,6 +936,11 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
     # their onsets a little, so it is drawn as a chord and not as a little cascade.
     clusters = group_chords(sorted_notes, beat_len)
 
+    # The grace runs come first: marked before anything is spaced, so their small
+    # size (graceNoteMag) reaches the clash offsets, the gaps and their own place.
+    grace_runs = find_grace_runs(sorted_notes, beat_len)
+    grace_ids = {id(g) for run, _main in grace_runs for g in run}
+
     # Pre-calculate base attributes
     for cluster in clusters:
         chord_t = cluster[0].start
@@ -870,6 +956,7 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
                 "step_draw": step_draw,
                 "octave_shift": oct_shift,
                 "label": label,
+                "grace": id(n) in grace_ids,
                 "value": note_value(n.duration, beat_len),
             }
 
@@ -917,20 +1004,35 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
 
     # Notes that follow in time: keep enough air for the second note's accidental (♯)
     # and the first one's dot or flag, so they don't overlap at fast passages.
+    def note_head_reach(n: Note) -> float:
+        """How far to the left of its x a note's ink reaches (its accidental, if any)."""
+        mag = notation.GRACE_MAG if id(n) in grace_ids else 1.0
+        if diatonic_step(n.pitch)[1]:
+            return s * 0.8 * mag
+        return 0.0
+
+    def note_tail_reach(n: Note) -> float:
+        """How far to the right of its x a note's ink reaches (notehead, dot, flag)."""
+        if id(n) in grace_ids:
+            # a grace is drawn at graceNoteMag and carries no flag or dot
+            head = note_shape(n.duration, beat_len)[0]
+            l, _t, r, _b = notation.HEAD_BOX[head]
+            return (r - l) * s * 0.5 * notation.GRACE_MAG
+        tail = nw
+        nv = note_value(n.duration, beat_len)
+        if nv in (DOTTED_HALF, DOTTED_QUARTER, DOTTED_EIGHTH):
+            tail = nw + s * 0.6
+        elif nv in (EIGHTH, SIXTEENTH):
+            tail = nw + s * 0.9
+        return tail
+
     def cluster_head(cluster: List[Note]) -> float:
         """How far to the left of their x the notes of `cluster` reach (an accidental)."""
-        return max((s * 0.8 for n in cluster if diatonic_step(n.pitch)[1]), default=0.0)
+        return max((note_head_reach(n) for n in cluster), default=0.0)
 
     def cluster_tail(cluster: List[Note]) -> float:
         """How far to the right of their x the notes of `cluster` reach (notehead, dot, flag)."""
-        tail = nw
-        for n in cluster:
-            nv = note_value(n.duration, beat_len)
-            if nv in (DOTTED_HALF, DOTTED_QUARTER, DOTTED_EIGHTH):
-                tail = max(tail, nw + s * 0.6)
-            elif nv in (EIGHTH, SIXTEENTH):
-                tail = max(tail, nw + s * 0.9)
-        return tail
+        return max((note_tail_reach(n) for n in cluster), default=nw)
 
     min_gap = nw + 1.0
 
@@ -946,11 +1048,12 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
             for n in cluster:
                 head = note_shape(n.duration, beat_len)[0]
                 left, _top, right, _bottom = notation.HEAD_BOX[head]
-                half = (right - left) * s / 2.0
+                mag = notation.GRACE_MAG if id(n) in grace_ids else 1.0
+                half = (right - left) * s / 2.0 * mag
                 # ledger lines reach a legerLineExtension past the head on each side
-                r = half + notation.LEDGER_EXT_SP * s
+                r = half + notation.LEDGER_EXT_SP * s * mag
                 if diatonic_step(n.pitch)[1]:       # the sharp, left of the head
-                    r = max(r, half + (right - left) * s + notation.ACC_DIST_SP * s)
+                    r = max(r, half + (right - left) * s * mag + notation.ACC_DIST_SP * s * mag)
                 reach = max(reach, r)
             return reach
 
@@ -971,6 +1074,10 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
 
     for i in range(1, len(clusters)):
         prev_cluster, curr_cluster = clusters[i - 1], clusters[i]
+        # A grace note's place is against the note it leans on, not at its own moment:
+        # the run is placed after all of this, so here it neither pushes nor is pushed.
+        if any(id(n) in grace_ids for n in prev_cluster) or any(id(n) in grace_ids for n in curr_cluster):
+            continue
         # Notes on different staves are nowhere near each other: nothing to spread.
         prev_clefs = {info[id(n)]["clef"] for n in prev_cluster}
         curr_clefs = {info[id(n)]["clef"] for n in curr_cluster}
@@ -1021,6 +1128,99 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
     # the paper's edge, right on the bar, so it gives up the noteBarDistance too.
     for i, cluster in enumerate(clusters):
         pull_left_of(i, cluster, right_limit - 0.5)
+
+    # Grace notes last: small (graceNoteMag) and tucked against the note they lean on,
+    # at MuseScore's distances - graceToMainNoteDist between the run and that note,
+    # graceToGraceNoteDist between the grace notes, each measured from edge to edge of
+    # the ink on both sides (TLayout::layoutGraceNotesGroup, horizontalspacing.cpp:1512).
+    # Like MuseScore's, the run is laid out from its main note leftwards, so it belongs
+    # to that note's measure even when the file's own timings put its onsets a hair
+    # before the bar line.
+    def grace_left_ink(n: Note, x: float) -> float:
+        head = note_shape(n.duration, beat_len)[0]
+        l, _t, r, _b = notation.HEAD_BOX[head]
+        mag = notation.GRACE_MAG
+        half = (r - l) * s * 0.5 * mag
+        if diatonic_step(n.pitch)[1]:
+            return x - (half + (r - l) * s * mag + notation.ACC_DIST_SP * s * mag)
+        return x - half
+
+    if bar_times:
+        bar_gap = NOTE_BAR_DISTANCE_SP * s
+    for graces, main in grace_runs:
+        m_x = info[id(main)]["x"]
+        m_clef = info[id(main)]["clef"]
+        m_head = note_shape(main.duration, beat_len)[0]
+        ml, _mt, mr, _mb = notation.HEAD_BOX[m_head]
+        if diatonic_step(main.pitch)[1]:
+            m_left = (mr - ml) * s * 1.5 + notation.ACC_DIST_SP * s  # its sharp sits left too
+        else:
+            m_left = (mr - ml) * s * 0.5
+        # grace struck together share one x, like the notes of any chord
+        chord_groups: List[List[Note]] = []
+        for g in reversed(graces):
+            if chord_groups and abs(chord_groups[-1][0].start - g.start) <= 0.05:
+                chord_groups[-1].append(g)
+            else:
+                chord_groups.append([g])
+
+        def lay_out(right_edge: float) -> List[Tuple[Note, float]]:
+            """Place the run leftwards from `right_edge`, in MuseScore's distances."""
+            cursor = right_edge - notation.GRACE_TO_MAIN_SP * s
+            placed: List[Tuple[Note, float]] = []
+            for grp in chord_groups:
+                cx = cursor - max(note_tail_reach(n) for n in grp)
+                for g in grp:
+                    placed.append((g, cx))
+                cursor = (max(grace_left_ink(n, cx) for n in grp)
+                          - notation.GRACE_TO_GRACE_SP * s)
+            return placed
+
+        placed = lay_out(m_x - m_left)
+        # How far the run may reach left: the ink before it (the cluster just before
+        # the main note, or, above all, the bar line that opens the main note's
+        # measure - the run is the main note's, never the previous measure's).
+        run_notes = {id(g) for g in graces}
+        cluster_idx = next((i for i, cl in enumerate(clusters)
+                            if any(c is main for c in cl)), -1)
+        floor = None
+        prev_idx = cluster_idx - 1
+        while prev_idx >= 0 and any(id(n) in run_notes for n in clusters[prev_idx]):
+            prev_idx -= 1                 # the run's own notes are not "the note before"
+        if prev_idx >= 0:
+            prev = [n for n in clusters[prev_idx] if info[id(n)]["clef"] == m_clef]
+            if prev:
+                floor = (max(info[id(n)]["x"] for n in prev)
+                         + max(note_tail_reach(n) for n in prev) + 1.0)
+        if bar_times:
+            opened = [bt for bt in bar_times if bt <= main.start + 1e-9]
+            if opened:
+                bar_x = margin_left + (max(opened) - sys_start) / sys_duration * usable_w
+                want = bar_x + bar_gap
+                floor = want if floor is None else max(floor, want)
+
+        shift = 0.0
+        if floor is not None:
+            left_ink = min(grace_left_ink(g, cx) for g, cx in placed)
+            if left_ink < floor:
+                shift = floor - left_ink
+        if shift > 0:
+            # Not enough room left of the main note for the run: the run and everything
+            # from the main note onwards go right together, exactly as far as the bar line
+            # (or the note before) demands - never further, and never off the paper. The
+            # notes after the main note travel with it, or the main note would be printed
+            # on top of the next one.
+            moving = [cl for cl in clusters[cluster_idx:]]
+            rightmost = max(info[id(n)]["x"] + note_tail_reach(n)
+                            for cl in moving for n in cl)
+            headroom = right_limit - rightmost
+            shift = min(shift, max(0.0, headroom))
+            for cl in moving:
+                for n in cl:
+                    info[id(n)]["x"] += shift
+            placed = [(g, cx + shift) for g, cx in placed]
+        for g, cx in placed:
+            info[id(g)]["x"] = cx
 
     return info
 
@@ -1450,8 +1650,16 @@ class StaffView:
                                 info_n["y_top"] = y_top
                                 info_n["y_bot"] = y_bot
                                 info_n["chord_size"] = len(c_notes)
-                                # the notes struck together on one staff share a single stem
-                                info_n["stem_key"] = (tc_idx, c)
+                                # the notes struck together on one staff share a single stem,
+                                # except a grace note - it keeps its own stem and its own
+                                # height, even in the rare cluster it shares with the main
+                                # note it leans on (group_chords split them by time)
+                                if info_n.get("grace"):
+                                    info_n["stem_key"] = (tc_idx, c, id(n))
+                                    my = note_y(info_n["step_draw"], c, treble_mid_y, bass_mid_y, s)
+                                    info_n["y_top"] = info_n["y_bot"] = my
+                                else:
+                                    info_n["stem_key"] = (tc_idx, c)
 
                             # A rolled chord ("arpeggio") is written with its notes
                             # slightly staggered - they are plucked or swept one after
@@ -1533,6 +1741,46 @@ class StaffView:
                                 x, y = shifted[0]
                                 pygame.draw.line(staff_surf, STEM_COLOR, (x - round(s * 0.6), y), (x, y), beam_w)
 
+                    # Grace runs are beamed together too, at graceNoteMag, and the whole
+                    # run carries one stroke through its beam instead of a stroke on every
+                    # stem - MuseScore's look for two flicked notes (BeamLayout::
+                    # beamGraceNotes, beamlayout.cpp:553-620). The notes join the beamed
+                    # set so they draw no flags of their own, and the beam's tip is their
+                    # stem's end.
+                    for _run, g_clusters in group_grace_beams(
+                            find_grace_runs(sorted_notes, beat_len), notes_info,
+                            lambda st_: get_beat_duration(self.song, st_)):
+                        g_notes = [n for c in g_clusters for n in c]
+                        mid_step = TREBLE_MID_STEP if notes_info[id(g_notes[0])]["clef"] == CLEF_TREBLE \
+                            else BASS_MID_STEP
+                        up = stem_up_for([notes_info[id(n)]["step_draw"] for n in g_notes], mid_step)
+
+                        g_stem_len = STEM_LEN_SPACES * s * notation.GRACE_MAG
+                        g_beam_w = max(2, round(BEAM_WIDTH_SPACES * s * notation.GRACE_MAG))
+                        tips = []
+                        for c in g_clusters:
+                            y_top = min(notes_info[id(n)]["y_top"] for n in c)
+                            y_bot = max(notes_info[id(n)]["y_bot"] for n in c)
+                            tip = round(y_top - g_stem_len) if up else round(y_bot + g_stem_len)
+                            tips.append((notes_info[id(c[0])]["x"], tip))
+                        # one level bar for the whole run - a grace run is a flick, it never
+                        # bothers with the stacked bars a slow run of sixteenths carries
+                        bar_y = round(sum(t for _x, t in tips) / len(tips))
+
+                        outer = []
+                        for c, (x, _tip) in zip(g_clusters, tips):
+                            sx = round(x + nw * notation.GRACE_MAG - 1) if up \
+                                else round(x - nw * notation.GRACE_MAG + 1)
+                            outer.append((sx, bar_y))
+                            for n in c:
+                                notes_info[id(n)]["beam_stem_up"] = up
+                                notes_info[id(n)]["beam_tip_y"] = bar_y
+                                beamed_note_ids.add(id(n))
+                        pygame.draw.lines(staff_surf, STEM_COLOR, False, outer, g_beam_w)
+                        notation.beam_slash(staff_surf, s * notation.GRACE_MAG,
+                                            outer[0][0], outer[-1][0], bar_y, up,
+                                            HAND_COLORS[g_notes[0].hand][0])
+
                     # The 8va / 8vb brackets come after the stems: their line is kept off the
                     # ink the group really draws, stems and beams included, so it has to know
                     # which way each stem ended up pointing.
@@ -1553,22 +1801,31 @@ class StaffView:
                         sounding = (id(n) in active_ids) or (n.start <= t < n.end)
                         hand_col = HAND_COLORS.get(n.hand, HAND_COLORS[RIGHT])[0]
 
+                        # A grace note is drawn at graceNoteMag - the head, its accidental,
+                        # the stem and the stroke across it all shrink together, while the
+                        # note stays on its line (staff.py's layout gave it its place).
+                        is_grace = n_info.get("grace", False)
+                        g_s = s * notation.GRACE_MAG if is_grace else s
+                        nh_g = round(g_s * 0.52)
+
                         b_len = get_beat_duration(self.song, n.start)
                         shape = note_shape(n.duration, b_len)
-                        head_half = notation.HEAD_BOX[shape[0]][2] * 0.5 * s
+                        if is_grace:
+                            shape = (shape[0], 0, shape[2])   # the stroke replaces its flags
+                        head_half = notation.HEAD_BOX[shape[0]][2] * 0.5 * g_s
 
                         # A sounding note keeps the red halo it had before (drawn under
                         # the notehead, so it shows around it)
                         if sounding:
-                            pad = max(2, round(s * 0.25))
-                            halo = pygame.Rect(round(nx - head_half - pad), round(ny - nh - pad),
-                                               round(2 * head_half + 2 * pad), round(2 * nh + 2 * pad))
+                            pad = max(2, round(g_s * 0.25))
+                            halo = pygame.Rect(round(nx - head_half - pad), round(ny - nh_g - pad),
+                                               round(2 * head_half + 2 * pad), round(2 * nh_g + 2 * pad))
                             pygame.draw.ellipse(staff_surf, CURSOR_COLOR, halo, 2)
 
                         # Ledger lines: MuseScore's thickness, reaching a ledgerLineLength
                         # past the notehead on each side (ChordLayout::updateLedgerLines)
                         ledger_col = line_color
-                        ext = notation.LEDGER_EXT_SP * s
+                        ext = notation.LEDGER_EXT_SP * g_s
                         lx0, lx1 = nx - head_half - ext, nx + head_half + ext
                         if clef == CLEF_TREBLE:
                             if step <= 28:  # Middle C and below
@@ -1593,6 +1850,7 @@ class StaffView:
                         stem_up = n_info.get("beam_stem_up", n_info.get("chord_stem_up", (step < TREBLE_MID_STEP if clef == CLEF_TREBLE else step < BASS_MID_STEP)))
                         y_top = n_info.get("y_top", ny)
                         y_bot = n_info.get("y_bot", ny)
+                        g_stem_len = round(STEM_LEN_SPACES * g_s) if is_grace else stem_len
 
                         # One stem for the whole chord: notes struck together on one staff
                         # share a single stem, all pointing the same way.
@@ -1601,16 +1859,17 @@ class StaffView:
                         if shape[0] != "whole" and stem_key not in rendered_chord_stems:
                             rendered_chord_stems.add(stem_key)
                             if stem_up:
-                                tip_y = n_info.get("beam_tip_y", round(y_top - stem_len))
+                                tip_y = n_info.get("beam_tip_y", round(y_top - g_stem_len))
                                 stem = (round(y_bot), tip_y)
                             else:
-                                tip_y = n_info.get("beam_tip_y", round(y_bot + stem_len))
+                                tip_y = n_info.get("beam_tip_y", round(y_bot + g_stem_len))
                                 stem = (round(y_top), tip_y)
 
-                        notation.draw_staff_note(staff_surf, nx, ny, s, shape, hand_col, stem_up,
+                        notation.draw_staff_note(staff_surf, nx, ny, g_s, shape, hand_col, stem_up,
                                                  sounding, stem=stem,
                                                  beamed=id(n) in beamed_note_ids,
-                                                 sharp=is_sharp, on_line=(step % 2 == 0))
+                                                 sharp=is_sharp, on_line=(step % 2 == 0),
+                                                 grace=is_grace)
 
                     # 8. Playback cursor
                     cx = round(self.cursor_x(t, local_rect))

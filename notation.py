@@ -26,6 +26,8 @@ stripped build still works.
 """
 from __future__ import annotations
 
+import math
+
 import pygame
 
 import paths
@@ -49,6 +51,12 @@ ENGRAVING = {
     "dotNoteDistance": 0.5,            # styledef.cpp:311
     "dotDotDistance": 0.65,            # styledef.cpp:313
     "accidentalNoteDistance": 0.25,    # styledef.cpp (accidentalNoteDistance)
+    "graceNoteMag": 0.7,               # styledef.cpp:524 - grace notes' size
+    "graceToMainNoteDist": 0.45,       # styledef.cpp:525 - grace -> note it leans on
+    "graceToGraceNoteDist": 0.3,       # styledef.cpp:526 - one grace -> the next
+    "stemSlashPosition": 2.0,          # styledef.cpp:287 - acciaccatura's stroke
+    "stemSlashAngle": 40.0,            # styledef.cpp:288 (degrees off horizontal)
+    "stemSlashThickness": 0.125,       # styledef.cpp:289
 }
 STAFF_LINE_SP = ENGRAVING["staffLineWidth"]
 STEM_SP = ENGRAVING["stemWidth"]
@@ -59,6 +67,15 @@ LEDGER_EXT_SP = ENGRAVING["ledgerLineLength"]
 DOT_DIST_SP = ENGRAVING["dotNoteDistance"]
 DOT_GAP_SP = ENGRAVING["dotDotDistance"]
 ACC_DIST_SP = ENGRAVING["accidentalNoteDistance"]
+GRACE_MAG = ENGRAVING["graceNoteMag"]
+GRACE_TO_MAIN_SP = ENGRAVING["graceToMainNoteDist"]
+GRACE_TO_GRACE_SP = ENGRAVING["graceToGraceNoteDist"]
+STEM_SLASH_POS_SP = ENGRAVING["stemSlashPosition"]
+STEM_SLASH_ANGLE = ENGRAVING["stemSlashAngle"]
+STEM_SLASH_THICKNESS_SP = ENGRAVING["stemSlashThickness"]
+# TLayout::layoutStemSlash pulls a slash with no hook to reach for to 0.66 of
+# stemSlashPosition, closer to the stem's tip (tlayout.cpp:5393,5408).
+STEM_SLASH_HEIGHT_REDUCTION = 0.66
 
 # The noteheads Leland draws, and each one's ink box in sp (bBoxSW..bBoxNE, y up,
 # from fonts/leland/leland_metadata.json): black and half 1.300 x 1.060 sp, whole
@@ -341,6 +358,57 @@ def _stem(surf, color, x_anchor, y_from, y_to, sp, up):
     pygame.draw.line(surf, color, (x, round(y_from)), (x, round(y_to)), w)
 
 
+def _stem_slash(surf, sp, x_stem, y_tip, up, color):
+    """
+    An acciaccatura's stroke across its stem, in place of a flag.
+
+    MuseScore lays the StemSlash off at stemSlashAngle from the horizontal, starting
+    stemSlashPosition below the stem's tip (measured from the tip, so a stem pointing
+    down gets it above) and reaching a notehead's width across, a stem's width less
+    (TLayout::layoutStemSlash, tlayout.cpp:5391-5446). `sp` is already the grace's own
+    size (graceNoteMag times the staff's), so MuseScore's `mag` factor is in it.
+
+    A slash with no hook to reach for is pulled closer to the tip - heightReduction,
+    0.66 of stemSlashPosition (tlayout.cpp:5393,5408) - which is the acciaccatura this
+    draws, every grace note we slash being flagless.
+    """
+    l, _t, r, _b = HEAD_BOX["black"]
+    half = (r - l) * sp * 0.5
+    stem_w = STEM_SP * sp
+    pos = STEM_SLASH_POS_SP * sp * STEM_SLASH_HEIGHT_REDUCTION
+    dx = (r - l - STEM_SP) * sp
+    dy = dx * math.tan(math.radians(STEM_SLASH_ANGLE))
+    # the stem's far edge - the notehead's right for an up stem, its own for a down one
+    far = x_stem if up else x_stem + stem_w
+    x0, x1 = far - half, far + half - stem_w
+    y0 = y_tip + pos if up else y_tip - pos
+    y1 = y0 - dy if up else y0 + dy
+    w = max(1, round(STEM_SLASH_THICKNESS_SP * sp))
+    pygame.draw.line(surf, color, (round(x0), round(y0)), (round(x1), round(y1)), w)
+
+
+def beam_slash(surf, sp, x0, x1, y, up, color):
+    """
+    An acciaccatura's stroke drawn across a beam, once for the whole group.
+
+    A run of grace notes is beamed together at graceNoteMag, and MuseScore puts a
+    single stroke through that beam rather than one on each stem: the `beam` branch of
+    TLayout::layoutStemSlash (tlayout.cpp:5423-5434) draws it at stemSlashAngle from the
+    horizontal, 2 spaces long (a little longer when the angle between it and the beam is
+    obtuse), starting from the first stem. `x0..x1` is the beam's reach, and the stroke
+    crosses it at its middle.
+    """
+    length = 2.0 * sp
+    ang = math.radians(STEM_SLASH_ANGLE)
+    dx = length * math.cos(ang)
+    dy = length * math.sin(ang)
+    cx = (x0 + x1) / 2.0
+    xa, xb = cx - dx / 2.0, cx + dx / 2.0
+    ya, yb = y + (dy / 2.0 if up else -dy / 2.0), y - (dy / 2.0 if up else -dy / 2.0)
+    w = max(1, round(STEM_SLASH_THICKNESS_SP * sp))
+    pygame.draw.line(surf, color, (round(xa), round(ya)), (round(xb), round(yb)), w)
+
+
 def _flag(surf, sp, x_stem, y_tip, count, up, color):
     """A stem's flags, hung off its tip by the flag's own stemUpNW / stemDownSW anchor."""
     kind = FLAGS.get(count)
@@ -387,7 +455,8 @@ def _dots(surf, sp, x_head_right, y, count, color):
 
 
 def draw_staff_note(surf, x, y, sp, shape, color, stem_up, sounding=False,
-                    stem=None, beamed=False, sharp=False, on_line=False):
+                    stem=None, beamed=False, sharp=False, on_line=False,
+                    grace=False):
     """
     A note on the staff, MuseScore's way: the accidental, the notehead, the dots and
     the stem with its flags (TDraw::draw(const ShadowNote*), tdraw.cpp:2598-2695).
@@ -400,6 +469,8 @@ def draw_staff_note(surf, x, y, sp, shape, color, stem_up, sounding=False,
     `sharp`: draw the accidental left of the head. `on_line`: the note is on a line,
     so its dot rises into the space above (tdraw.cpp:2648). A sounding note is drawn
     lighter, as the staff has always drawn it.
+    `grace`: a grace note drawn at graceNoteMag by the caller; a flagless one is an
+    acciaccatura, and gets MuseScore's stroke across its stem instead of a flag.
 
     Without the font this draws the plain ellipses it drew before Leland.
     """
@@ -430,6 +501,8 @@ def draw_staff_note(surf, x, y, sp, shape, color, stem_up, sounding=False,
         _stem(surf, color, ox + ax * sp, oy + ay * sp, stem[1], sp, stem_up)
         if flags and not beamed:
             _flag(surf, sp, ox + ax * sp, stem[1], flags, stem_up, color)
+        elif grace and not beamed:
+            _stem_slash(surf, sp, ox + ax * sp, stem[1], stem_up, color)
 
 
 def _fallback_staff_note(surf, x, y, sp, shape, color, stem_up, stem, sharp, on_line):

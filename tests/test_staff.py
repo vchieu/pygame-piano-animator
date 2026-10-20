@@ -1390,3 +1390,209 @@ def test_50_nam_ve_sau_system_0_ottava():
     assert info[id(n9)]["step_draw"] == staff.diatonic_step(86)[0] - 7
     assert info[id(n11)]["step_draw"] == staff.diatonic_step(79)[0] - 7
 
+
+# --------------------------------------------------------------------------- #
+# Grace notes (note hoa mỹ)
+# --------------------------------------------------------------------------- #
+def _grace_song():
+    """50-nam-ve-sau's figure at t=38.8: C5, then two notes flicked into the downbeat B4."""
+    c5 = _note(72, 1.00, RIGHT, dur=0.4)
+    g1 = _note(69, 1.42, RIGHT, dur=0.05)
+    g2 = _note(70, 1.48, RIGHT, dur=0.05)
+    main = _note(71, 1.535, RIGHT, dur=0.4)
+    return c5, g1, g2, main
+
+
+def test_grace_notes_are_marked_and_tucked_against_their_main_note():
+    c5, g1, g2, main = _grace_song()
+    s = 7.0
+    # no bar lines to respect here: the run has all the room it needs, so the main
+    # note stays exactly at its moment in time and the run tucks in against it
+    info = staff.compute_notes_info([c5, g1, g2, main], 0.0, 5.0, 1000.0,
+                                    staff.MARGIN_LEFT, s)
+
+    # the two flicked notes are graces; the quarter before and the quarter they lean
+    # on are music, written out full size
+    assert info[id(g1)]["grace"] and info[id(g2)]["grace"]
+    assert not info[id(c5)]["grace"] and not info[id(main)]["grace"]
+
+    # played order kept, and the main note stays exactly at its moment in time -
+    # the run is what moves, not the note it belongs to
+    assert info[id(c5)]["x"] < info[id(g1)]["x"] < info[id(g2)]["x"]
+    assert info[id(main)]["x"] == pytest.approx(
+        staff.MARGIN_LEFT + 1.535 / 5.0 * 1000.0, abs=0.01)
+
+    # MuseScore's spacing, edge of ink to edge of ink: graceToMainNoteDist (0.45 sp)
+    # between the last grace and the main note's head...
+    head_w = notation.HEAD_BOX["black"][2] - notation.HEAD_BOX["black"][0]
+    main_to_last = (head_w * 0.5 * s + notation.GRACE_TO_MAIN_SP * s
+                    + head_w * 0.5 * s * notation.GRACE_MAG)
+    assert info[id(main)]["x"] - info[id(g2)]["x"] == pytest.approx(main_to_last, abs=0.05)
+
+    # ...and graceToGraceNoteDist (0.3 sp) between two graces, stretched by the sharp
+    # sitting between A4 and A#4's head
+    grace_gap = (head_w * 0.5 * s * notation.GRACE_MAG + notation.GRACE_TO_GRACE_SP * s
+                 + (head_w + notation.ACC_DIST_SP + head_w * 0.5)
+                 * s * notation.GRACE_MAG)
+    assert info[id(g2)]["x"] - info[id(g1)]["x"] == pytest.approx(grace_gap, abs=0.05)
+
+    # the run keeps its air from the quarter before it
+    prev_right = info[id(c5)]["x"] + round(s * 0.75)
+    g1_left = info[id(g1)]["x"] - head_w * 0.5 * s * notation.GRACE_MAG
+    assert g1_left >= prev_right + 1.0
+
+
+def test_a_grace_run_belongs_to_the_measure_of_the_note_it_leans_on():
+    # 50-nam-ve-sau's own timings: C5 at 38.451, the two flicked notes at 38.768 and
+    # 38.820, the downbeat B4 at 38.873 - and the bar line at 38.873. The file puts
+    # the grace onsets in the *previous* measure, but the run is the B4's: it is drawn
+    # in the B4's measure, never across the bar line into the one before.
+    s = 7.0
+    bar = [0.0, 0.4233 * 4, 0.4233 * 8]         # bar lines a bar apart (4/4 at this tempo)
+    beat = 0.4233
+    lead = Note(pitch=72, start=bar[1] + 4.4 * beat, end=bar[1] + 4.4 * beat + 0.3,
+                velocity=80, track=0, hand=RIGHT)
+    g1 = Note(pitch=69, start=bar[2] - 0.105, end=bar[2] - 0.055, velocity=80, track=0, hand=RIGHT)
+    g2 = Note(pitch=70, start=bar[2] - 0.053, end=bar[2] - 0.003, velocity=80, track=0, hand=RIGHT)
+    main = Note(pitch=71, start=bar[2], end=bar[2] + 0.4, velocity=80, track=0, hand=RIGHT)
+    nxt = Note(pitch=74, start=bar[2] + 0.5, end=bar[2] + 0.9, velocity=80, track=0, hand=RIGHT)
+    notes = [lead, g1, g2, main, nxt]
+
+    usable = 1000.0
+    info = staff.compute_notes_info(notes, 0.0, 5.0, usable, staff.MARGIN_LEFT, s,
+                                    beat, bar)
+    runs = staff.find_grace_runs(sorted(notes, key=lambda n: (n.start, n.pitch)), beat)
+    assert runs and runs[0][0] == [g1, g2] and runs[0][1] is main
+
+    bar_x = staff.MARGIN_LEFT + bar[2] / 5.0 * usable
+    head_w = notation.HEAD_BOX["black"][2] - notation.HEAD_BOX["black"][0]
+    for g in (g1, g2):
+        left_ink = info[id(g)]["x"] - head_w * 0.5 * s * notation.GRACE_MAG
+        assert left_ink >= bar_x + 1.0, "the run is drawn in the main note's measure"
+
+    # the notes after the main note travel with it, so the main note never lands on the
+    # next one - their spacing is what proportional spacing gave them, unchanged
+    m_right = info[id(main)]["x"] + round(s * 0.75)
+    assert info[id(nxt)]["x"] - m_right >= 1.0, "the main note does not touch the next one"
+
+
+def test_a_written_sixteenth_pickup_is_written_out_not_a_grace():
+    # A grace is shorter than 0.15 of a beat - six tenths of a sixteenth. A real
+    # written sixteenth (0.125 s at the half-beat) runs into a longer note too, but
+    # it is music: it keeps its full size and its flags, and so does 50-nam-ve-sau's
+    # 0.099 s pickup pair at t=1.5.
+    p16 = _note(72, 2.00, RIGHT, dur=0.125)
+    m16 = _note(74, 2.14, RIGHT, dur=0.4)
+    info = staff.compute_notes_info([p16, m16], 0.0, 5.0, 1000.0, staff.MARGIN_LEFT, 7.0)
+    assert not info[id(p16)]["grace"] and not info[id(m16)]["grace"]
+
+    p99 = _note(69, 3.00, RIGHT, dur=0.099)
+    m99 = _note(71, 3.105, RIGHT, dur=0.4)
+    info = staff.compute_notes_info([p99, m99], 0.0, 5.0, 1000.0, staff.MARGIN_LEFT, 7.0)
+    assert not info[id(p99)]["grace"] and not info[id(m99)]["grace"]
+
+
+def test_grace_notes_draw_small_and_a_run_is_beamed_with_one_slash(screen):
+    c5, g1, g2, main = _grace_song()
+    song = _BracketSong([c5, g1, g2, main], duration=5.0, bar=2.0)
+    rect = pygame.Rect(0, 0, 1200, 160)
+    s = max(4.0, min(12.0, (rect.h - 26) / 14.0))
+
+    drawn, slashed, beams = [], [], []
+    real_note = notation.draw_staff_note
+    real_slash, real_beam_slash = notation._stem_slash, notation.beam_slash
+
+    def note_spy(surf, x, y, sp, shape, color, stem_up, *args, **kw):
+        drawn.append((sp, shape, kw.get("grace"), kw.get("stem")))
+        return real_note(surf, x, y, sp, shape, color, stem_up, *args, **kw)
+
+    def slash_spy(surf, sp, x_stem, y_tip, up, color):
+        slashed.append(sp)
+        return real_slash(surf, sp, x_stem, y_tip, up, color)
+
+    def beam_slash_spy(surf, sp, x0, x1, y, up, color):
+        beams.append((sp, x0, x1))
+        return real_beam_slash(surf, sp, x0, x1, y, up, color)
+
+    notation.draw_staff_note = note_spy
+    notation._stem_slash = slash_spy
+    notation.beam_slash = beam_slash_spy
+    try:
+        out = pygame.Surface(rect.size)
+        out.fill((0, 0, 0))
+        staff.StaffView(song).draw(out, rect, 1.5)
+    finally:
+        notation.draw_staff_note = real_note
+        notation._stem_slash = real_slash
+        notation.beam_slash = real_beam_slash
+
+    graces = [d for d in drawn if d[2]]
+    full = [d for d in drawn if not d[2]]
+    assert len(graces) == 2, f"the two flicked notes are drawn as graces, got {len(graces)}"
+    assert len(full) == 2, "C5 and the main note keep their full size"
+
+    # the grace notehead, its accidental and its stem all shrink to graceNoteMag...
+    for sp, shape, _g, stem in graces:
+        assert sp == pytest.approx(s * notation.GRACE_MAG, abs=1e-6)
+        # ...its flags are replaced by the stroke, and it is beamed to its neighbour
+        assert shape[1] == 0
+        assert stem is not None
+    for sp, _shape, _g, _stem in full:
+        assert sp == s
+
+    # MuseScore's look for a run of two flicked notes: a small beam across them, with a
+    # single stroke through that beam - not a stroke on each stem.
+    assert slashed == [], "a beamed run carries no per-stem stroke"
+    assert len(beams) == 1, f"the run is beamed once, got {len(beams)}"
+    sp, x0, x1 = beams[0]
+    assert sp == pytest.approx(s * notation.GRACE_MAG, abs=1e-6)
+    assert x1 > x0, "the stroke crosses the beam, left-hand grace to right-hand grace"
+
+    # the two grace stems reach the one beam, drawn as small as the notes
+    g_stems = [stem for _sp, _shape, _g, stem in graces]
+    assert g_stems[0][1] == g_stems[1][1], "both stems end on the same beam"
+    # the stem is the grace's own length, not a full-size stem
+    assert all(abs(tip - low) < staff.STEM_LEN_SPACES * s
+               for low, tip in (st if st[1] < st[0] else (st[1], st[0]) for st in g_stems))
+
+
+def test_only_a_run_of_flag_carrying_graces_is_beamed():
+    # two flicked notes short enough to carry flags: beamed together, one stroke
+    c5, g1, g2, main = _grace_song()
+    notes = [c5, g1, g2, main]
+    info = staff.compute_notes_info(notes, 0.0, 5.0, 1000.0, staff.MARGIN_LEFT, 7.0)
+    runs = staff.find_grace_runs(sorted(notes, key=lambda n: (n.start, n.pitch)), 0.5)
+    beat_of = lambda t: 0.5  # noqa: E731
+
+    beamed = staff.group_grace_beams(runs, info, beat_of)
+    assert len(beamed) == 1
+    run, clusters = beamed[0]
+    assert [n.start for n in run] == [g1.start, g2.start]
+    assert [c[0].start for c in clusters] == [g1.start, g2.start]
+
+    # a single grace has no neighbour to beam to
+    lone_info = staff.compute_notes_info([c5, g1, main], 0.0, 5.0, 1000.0, staff.MARGIN_LEFT, 7.0)
+    lone = staff.find_grace_runs(sorted([c5, g1, main], key=lambda n: (n.start, n.pitch)), 0.5)
+    assert staff.group_grace_beams(lone, lone_info, beat_of) == []
+
+
+def test_grace_notes_never_join_a_beam():
+    c5, g1, g2, main = _grace_song()
+    notes = [c5, g1, g2, main]
+    song = _BracketSong(notes, duration=5.0, bar=2.0)
+    info = staff.compute_notes_info(notes, 0.0, 5.0, 1000.0, staff.MARGIN_LEFT, 7.0)
+    clusters = staff.group_chords(sorted(notes, key=lambda n: (n.start, n.pitch)), 0.5)
+    measure_of = {}
+    for m in staff.StaffView(song).systems[0].measures:
+        for n in notes:
+            if m.start_t <= n.start < m.end_t:
+                measure_of[id(n)] = m
+    beat_of = lambda t: staff.get_beat_duration(song, t)  # noqa: E731
+
+    # without the grace flag these two sixteenths would beam together...
+    bare = {k: {"clef": v["clef"], "step_draw": v["step_draw"]} for k, v in info.items()}
+    assert staff.group_beams(clusters, bare, beat_of, measure_of) != []
+
+    # ...but a grace hangs off the note it leans on: it ends a beam and starts none
+    assert staff.group_beams(clusters, info, beat_of, measure_of) == []
+
