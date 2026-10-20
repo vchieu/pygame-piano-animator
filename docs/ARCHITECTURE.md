@@ -390,6 +390,38 @@ Detailed design notes, kept up to date as features were added. Start with `CLAUD
   0.2-0.9 sp past it, where the note before leaves no room to pull it further left (2 notes at
   140 px, 3 at 200 px, and 2 at the end of a system in `ke_say_tinh_3.mid`); the closest pair
   left clear is 0.5 sp at 90 px. Nothing is drawn *on* a line any more.
+- **A note that runs past a bar line is split and tied** (2026-10-21). An engraver never
+  writes one note across a bar line: the note is cut at the bar, the piece that ends the
+  measure and the piece that opens the next one are written out separately and joined by a
+  tie. Before this, `staff.build_systems` dropped each note whole into the system holding
+  its **onset**, so a crossing note was drawn at full length inside one measure - measure 2
+  of `50-nam-ve-sau` showed a half note reaching 1.87 beats into measure 3.
+  - `staff.split_at_bar_lines(notes, bar_times) -> (pieces, ties)` does the cut once, in
+    `StaffView.draw`'s active-system block, before `compute_notes_info`. A note becomes
+    itself when no bar time lies strictly inside it, or one piece per span `[start, b1],
+    [b1, b2], ..., [bk, end]` when it does; each piece after the first is tied to the one
+    before it and `ties` pairs them. The pieces are `Note`s too (same frozen dataclass,
+    clipped start/end, `finger`/`gliss` kept on the first piece), so every consumer
+    downstream - `group_chords`, `find_grace_runs`, `compute_notes_info`, the beams, the
+    draw loop - works on them unchanged. A note whose onset is a hair before a bar (the
+    file's own rounding) is judged from the bar it is really on, so it is not cut into a
+    sliver. A piece that opens a note crossing the system's own ending bar line has no
+    measure on this system; its tie to the next system is out of scope and is simply not
+    drawn (the `notes_info`/`right_limit` guard in the tie loop).
+  - The **tie is a path, not a font glyph**, and is drawn the way MuseScore draws it: a
+    filled cubic Bézier **crescent** that swells to `tieMidpointThickness` (0.21 sp,
+    `TIE_MID_SP`) at the middle and pinches to `tieEndpointThickness` (0.05 sp, `TIE_END_SP`)
+    at the two ends, its centre line arcing away from the noteheads by the shoulder - at
+    least `tieMinShoulderHeight` (0.3 sp), rising 0.3 sp per space past one, capped at
+    `tieMaxShoulderHeight` (2.0 sp) - with the Bézier's shoulders `TIE_SHOULDER_W` (0.6) of
+    the width apart (`TDraw::draw(const TieSegment*)`, tdraw.cpp:3147-3202;
+    `SlurTieLayout::computeBezier`, slurtielayout.cpp:2677-2763; `computeMidThickness`,
+    :3223-3256; style defaults styledef.cpp:616-619, 635-636). A tie shorter than
+    `MIN_TIE_LENGTH_SP` (1.0 sp) is drawn flat. `notation.draw_tie(surf, sp, x0, x1, y, up,
+    color)` is polygons only, so it needs no music font and has no fallback path of its own.
+    `StaffView.draw` places each tie **opposite the stem** (MuseScore ties a single note
+    `!chord->up()`, slurtielayout.cpp:3086) at the notehead's outer edge, after the note
+    loop so the crescent reads over the ink.
 - The hand colours (`HAND_COLORS`) are still the note colour. Tests: `tests/test_notation.py`
   (metrics, the codepoint table, the glyph cache, every glyph at four sizes, the painter's
   geometry, the clef and time-signature painters, the no-font fallback) and `tests/test_staff.py`

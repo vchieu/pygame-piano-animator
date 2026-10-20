@@ -105,6 +105,135 @@ def test_system_slicing_and_measures():
     assert total_sys_notes == len(song.notes)
 
 
+def test_a_note_crossing_a_bar_line_is_split_and_tied():
+    # The real note from 50-nam-ve-sau measure 2: pitch 88 from 3.169 to 4.1717, with the
+    # bar line at 3.3803 strictly inside it. An engraver cuts it at the bar and ties the
+    # two pieces; left whole, the measure showed a half note reaching 1.87 beats past its
+    # own end (the defect this split exists for).
+    bar = 3.3803
+    n = Note(pitch=88, start=3.169, end=4.1717, velocity=80, track=0, hand=RIGHT, finger=3)
+    pieces, ties = staff.split_at_bar_lines([n], [0.0, 1.6901, bar, 5.0704])
+
+    assert len(pieces) == 2
+    left, right = pieces
+    # the cut lands exactly on the bar time - the right piece opens the next measure
+    assert left.start == pytest.approx(3.169) and left.end == pytest.approx(bar)
+    assert right.start == pytest.approx(bar) and right.end == pytest.approx(4.1717)
+    # nothing else about the note changes: same pitch, same velocity, same hand
+    assert right.pitch == left.pitch == 88
+    assert right.velocity == left.velocity == 80 and right.hand == left.hand == RIGHT
+    # the first piece keeps the file's own fingering; the second is a plain continuation
+    assert left.finger == 3 and right.finger is None
+
+    # and the two pieces are tied to one another, left to right
+    assert ties == [(left, right)]
+
+
+def test_a_note_spanning_two_bar_lines_gets_one_piece_per_measure():
+    # A note longer than a measure is cut at every bar it crosses, not just the first.
+    n = Note(pitch=60, start=0.1, end=2.9, velocity=80, track=0, hand=RIGHT)
+    pieces, ties = staff.split_at_bar_lines([n], [0.0, 1.0, 2.0, 3.0])
+
+    assert [(round(p.start, 4), round(p.end, 4)) for p in pieces] == \
+        [(0.1, 1.0), (1.0, 2.0), (2.0, 2.9)]
+    # each piece tied to the one before it, in order
+    assert ties == [(pieces[0], pieces[1]), (pieces[1], pieces[2])]
+    # the pieces cover the note's own interval exactly - no time is lost at the joins
+    assert sum(p.duration for p in pieces) == pytest.approx(n.duration)
+
+
+def test_a_note_inside_one_measure_is_left_whole():
+    # No bar time strictly inside it, so there is nothing to tie: the note itself comes
+    # back, not a copy, and no tie.
+    n = Note(pitch=67, start=1.2, end=1.8, velocity=80, track=0, hand=RIGHT)
+    pieces, ties = staff.split_at_bar_lines([n], [0.0, 1.0, 2.0])
+    assert pieces == [n] and ties == []
+    # a note starting exactly on the bar belongs to the measure it opens, uncut
+    on_bar = Note(pitch=67, start=2.0, end=2.6, velocity=80, track=0, hand=RIGHT)
+    pieces, ties = staff.split_at_bar_lines([on_bar], [0.0, 1.0, 2.0, 3.0])
+    assert pieces == [on_bar] and ties == []
+
+
+def test_no_measure_of_50_nam_ve_sau_overfills_its_time_signature():
+    # Every note that crossed a bar line is split, so no measure's notes reach past the
+    # measure - measure 2 used to show a half note 1.87 beats into measure 3.
+    song = load_midi(midi_path("50-nam-ve-sau.mid"))
+    for sys in build_systems(song):
+        pieces, _ties = staff.split_at_bar_lines(sys.notes, song.bar_times)
+        for m in sys.measures:
+            # A piece belongs to the measure it opens. The 1e-9 slack is only for the
+            # file's own rounding, where a downbeat lands a hair before the bar time;
+            # a piece sitting on a measure's end belongs to the *next* measure, not this
+            # one, so the upper bound carries the slack too.
+            over = [p for p in pieces
+                    if m.start_t - 1e-9 <= p.start < m.end_t - 1e-9
+                    and p.end > m.end_t + 1e-6]
+            assert not over, f"measure {m.index} shows ink past its end"
+
+
+def test_the_split_note_is_tied_on_screen(screen, monkeypatch):
+    # The tie is drawn, not just recorded: system 3 of 50-nam-ve-sau holds a split note,
+    # and rendering it must put ink between the two noteheads it now has - ink that is
+    # there only because of the tie.
+    song = load_midi(midi_path("50-nam-ve-sau.mid"))
+    sv = StaffView(song)
+    sys3 = sv.systems[3]
+    rect = pygame.Rect(0, 0, 1400, 300)
+
+    with_tie = pygame.Surface(rect.size)
+    sv.draw(with_tie, rect, sys3.start_t)
+
+    # Same draw with the tie painter silenced: only the tie's own ink can differ.
+    calls = []
+    monkeypatch.setattr(notation, "draw_tie", lambda *a, **k: calls.append(a))
+    without_tie = pygame.Surface(rect.size)
+    sv.draw(without_tie, rect, sys3.start_t)
+    monkeypatch.undo()
+
+    assert calls, "system 3 should draw a tie for its split note"
+    # at least one tie draws a real crescent whose ink the silent pass lacks
+    for (surf, sp, x0, x1, y, up, color) in calls:
+        assert x0 < x1
+        tie_ink = 0
+        for x in range(int(x0) + 1, int(x1)):
+            for yy in range(max(0, int(y) - round(6 * sp)), min(rect.h, int(y) + round(6 * sp))):
+                if with_tie.get_at((x, yy))[:3] != without_tie.get_at((x, yy))[:3]:
+                    tie_ink += 1
+        if tie_ink:
+            break
+    assert tie_ink > 0, "the tie leaves ink between the two tied noteheads"
+
+
+def test_a_tie_goes_opposite_the_stem(screen, monkeypatch):
+    # MuseScore ties a single note on the side away from its chord's stem
+    # (SlurTieLayout::computeUp, slurtielayout.cpp:3086: setUp(!chord->up())). Capture the
+    # direction each tie is drawn with and check it against the stem the layout chose.
+    song = load_midi(midi_path("50-nam-ve-sau.mid"))
+    sv = StaffView(song)
+    rect = pygame.Rect(0, 0, 1400, 300)
+
+    calls = []
+    real = notation.draw_tie
+
+    def record(surf, sp, x0, x1, y, up, color):
+        calls.append((x0, x1, y, up))
+        return real(surf, sp, x0, x1, y, up, color)
+
+    monkeypatch.setattr(notation, "draw_tie", record)
+    for i in range(len(sv.systems)):
+        sys = sv.systems[i]
+        before = len(calls)
+        sv.draw(pygame.Surface(rect.size), rect, sys.start_t)
+        # every tie for this system is drawn with a real side (no crash, no None)
+        for _x0, _x1, _y, up in calls[before:]:
+            assert isinstance(up, bool)
+
+    assert calls, "50-nam-ve-sau draws ties"
+    # both directions really occur in the song, so the placement follows the stems
+    # rather than being a constant
+    assert {c[3] for c in calls} == {True, False}
+
+
 def test_empty_song_and_synthetic_systems():
     # Empty / None
     assert build_systems(None) == []

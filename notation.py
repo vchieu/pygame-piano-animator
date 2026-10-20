@@ -57,6 +57,11 @@ ENGRAVING = {
     "stemSlashPosition": 2.0,          # styledef.cpp:287 - acciaccatura's stroke
     "stemSlashAngle": 40.0,            # styledef.cpp:288 (degrees off horizontal)
     "stemSlashThickness": 0.125,       # styledef.cpp:289
+    "tieEndpointThickness": 0.05,      # styledef.cpp:616 (tieEndWidth) - a tie's ends
+    "tieMidpointThickness": 0.21,      # styledef.cpp:617 (tieMidWidth) - its swell
+    "minTieLength": 1.0,               # styledef.cpp:619 - shorter than this, a tie is flat
+    "tieMinShoulderHeight": 0.3,       # styledef.cpp:635 - how far the arc rises
+    "tieMaxShoulderHeight": 2.0,       # styledef.cpp:636
 }
 STAFF_LINE_SP = ENGRAVING["staffLineWidth"]
 STEM_SP = ENGRAVING["stemWidth"]
@@ -73,6 +78,15 @@ GRACE_TO_GRACE_SP = ENGRAVING["graceToGraceNoteDist"]
 STEM_SLASH_POS_SP = ENGRAVING["stemSlashPosition"]
 STEM_SLASH_ANGLE = ENGRAVING["stemSlashAngle"]
 STEM_SLASH_THICKNESS_SP = ENGRAVING["stemSlashThickness"]
+TIE_END_SP = ENGRAVING["tieEndpointThickness"]
+TIE_MID_SP = ENGRAVING["tieMidpointThickness"]
+MIN_TIE_LENGTH_SP = ENGRAVING["minTieLength"]
+TIE_MIN_SHOULDER_SP = ENGRAVING["tieMinShoulderHeight"]
+TIE_MAX_SHOULDER_SP = ENGRAVING["tieMaxShoulderHeight"]
+# SlurTieLayout::computeBezier pulls the Bézier's control points inboard by
+# shoulderW, so the arc's shoulders (its widest part) stand 0.6 of the tie's
+# width apart (slurtielayout.cpp:2714,2717-2718).
+TIE_SHOULDER_W = 0.6
 # TLayout::layoutStemSlash pulls a slash with no hook to reach for to 0.66 of
 # stemSlashPosition, closer to the stem's tip (tlayout.cpp:5393,5408).
 STEM_SLASH_HEIGHT_REDUCTION = 0.66
@@ -407,6 +421,80 @@ def beam_slash(surf, sp, x0, x1, y, up, color):
     ya, yb = y + (dy / 2.0 if up else -dy / 2.0), y - (dy / 2.0 if up else -dy / 2.0)
     w = max(1, round(STEM_SLASH_THICKNESS_SP * sp))
     pygame.draw.line(surf, color, (round(xa), round(ya)), (round(xb), round(yb)), w)
+
+
+def _bezier_point(p0, p1, p2, p3, t):
+    """A cubic Bézier at `t` in 0..1, the four points a tuple of floats (x, y)."""
+    u = 1.0 - t
+    a, b, c, d = u * u * u, 3 * u * u * t, 3 * u * t * t, t * t * t
+    return (a * p0[0] + b * p1[0] + c * p2[0] + d * p3[0],
+            a * p0[1] + b * p1[1] + c * p2[1] + d * p3[1])
+
+
+def draw_tie(surf, sp, x0, x1, y, up, color):
+    """
+    A tie between two noteheads, MuseScore's way: not a font glyph but a **filled
+    path**, a crescent whose edges swell to tieMidpointThickness (0.21 sp) at the
+    middle and pinch to tieEndpointThickness (0.05 sp) at the ends, the whole arc
+    bowing away from the noteheads by the shoulder (TDraw::draw(const TieSegment*),
+    tdraw.cpp:3147-3202; SlurTieLayout::computeBezier, slurtielayout.cpp:2677-2763,
+    and computeMidThickness, :3223-3256).
+
+    `x0..x1` are the two noteheads' x and `y` is where the tie sits, one of them at each
+    end (a tie is a plain line here - the two notes share a pitch and a staff, so their
+    heads are the same height). `up` puts the arc above `y` - the default for a note whose
+    stem points down, so the tie goes opposite the stem (SlurTieLayout::computeUp,
+    slurtielayout.cpp:3067-3170: `item->setUp(!primaryChord->up())`). A tie shorter than
+    minTieLength (1.0 sp) is drawn flat rather than pinched to nothing.
+
+    This is drawn with polygons, so it needs no music font and has no fallback path of its
+    own - the same shape is the shape, font or no font.
+    """
+    x0, x1 = sorted((float(x0), float(x1)))
+    y = float(y)
+    dir_ = -1.0 if up else 1.0
+    end_t = TIE_END_SP * sp
+    mid_t = TIE_MID_SP * sp
+
+    # A tie too short to arc is a plain band of tieEndpointThickness - MuseScore draws
+    # it flat rather than let the shoulders fold into each other.
+    if (x1 - x0) < MIN_TIE_LENGTH_SP * sp:
+        half = max(1, round(end_t * 0.5))
+        pygame.draw.rect(surf, color,
+                         pygame.Rect(round(x0), round(y) - half,
+                                     max(1, round(x1 - x0)), half * 2))
+        return
+
+    # The arc's depth: at least tieMinShoulderHeight, rising 0.3 sp per space the tie
+    # is longer than one, capped at tieMaxShoulderHeight (slurtielayout.cpp:2701-2702).
+    length_sp = (x1 - x0) / max(1e-6, sp)
+    shoulder = TIE_MIN_SHOULDER_SP + 0.3 * math.sqrt(abs(length_sp - 1.0))
+    shoulder = max(TIE_MIN_SHOULDER_SP, min(TIE_MAX_SHOULDER_SP, shoulder)) * sp
+
+    # One cubic for the tie's centre line, its shoulders (the widest part) shoulderW
+    # (0.6) of the width apart (slurtielayout.cpp:2714,2717-2718), the whole thing
+    # bowed `shoulder` away from the noteheads on the side `up` asks for.
+    cx0 = x0 + (x1 - x0) * (1.0 - TIE_SHOULDER_W) * 0.5
+    cx1 = cx0 + (x1 - x0) * TIE_SHOULDER_W
+    p0 = (x0, y)
+    p1 = (cx0, y + dir_ * shoulder)
+    p2 = (cx1, y + dir_ * shoulder)
+    p3 = (x1, y)
+
+    # The crescent: the thickness swells from tieEndpointThickness at the two ends to
+    # tieMidpointThickness at the middle (the half-thickness rides a sine, so it is the
+    # ends and the mid that are pinned and the swell is the roundest line between them),
+    # spread either side of the centre line.
+    upper, lower = [], []
+    steps = max(12, min(64, int(abs(x1 - x0))))
+    for i in range(steps + 1):
+        u = i / steps
+        px, py = _bezier_point(p0, p1, p2, p3, u)
+        half = (end_t + (mid_t - end_t) * math.sin(math.pi * u)) * 0.5
+        upper.append((px, py - half))
+        lower.append((px, py + half))
+
+    pygame.draw.polygon(surf, color, upper + lower[::-1])
 
 
 def _flag(surf, sp, x_stem, y_tip, count, up, color):

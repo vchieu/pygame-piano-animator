@@ -292,6 +292,68 @@ def build_systems(song, target_dur: float = 10.0) -> List[StaffSystem]:
     return systems
 
 
+def split_at_bar_lines(notes: List[Note], bar_times: List[float]) -> Tuple[List[Note], List[Tuple[Note, Note]]]:
+    """
+    Split the notes that run past a bar line, and pair the pieces that are tied.
+
+    An engraver never writes one note across a bar line: the note is cut at the bar,
+    the piece that ends the measure and the piece that opens the next one are written
+    out separately and joined by a tie, so no measure ever shows more beats of ink than
+    its time signature holds. The split is what makes that true here - `build_systems`
+    used to drop a crossing note whole into the measure holding its onset, hence the
+    half note in `50-nam-ve-sau`'s measure 2 reaching 1.87 beats into measure 3.
+
+    Each note becomes the note itself when no bar time lies strictly inside it, or one
+    piece per span `[start, b1], [b1, b2], ..., [bk, end]` when it does. The pieces are
+    `Note`s too - same frozen dataclass, clipped start/end, everything else carried over
+    onto the first piece - so every consumer downstream (`group_chords`, `find_grace_runs`,
+    `compute_notes_info`, the beams, the draw loop) keeps working on them unchanged. The
+    last piece may be shorter than a printed value; its shape is worked out from its own
+    duration, which is what a tied piece of a long note normally is anyway.
+
+    Returns `(pieces, ties)`, `ties` pairing each `(left, right)` of pieces that must be
+    tied - the right piece starts exactly where the left one ends, on its own bar time.
+    """
+    bars = sorted({float(b) for b in (bar_times or [])})
+    pieces: List[Note] = []
+    ties: List[Tuple[Note, Note]] = []
+    for n in notes:
+        # A file's own rounding can put a downbeat a hair before the bar (50-nam-ve-sau's
+        # measure-1 downbeat is 2e-16 early). Such a note is that measure's downbeat, not a
+        # note of the measure before it, so judge the cuts from the bar it is really on -
+        # but leave the note's own start where the file put it.
+        start = n.start
+        for b in bars:
+            if abs(b - start) < 1e-9:
+                start = b
+                break
+        # Every bar time strictly inside the note cuts it. A note starting exactly on a
+        # bar time is already in its own measure and is left whole.
+        cuts = []
+        for b in bars:
+            if start + 1e-9 < b < n.end - 1e-9:
+                cuts.append(b)
+            elif b >= n.end - 1e-9:
+                break
+        if not cuts:
+            pieces.append(n)
+            continue
+        # One piece per span: [start, b1], [b1, b2], ..., [bk, end]. Each piece after the
+        # first is tied to the one before it.
+        bounds = [n.start] + cuts + [n.end]
+        prev = None
+        for i in range(len(bounds) - 1):
+            piece = Note(pitch=n.pitch, start=bounds[i], end=bounds[i + 1],
+                         velocity=n.velocity, track=n.track, hand=n.hand,
+                         finger=n.finger if i == 0 else None,
+                         gliss=n.gliss if i == 0 else False)
+            pieces.append(piece)
+            if prev is not None:
+                ties.append((prev, piece))
+            prev = piece
+    return pieces, ties
+
+
 # --------------------------------------------------------------------------- #
 # Drawing helpers
 # --------------------------------------------------------------------------- #
@@ -1563,13 +1625,29 @@ class StaffView:
                     nh = round(s * 0.52)
                     stem_len = round(STEM_LEN_SPACES * s)
 
-                    notes_info = compute_notes_info(sys.notes, sys.start_t, sys.duration, usable_w,
+                    # A note that runs past a bar line is cut at the bar and the pieces tied,
+                    # so no measure shows more ink than it holds. The split happens once, here:
+                    # everything below - layout, beams, brackets, the draw loop - works on the
+                    # pieces, never on the raw notes. `sys_ties` pairs the pieces to join.
+                    sys_pieces, sys_ties = split_at_bar_lines(sys.notes, self.song.bar_times)
+                    # A note crossing the system's own ending bar line is cut there too, but
+                    # the tail piece opens the *next* system - `build_systems` filed the note
+                    # by its onset, so nothing on this system owns that piece. It is left out
+                    # (as the plan records), which only ever drops a piece drawn past the
+                    # panel edge anyway, and its tie to the next system goes with it.
+                    kept = [p for p in sys_pieces if p.start < sys.end_t - 1e-9]
+                    kept_ids = {id(p) for p in kept}
+                    sys_ties = [(l, r) for l, r in sys_ties
+                                if id(l) in kept_ids and id(r) in kept_ids]
+                    sys_pieces = kept
+
+                    notes_info = compute_notes_info(sys_pieces, sys.start_t, sys.duration, usable_w,
                                                     MARGIN_LEFT, s, get_beat_duration(self.song),
                                                     [m.start_t for m in sys.measures[1:]]
                                                     + [sys.start_t + sys.duration])
 
-                    # Group sys.notes into chords, the same way compute_notes_info did
-                    sorted_notes = sorted(sys.notes, key=lambda n: (n.start, n.pitch))
+                    # Group the pieces into chords, the same way compute_notes_info did
+                    sorted_notes = sorted(sys_pieces, key=lambda n: (n.start, n.pitch))
                     beat_len = get_beat_duration(self.song)
                     time_clusters = group_chords(sorted_notes, beat_len)
 
@@ -1581,7 +1659,7 @@ class StaffView:
                     # read before the chords are drawn, so a stem that would be printed on
                     # another hand's note can be turned the other way as well.
                     all_heads = []
-                    for n in sys.notes:
+                    for n in sys_pieces:
                         i = notes_info[id(n)]
                         ny_ = note_y(i["step_draw"], i["clef"], treble_mid_y, bass_mid_y, s)
                         hw = round(nw * 1.15) if note_value(n.duration,
@@ -1599,7 +1677,7 @@ class StaffView:
                     beamed_note_ids = set()
                     measure_of = {}
                     for m in sys.measures:
-                        for n in sys.notes:
+                        for n in sys_pieces:
                             if m.start_t <= n.start < m.end_t:
                                 measure_of[id(n)] = m
 
@@ -1787,7 +1865,7 @@ class StaffView:
                     # The 8va / 8vb brackets come after the stems: their line is kept off the
                     # ink the group really draws, stems and beams included, so it has to know
                     # which way each stem ended up pointing.
-                    draw_octave_brackets(staff_surf, notes_info, sys.notes, treble_mid_y, bass_mid_y,
+                    draw_octave_brackets(staff_surf, notes_info, sys_pieces, treble_mid_y, bass_mid_y,
                                          s, local_rect)
 
                     # Draw individual notes - through notation.py, which draws Leland's
@@ -1873,6 +1951,37 @@ class StaffView:
                                                  beamed=id(n) in beamed_note_ids,
                                                  sharp=is_sharp, on_line=(step % 2 == 0),
                                                  grace=is_grace)
+
+                    # Ties: after the noteheads, so the crescent reads over the ink, the way
+                    # MuseScore draws it (TDraw::draw(const TieSegment*), tdraw.cpp:3199).
+                    # The tie joins the two heads' facing edges and arches away from the
+                    # stems - MuseScore ties a single note opposite its chord's stem
+                    # (SlurTieLayout::computeUp, slurtielayout.cpp:3086: setUp(!chord->up())).
+                    for left, right in sys_ties:
+                        li = notes_info.get(id(left))
+                        ri = notes_info.get(id(right))
+                        if li is None or ri is None:
+                            # a piece outside this system (the note crossed the system's
+                            # own ending bar line) - the tie to the next system is out of
+                            # scope here, so it is simply not drawn
+                            continue
+                        limit = MARGIN_LEFT + usable_w
+                        if li["x"] >= limit or ri["x"] > limit:
+                            continue
+                        # MuseScore ties a single note on the side away from its chord's
+                        # stem; a beamed piece has the beam's direction instead.
+                        up = not li.get("beam_stem_up", li.get("chord_stem_up", False))
+                        # one y for both ends - the pieces share a pitch, so they sit at the
+                        # same height; the offset lifts the crescent to the notehead's outer
+                        # edge, clear of the head, on the side the tie goes
+                        head = note_shape(left.duration, get_beat_duration(self.song, left.start))[0]
+                        head_half = notation.HEAD_BOX[head][2] * 0.5 * s
+                        side = -1.0 if up else 1.0
+                        y = note_y(li["step_draw"], li["clef"], treble_mid_y, bass_mid_y, s) \
+                            + side * (head_half + notation.TIE_END_SP * s)
+                        col = HAND_COLORS.get(left.hand, HAND_COLORS[RIGHT])[0]
+                        notation.draw_tie(staff_surf, s, li["x"] + head_half * 0.5,
+                                          ri["x"] - head_half * 0.5, y, up, col)
 
                     # 8. Playback cursor
                     cx = round(self.cursor_x(t, local_rect))

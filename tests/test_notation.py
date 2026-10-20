@@ -31,6 +31,13 @@ def test_engraving_defaults_match_musescore():
         "stemSlashPosition": 2.0,
         "stemSlashAngle": 40.0,
         "stemSlashThickness": 0.125,
+        # the tie's own style (styledef.cpp:616-619, 635-636): how thick its ends and its
+        # middle are, the length under which it is drawn flat, and how deep it arcs
+        "tieEndpointThickness": 0.05,
+        "tieMidpointThickness": 0.21,
+        "minTieLength": 1.0,
+        "tieMinShoulderHeight": 0.3,
+        "tieMaxShoulderHeight": 2.0,
     }
     # ...and what the staff engraves with
     assert notation.STAFF_LINE_SP == 0.11
@@ -42,6 +49,14 @@ def test_engraving_defaults_match_musescore():
     assert notation.GRACE_MAG == 0.7
     assert notation.GRACE_TO_MAIN_SP == 0.45
     assert notation.GRACE_TO_GRACE_SP == 0.3
+    # the tie's thicknesses and its flat-short-tie rule
+    assert notation.TIE_END_SP == 0.05
+    assert notation.TIE_MID_SP == 0.21
+    assert notation.MIN_TIE_LENGTH_SP == 1.0
+    assert notation.TIE_MIN_SHOULDER_SP == 0.3
+    assert notation.TIE_MAX_SHOULDER_SP == 2.0
+    # the Bézier's shoulders stand 0.6 of the tie's width apart (slurtielayout.cpp:2714)
+    assert notation.TIE_SHOULDER_W == 0.6
     # a slash with no hook to reach for is pulled to 0.66 of stemSlashPosition
     # (TLayout::layoutStemSlash, tlayout.cpp:5393,5408)
     assert notation.STEM_SLASH_HEIGHT_REDUCTION == 0.66
@@ -329,6 +344,59 @@ def test_a_ledger_line_is_musescores_thickness(screen):
     notation.ledger_line(surf, 20, 120, 50, 10.0, (80, 80, 95))
     rows = [y for y in range(100) if surf.get_at((60, y))[:3] != PAPER]
     assert len(rows) == max(1, round(notation.LEDGER_SP * 10.0))
+
+
+def test_a_tie_is_a_crescent_that_swells_to_the_middle(screen):
+    # A tie is a filled path, not a glyph: tieEndpointThickness (0.05 sp) at the ends,
+    # tieMidpointThickness (0.21 sp) in the middle (tdraw.cpp:3147-3202,
+    # SlurTieLayout::computeBezier, slurtielayout.cpp:2677-2763).
+    sp, x0, x1, y = 10.0, 100, 300, 200
+    surf = _paper((400, 300))
+    notation.draw_tie(surf, sp, x0, x1, y, True, (20, 20, 30))
+    ink = _ink(surf, PAPER)
+
+    # the ink lies within the two noteheads' x, and arches up (the caller asked `up`)
+    assert min(xx for xx, _ in ink) >= x0 - 1
+    assert max(xx for xx, _ in ink) <= x1 + 1
+    assert max(yy for _, yy in ink) <= y + 1          # nothing below y
+    assert min(yy for _, yy in ink) < y - 1           # it reached up
+
+    def thickness(x):
+        ys = [yy for xx, yy in ink if xx == x]
+        return max(ys) - min(ys) + 1 if ys else 0
+
+    mid = (x0 + x1) // 2
+    end = x0 + 3
+    # thicker at the middle than near the ends, near MuseScore's own ratio
+    assert thickness(mid) > thickness(end)
+    assert thickness(mid) / max(1, thickness(end)) > 1.5
+
+
+def test_a_tie_shorter_than_min_tie_length_is_flat(screen):
+    # minTieLength (1.0 sp, styledef.cpp:619): a shorter tie is drawn flat rather than
+    # pinched to nothing.
+    sp, y = 10.0, 200
+    surf = _paper((400, 300))
+    notation.draw_tie(surf, sp, 200, 206, y, True, (20, 20, 30))
+    ink = _ink(surf, PAPER)
+    assert ink
+    # a flat band: the same rows in every column, no arc rising away
+    rows_per_col = {frozenset(yy for xx, yy in ink if xx == c) for c in {xx for xx, _ in ink}}
+    assert len(rows_per_col) == 1
+
+
+def test_a_ties_arc_depth_follows_its_length(screen):
+    # the shoulder is at least tieMinShoulderHeight and grows 0.3 sp per space past one,
+    # capped at tieMaxShoulderHeight (slurtielayout.cpp:2701-2702)
+    sp, y = 10.0, 250
+    ys = []
+    for x1 in (150, 250, 400):
+        surf = _paper((500, 300))
+        notation.draw_tie(surf, sp, 100, x1, y, True, (20, 20, 30))
+        ink = _ink(surf, PAPER)
+        ys.append(y - min(yy for _, yy in ink))
+    assert ys[0] < ys[1] < ys[2] or ys[0] == ys[1] < ys[2]
+    assert all(d >= notation.TIE_MIN_SHOULDER_SP * sp - 1 for d in ys)
 
 
 # --------------------------------------------------------------------------- #
