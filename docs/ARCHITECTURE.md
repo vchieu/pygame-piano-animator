@@ -241,10 +241,15 @@ Detailed design notes, kept up to date as features were added. Start with `CLAUD
   itself, edge of ink to edge of ink (horizontalspacing.cpp:1512-1521). Grace clusters are skipped by
   the ordinary spacing loop and placed last, from the main note **leftwards**, so the run belongs to the
   main note's measure: where the file's own onsets put the flick a hair **before the bar line** (as
-  `50-nam-ve-sau` does at 38.873), the run and the note it leans on shift right together - the run past
-  the bar line, the note by the same amount - just as far as `noteBarDistance` demands and no further
-  (`staff.compute_notes_info`, the placement pass). A grace never joins an ordinary beam (`group_beams`
-  ends one there) and keeps its own stem even in a cluster it shares with another note.
+  `50-nam-ve-sau` does at 38.873), the run and everything from the note it leans on onwards shift right
+  together - the run past the bar line, the notes after the main note by the same amount, so the main note
+  never lands on the next one - just as far as `noteBarDistance` demands and no further
+  (`staff.compute_notes_info`, the placement pass). **A grace beats the right margin**: when the run would
+  still touch the bar line with the notes as far right as `noteBarDistance` keeps them, the shift may use
+  the right margin (`right_limit + MARGIN_RIGHT`) rather than let the bar line cross a grace - the ink of
+  the system's last note gives up its air before a grace gives up its place. A grace never joins an
+  ordinary beam (`group_beams` ends one there) and keeps its own stem even in a cluster it shares with
+  another note.
 - **A run of grace notes is beamed together**, at graceNoteMag, with **one** stroke through the beam
   instead of a stroke on each stem - MuseScore's look for two flicked notes
   (`BeamLayout::beamGraceNotes`, beamlayout.cpp:553-620; the `beam` branch of `layoutStemSlash`,

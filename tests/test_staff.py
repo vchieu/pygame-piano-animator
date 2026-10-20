@@ -1476,6 +1476,41 @@ def test_a_grace_run_belongs_to_the_measure_of_the_note_it_leans_on():
     assert info[id(nxt)]["x"] - m_right >= 1.0, "the main note does not touch the next one"
 
 
+def test_a_grace_run_never_touches_the_bar_line_even_on_a_full_system():
+    # 50-nam-ve-sau's own system 3: the run leans on the downbeat B4 at 38.873, whose bar
+    # line opens the measure. The system is full enough that the notes after the main note
+    # reach the paper's edge, so the run cannot keep its whole noteBarDistance - but it may
+    # never be cut by the bar line, and that is what wins: the run and the notes after the
+    # main note use the right margin rather than let the bar line cross a grace.
+    import midi_loader
+    song = midi_loader.load_midi('MIDIs/50-nam-ve-sau.mid')
+    sv = staff.StaffView(song)
+    sys3 = sv.systems[3]
+    s = 12.0
+    usable = 1400 - staff.MARGIN_LEFT - staff.MARGIN_RIGHT
+    beat = staff.get_beat_duration(song)
+    bar_times = ([m.start_t for m in sys3.measures[1:]]
+                 + [sys3.start_t + sys3.duration])
+    info = staff.compute_notes_info(sys3.notes, sys3.start_t, sys3.duration, usable,
+                                    staff.MARGIN_LEFT, s, beat, bar_times)
+    runs = staff.find_grace_runs(sys3.notes, beat)
+    run, main = runs[0]
+
+    # the bar line that opens the main note's measure
+    opened = [bt for bt in bar_times if bt <= main.start + 1e-9]
+    bar_x = staff.MARGIN_LEFT + (max(opened) - sys3.start_t) / sys3.duration * usable
+
+    head_w = notation.HEAD_BOX["black"][2] - notation.HEAD_BOX["black"][0]
+    for g in run:
+        left_ink = info[id(g)]["x"] - head_w * 0.5 * s * notation.GRACE_MAG
+        assert left_ink > bar_x, "the bar line never crosses a grace"
+
+    # and the main note still keeps its air from the note after it
+    after = [n for n in sys3.notes if n.start > main.start + 1e-9]
+    next_note = min(after, key=lambda n: n.start)
+    assert info[id(next_note)]["x"] - info[id(main)]["x"] >= round(s * 0.75)
+
+
 def test_a_written_sixteenth_pickup_is_written_out_not_a_grace():
     # A grace is shorter than 0.15 of a beat - six tenths of a sixteenth. A real
     # written sixteenth (0.125 s at the half-beat) runs into a longer note too, but

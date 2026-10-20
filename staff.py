@@ -1213,7 +1213,10 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
             moving = [cl for cl in clusters[cluster_idx:]]
             rightmost = max(info[id(n)]["x"] + note_tail_reach(n)
                             for cl in moving for n in cl)
-            headroom = right_limit - rightmost
+            # A grace note may not be cut by the bar line, so the run keeps its room even
+            # when that means using the right margin: the ink of a note at the very end of
+            # the system gives up noteBarDistance before a grace gives up its place.
+            headroom = (right_limit + MARGIN_RIGHT) - rightmost
             shift = min(shift, max(0.0, headroom))
             for cl in moving:
                 for n in cl:
