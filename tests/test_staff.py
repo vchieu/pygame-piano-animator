@@ -1329,6 +1329,23 @@ def test_isolated_single_note_uses_ledger_lines():
     assert info[id(n)]["step_draw"] == staff.diatonic_step(88)[0]
 
 
+def test_sequential_non_overlapping_notes_are_not_grouped_as_chords():
+    # Rapid sequential grace notes: A4 (dur=0.05) at t=38.768, A#4 (dur=0.05) at t=38.820,
+    # B4 (dur=0.40) at t=38.873. A4 ends before A#4 starts, so they are non-overlapping.
+    n1 = Note(pitch=69, start=38.768, end=38.818, velocity=80, track=0, hand=RIGHT)
+    n2 = Note(pitch=70, start=38.820, end=38.870, velocity=80, track=0, hand=RIGHT)
+    n3 = Note(pitch=71, start=38.873, end=39.274, velocity=80, track=0, hand=RIGHT)
+
+    chords = staff.group_chords([n1, n2, n3], 0.423)
+    assert len(chords) == 3, f"Non-overlapping sequential notes must be 3 separate chords, got {len(chords)}"
+    assert chords[0] == [n1]
+    assert chords[1] == [n2]
+    assert chords[2] == [n3]
+
+    info = staff.compute_notes_info([n1, n2, n3], 38.0, 5.0, 1000.0, staff.MARGIN_LEFT, 7.0)
+    assert info[id(n1)]["x"] < info[id(n2)]["x"] < info[id(n3)]["x"], "Each sequential note gets a distinct x position"
+
+
 def test_ottava_phrase_8vb_bass_consistency():
     # Bass phrase: E1 (28, triggers 8vb), G2 (43), C2 (36), E1 (28, trigger)
     n1 = _note(28, 1.0, LEFT)

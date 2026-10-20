@@ -569,7 +569,14 @@ def group_chords(sorted_notes: List[Note], beat_len: float) -> List[List[Note]]:
         if not curr:
             curr.append(n)
         elif n.start - curr[0].start < tol:
-            curr.append(n)
+            # A chord consists of notes that sound simultaneously (overlap in time).
+            # If n starts after notes in curr have already ended, it is a sequential
+            # note (e.g. a rapid grace note run), not part of the same chord.
+            if n.start > curr[0].start and all(prev.end <= n.start + 0.025 for prev in curr):
+                clusters.append(curr)
+                curr = [n]
+            else:
+                curr.append(n)
         else:
             clusters.append(curr)
             curr = [n]
