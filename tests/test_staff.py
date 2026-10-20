@@ -1260,3 +1260,116 @@ def test_an_octave_bracket_label_is_kept_off_other_groups_notes(screen):
                                 f"another group's notehead, pitch {n.pitch}")
                 checked += 1
     assert checked >= 4, f"the test never really checked a label ({checked} notes)"
+
+
+def test_ottava_phrase_consistency_transposes_intermediate_notes():
+    # Phrase in treble: F6 (89, triggers 8va), G5 (79), C6 (84), E6 (88, trigger)
+    # The intermediate notes G5 and C6 must be transposed along with the phrase (-1 octave),
+    # preserving melodic contour and keeping bracket integrity.
+    n1 = _note(89, 1.0, RIGHT)  # F6 -> trigger 8va
+    n2 = _note(79, 1.3, RIGHT)  # G5 -> intermediate
+    n3 = _note(84, 1.6, RIGHT)  # C6 -> intermediate
+    n4 = _note(88, 1.9, RIGHT)  # E6 -> trigger 8va
+    song = _BracketSong([n1, n2, n3, n4])
+    info = staff.compute_notes_info([n1, n2, n3, n4], 0.0, 5.0, 1000.0, staff.MARGIN_LEFT, 7.0)
+
+    for n in (n1, n2, n3, n4):
+        i = info[id(n)]
+        assert i["octave_shift"] == -1, f"Note pitch {n.pitch} must be transposed under 8va"
+        assert i["label"] == "8va"
+
+    # G5 (79) natural step is 39; transposed by -7 should be step 32
+    assert info[id(n2)]["step_draw"] == staff.diatonic_step(79)[0] - 7
+    # C6 (84) natural step is 42; transposed by -7 should be step 35
+    assert info[id(n3)]["step_draw"] == staff.diatonic_step(84)[0] - 7
+
+
+def test_ottava_bracket_does_not_bridge_incompatible_pitches(screen):
+    # Treble notes: C7 (96, extreme) at t=1.0, Middle C (60) at t=2.0, C7 (96, extreme) at t=3.0.
+    # Middle C is far below the 8va range (< 72), so 8va must NOT bridge across it.
+    n1 = _note(96, 1.0, RIGHT)
+    n2 = _note(60, 2.0, RIGHT)
+    n3 = _note(96, 3.0, RIGHT)
+    info = staff.compute_notes_info([n1, n2, n3], 0.0, 5.0, 1000.0, staff.MARGIN_LEFT, 7.0)
+
+    assert info[id(n1)]["octave_shift"] == -1
+    assert info[id(n2)]["octave_shift"] == 0, "Middle C must not be transposed by 8va"
+    assert info[id(n2)]["label"] == ""
+    assert info[id(n3)]["octave_shift"] == -1
+
+    # In draw_octave_brackets, they must not form a single bracket spanning across n2
+    groups = []
+    lines = []
+    real_dashed = staff.draw_dashed_line
+
+    def spy(surf, color, start_pos, end_pos, width=1, **kw):
+        lines.append((start_pos[0], end_pos[0]))
+        return real_dashed(surf, color, start_pos, end_pos, width=width, **kw)
+
+    staff.draw_dashed_line = spy
+    try:
+        surf = pygame.Surface((1000, 200))
+        staff.draw_octave_brackets(surf, info, [n1, n2, n3], 100, 150, 7.0)
+    finally:
+        staff.draw_dashed_line = real_dashed
+
+    # Neither bracket line may span across n2's x position
+    x_c = info[id(n2)]["x"]
+    for x_start, x_end in lines:
+        assert not (x_start <= x_c <= x_end), "8va line must not span across Middle C"
+
+
+def test_isolated_single_note_uses_ledger_lines():
+    # An isolated single note at pitch 88 (E6, 3 ledger lines) should NOT trigger 8va;
+    # it stays at natural pitch with standard ledger lines.
+    n = _note(88, 1.0, RIGHT)
+    info = staff.compute_notes_info([n], 0.0, 5.0, 1000.0, staff.MARGIN_LEFT, 7.0)
+    assert info[id(n)]["octave_shift"] == 0
+    assert info[id(n)]["label"] == ""
+    assert info[id(n)]["step_draw"] == staff.diatonic_step(88)[0]
+
+
+def test_ottava_phrase_8vb_bass_consistency():
+    # Bass phrase: E1 (28, triggers 8vb), G2 (43), C2 (36), E1 (28, trigger)
+    n1 = _note(28, 1.0, LEFT)
+    n2 = _note(43, 1.4, LEFT)
+    n3 = _note(36, 1.8, LEFT)
+    n4 = _note(28, 2.2, LEFT)
+    info = staff.compute_notes_info([n1, n2, n3, n4], 0.0, 5.0, 1000.0, staff.MARGIN_LEFT, 7.0)
+
+    for n in (n1, n2, n3, n4):
+        i = info[id(n)]
+        assert i["octave_shift"] == 1, f"Bass note pitch {n.pitch} must be transposed under 8vb"
+        assert i["label"] == "8vb"
+
+    # G2 (43) natural step is 18; transposed by +7 should be step 25
+    assert info[id(n2)]["step_draw"] == staff.diatonic_step(43)[0] + 7
+
+
+def test_50_nam_ve_sau_system_0_ottava():
+    import midi_loader
+    song = midi_loader.load_midi('MIDIs/50-nam-ve-sau.mid')
+    sv = staff.StaffView(song)
+    sys0 = sv.systems[0]
+    info = staff.compute_notes_info(sys0.notes, sys0.start_t, sys0.duration, 1000.0, staff.MARGIN_LEFT, 7.0)
+
+    treble_notes = [n for n in sys0.notes if info[id(n)]["clef"] == staff.CLEF_TREBLE]
+    treble_notes.sort(key=lambda n: (n.start, n.pitch))
+
+    # Notes #1 and #2 (G5, t=0.42, 0.85) are before the high phrase -> octave_shift == 0
+    assert info[id(treble_notes[0])]["octave_shift"] == 0
+    assert info[id(treble_notes[1])]["octave_shift"] == 0
+
+    # Notes #3 (F6, 89) through #13 (E6, 88) are in the 8va phrase
+    for n in treble_notes[2:13]:
+        i = info[id(n)]
+        assert i["octave_shift"] == -1, f"Treble note pitch {n.pitch} at t={n.start} must be 8va transposed"
+        assert i["label"] == "8va"
+
+    # Specific check for notes #4 (G5), #5 (C6), #9 (D6), #11 (G5) mentioned by user
+    n4, n5, n9, n11 = treble_notes[3], treble_notes[4], treble_notes[8], treble_notes[10]
+    assert info[id(n4)]["step_draw"] == staff.diatonic_step(79)[0] - 7
+    assert info[id(n5)]["step_draw"] == staff.diatonic_step(84)[0] - 7
+    assert info[id(n9)]["step_draw"] == staff.diatonic_step(86)[0] - 7
+    assert info[id(n11)]["step_draw"] == staff.diatonic_step(79)[0] - 7
+

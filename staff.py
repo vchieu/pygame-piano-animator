@@ -450,6 +450,102 @@ def get_octave_transposition(n: Note, clef: str) -> Tuple[int, int, str]:
     return step, 0, ""
 
 
+def resolve_octave_transpositions(sys_notes: List[Note], info: dict, max_gap: float = 2.0) -> None:
+    """
+    Ensures phrase-level octave consistency: any note falling within an ottava
+    bracket is transposed along with the phrase.
+
+    When extreme pitches trigger an octave bracket (8va/15ma or 8vb/15mb), an
+    engraver keeps all contiguous notes of that melodic phrase under the same
+    bracket rather than breaking or omitting transposition for intermediate notes.
+    """
+    group_counter = 0
+    for clef in (CLEF_TREBLE, CLEF_BASS):
+        c_notes = [n for n in sys_notes if info[id(n)]["clef"] == clef]
+        c_notes.sort(key=lambda n: (n.start, n.pitch))
+        if not c_notes:
+            continue
+
+        def is_compatible(n: Note, target_shift: int) -> bool:
+            p = n.pitch
+            if clef == CLEF_TREBLE:
+                if target_shift == -1:    # 8va
+                    return p >= 72        # C5 and above
+                elif target_shift == -2:  # 15ma
+                    return p >= 88        # E6 and above
+            elif clef == CLEF_BASS:
+                if target_shift == 1:     # 8vb
+                    return p <= 48        # C3 and below
+                elif target_shift == 2:   # 15mb
+                    return p <= 28        # E1 and below
+            return False
+
+        i = 0
+        n_len = len(c_notes)
+        while i < n_len:
+            sh = info[id(c_notes[i])]["octave_shift"]
+            if sh == 0:
+                i += 1
+                continue
+
+            target_shift = sh
+            target_label = info[id(c_notes[i])]["label"]
+            last_trigger_idx = i
+            j = i + 1
+
+            while j < n_len:
+                prev_n = c_notes[j - 1]
+                curr_n = c_notes[j]
+                if curr_n.start - prev_n.start > max_gap:
+                    break
+                if not is_compatible(curr_n, target_shift):
+                    break
+                curr_sh = info[id(curr_n)]["octave_shift"]
+                if curr_sh != 0 and curr_sh != target_shift:
+                    break
+                if curr_sh == target_shift:
+                    last_trigger_idx = j
+                j += 1
+
+            group_counter += 1
+            final_phrase = c_notes[i : last_trigger_idx + 1]
+
+            def is_extreme(n: Note, target_shift: int) -> bool:
+                p = n.pitch
+                if abs(target_shift) >= 2:
+                    return True   # 15ma / 15mb are always extreme (> 6-7 ledger lines)
+                if target_shift == -1:
+                    return p >= 96  # C7 and above (> 5 ledger lines)
+                if target_shift == 1:
+                    return p <= 21  # A0 and below (> 5 ledger lines)
+                return False
+
+            # An isolated single note in the 3-4 ledger line range should use standard
+            # ledger lines rather than a momentary, flickering 8va/8vb bracket.
+            if len(final_phrase) == 1 and not any(is_extreme(fn, target_shift) for fn in final_phrase):
+                for fn in final_phrase:
+                    step_nat, _ = diatonic_step(fn.pitch)
+                    info[id(fn)]["step_draw"] = step_nat
+                    info[id(fn)]["octave_shift"] = 0
+                    info[id(fn)]["label"] = ""
+                i += 1
+                continue
+
+            for fn in final_phrase:
+                step_nat, _ = diatonic_step(fn.pitch)
+                step_shift = 7 if abs(target_shift) == 1 else 14
+                if target_shift < 0:
+                    step_draw = step_nat - step_shift
+                else:
+                    step_draw = step_nat + step_shift
+                info[id(fn)]["step_draw"] = step_draw
+                info[id(fn)]["octave_shift"] = target_shift
+                info[id(fn)]["label"] = target_label
+                info[id(fn)]["octave_group_id"] = group_counter
+
+            i = last_trigger_idx + 1
+
+
 def chord_spread(beat_len: float) -> float:
     """
     How far apart two notes may start and still count as one chord.
@@ -770,6 +866,10 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
                 "value": note_value(n.duration, beat_len),
             }
 
+    # Resolve phrase-level octave transpositions so intermediate notes under 8va/8vb
+    # are transposed together with the phrase
+    resolve_octave_transpositions(sys_notes, info)
+
     # Process each cluster for x-offsets when notes clash in same clef
     for cluster in clusters:
         by_clef = {CLEF_TREBLE: [], CLEF_BASS: []}
@@ -971,19 +1071,34 @@ def draw_octave_brackets(surf: pygame.Surface, notes_info: dict, sys_notes: List
     font = ui_font(max(9, int(s * 1.35)), bold=True)
     color = (40, 40, 50)
 
-    # Group notes with same (clef, octave_shift, label)
+    # Group notes with same (clef, octave_shift, label, octave_group_id)
     groups = []
     curr_group = []
     for n in sorted_notes:
         ni = notes_info[id(n)]
-        key = (ni["clef"], ni["octave_shift"], ni["label"])
+        grp_id = ni.get("octave_group_id")
+        key = (ni["clef"], ni["octave_shift"], ni["label"], grp_id)
         if not curr_group:
             curr_group.append((n, key))
         else:
             prev_ni = notes_info[id(curr_group[-1][0])]
-            prev_key = (prev_ni["clef"], prev_ni["octave_shift"], prev_ni["label"])
-            # If same key and start times close (< 4.0s)
-            if key == prev_key and (n.start - curr_group[-1][0].start) < 4.0:
+            prev_grp_id = prev_ni.get("octave_group_id")
+            prev_key = (prev_ni["clef"], prev_ni["octave_shift"], prev_ni["label"], prev_grp_id)
+            same_group = (key == prev_key and (n.start - curr_group[-1][0].start) < 4.0)
+            if same_group and grp_id is None:
+                # Disallow bridging across unshifted notes of the same clef
+                t_prev = curr_group[-1][0].start
+                t_curr = n.start
+                clef = ni["clef"]
+                has_gap_note = any(
+                    notes_info[id(other)]["clef"] == clef and
+                    notes_info[id(other)]["octave_shift"] == 0 and
+                    t_prev < other.start < t_curr
+                    for other in sys_notes
+                )
+                if has_gap_note:
+                    same_group = False
+            if same_group:
                 curr_group.append((n, key))
             else:
                 groups.append(curr_group)
@@ -1036,7 +1151,7 @@ def draw_octave_brackets(surf: pygame.Surface, notes_info: dict, sys_notes: List
                                                 treble_mid_y, bass_mid_y, s) + head_h))
 
     for grp in groups:
-        clef, shift, label = grp[0][1]
+        clef, shift, label, *_ = grp[0][1]
         grp_notes = [item[0] for item in grp]
         grp_ids = {id(n) for n in grp_notes}
         xs = [notes_info[id(n)]["x"] for n in grp_notes]
