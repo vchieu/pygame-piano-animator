@@ -47,7 +47,8 @@ from operator import mul
 
 import midi_loader
 import progress
-from fingering import group_notes, is_crossing, key_pos, mirror_pitch, plan_fingering
+from fingering import (W, context_fingers, group_notes, is_crossing, key_pos, mirror_pitch,
+                       plan_fingering)
 from midi_loader import LEFT, RIGHT, is_black_key
 
 # --------------------------------------------------------------------------- #
@@ -414,12 +415,21 @@ def build_hands(song, **kw):
     return out
 
 
-def load_with_hands(path_or_song, **kw):
-    """(song, hands.build_hands(song, **kw)) for a MIDI/PIG path or a song; reports progress (progress.py)."""
+def load_with_hands(path_or_song, musicxml_hands="file", musicxml_fingering="fill", **kw):
+    """
+    (song, hands.build_hands(song, **kw)) for a MIDI/PIG/MusicXML path or a
+    song; reports progress (progress.py).
+
+    The two MusicXML settings (see midi_loader.load_song) are read from the
+    path; `fingering_mode` goes on to the animators so "file" keeps the score's
+    fingers exactly and "fill" plans around them.
+    """
     song = path_or_song
     if isinstance(path_or_song, str):
         with progress.stage(0.0, 0.5):
-            song = midi_loader.load_song(path_or_song)
+            song = midi_loader.load_song(path_or_song, musicxml_hands=musicxml_hands,
+                                         musicxml_fingering=musicxml_fingering)
+    kw.setdefault("fingering_mode", musicxml_fingering)
     with progress.stage(0.5 if isinstance(path_or_song, str) else 0.0, 1.0):
         return song, build_hands(song, **kw)
 
@@ -782,7 +792,8 @@ class HandAnimator:
         before the bones are solved, so no finger ever bends out of the hand.
     """
 
-    def __init__(self, song, hand=RIGHT, fingering=None, pianist=None, repair=True):
+    def __init__(self, song, hand=RIGHT, fingering=None, pianist=None, repair=True,
+                 fingering_mode=None):
         import pianist as pianists
         self.pianist = pianist or pianists.active()
         self.geo = HandGeometry(self.pianist.anatomy)
@@ -813,8 +824,27 @@ class HandAnimator:
         # with fingers that reach (unless `repair` is off); those notes:
         self.repaired = set()
         if fingering is None:
+            # `fingering_mode` is the MusicXML "fingering" setting (see
+            # musicxml_loader); None leaves the `repair` flag to decide.
+            #   "auto" - the planner finds every finger, the file's ignored;
+            #   "file" - the file's fingers exactly, nothing repaired;
+            #   "fill" - the file's fingers kept and repaired only where they
+            #            can't be played, the gaps planned in context.
+            fixed = None
+            context_fixed = None
+            fill_weight = 0.0
+            if fingering_mode == "auto":
+                fixed = {}
+            elif fingering_mode == "file":
+                repair = False
+            elif fingering_mode == "fill":
+                repair = True
+                context_fixed = context_fingers(self.groups, self.vp, hand=hand,
+                                                context=song.notes, pianist=self.pianist)
+                fill_weight = W["fill_context"]
             fingering = plan_fingering(self.groups, self.vp, hand=hand, context=song.notes,
-                                       pianist=self.pianist, repair=repair, repaired=self.repaired)
+                                       pianist=self.pianist, repair=repair, repaired=self.repaired,
+                                       fixed=fixed, context_fixed=context_fixed, fill_weight=fill_weight)
         self.fingering = {id(n): fingering[id(n)] for _, ns in self.groups for n in ns
                           if fingering.get(id(n))}
         # notes without a finger (a sixth note in one hand's chord) aren't animated

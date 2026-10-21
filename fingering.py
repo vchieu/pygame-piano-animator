@@ -150,6 +150,8 @@ W = {
     "chord_cramp": 0.4,
     "chord_stretch_adj": 1.2,
     "figure": 1.0,             # times the figure's weight, for leaving its standard fingering
+    "fill_context": 0.8,       # "Fill in" (MusicXML): pull a planned finger toward the hand position the
+                               # passage sits in (context_fixed), scaled like a figure suggestion
     "thumb_double": 15.0,      # the thumb covering two neighbouring keys in a chord (only where no finger-a-key
                                # shape is in reach: at 7 it beat a merely uncomfortable one, e.g. LH F-A-D-E 5-3-1-1)
     "pinky_double": 16.0,      # the little finger covering two neighbouring white keys (likewise)
@@ -283,6 +285,7 @@ FINE_TUNE = [
     ("velocity", "Movement and time", "Economy of motion", "How fast the fingers must travel from a relaxed hand."),
     ("too_fast", "Movement and time", "Too fast", "Per 100% over the time a move needs at the pianist's top speed."),
     ("figure", "Figures", "Figure loyalty", "Times each figure's weight below: leaving a recognised figure's standard fingering."),
+    ("fill_context", "Figures", "Fill-in hand position", "How firmly a planned finger follows the hand position the passage's written fingering sits in (MusicXML \"Fill in\")."),
     ("fig:W_SCALE", "Figures", "Scales", "Keeping a short scale passage's standard fingering."),
     ("fig:W_SCALE_LONG", "Figures", "Long scales", "Keeping a long scale's (9+ notes one way) standard fingering."),
     ("fig:W_CHROM", "Figures", "Chromatic scales", "Keeping the chosen chromatic fingering."),
@@ -806,7 +809,8 @@ def _states(given, ps=None):
 
 
 def plan_fingering(groups, vpitch=None, beam=BEAM, hand=None, context=None, figures=True,
-                   pianist=None, fixed=None, costs=None, repair=False, repaired=None):
+                   pianist=None, fixed=None, costs=None, repair=False, repaired=None,
+                   context_fixed=None, fill_weight=0.0):
     """
     Fingering for chord groups (from group_notes). Returns {id(note): finger}.
     Notes that already carry a finger (from the file) keep it. `vpitch` maps
@@ -823,6 +827,14 @@ def plan_fingering(groups, vpitch=None, beam=BEAM, hand=None, context=None, figu
     pair further apart than those fingers reach, say an octave with 4-5)
     keeps as many of them as still leave a playable chord and plans the
     rest; the notes whose finger changed go into the set `repaired`.
+
+    `context_fixed` ({id(note): finger}, from context_fingers) is a relaxed
+    solve of the same notes with no given fingers at all: the hand position
+    the passage sits in. With `fill_weight` > 0, a note without a given
+    finger is biased `fill_weight * |f - context_fixed[id(note)]|` toward it
+    (soft, so the planner still has the last word) - the "Fill in" mode,
+    where the file's own fingers are kept and the gaps planned in that
+    position.
     """
     if not groups:
         return {}
@@ -850,11 +862,18 @@ def plan_fingering(groups, vpitch=None, beam=BEAM, hand=None, context=None, figu
         ps = [vp(n.pitch) for n in ns]
         given = [fixed.get(id(n)) if fixed is not None else getattr(n, "finger", None) for n in ns]
         sug = [suggest.get(id(n)) for n in ns]
+        ctx = ([context_fixed.get(id(n)) for n in ns] if context_fixed is not None and fill_weight
+               else [None] * len(ns))
 
         def chord_costs(states):
             local = []
             for st in states:
                 c = sum(unary_cost(p, f) for p, f in zip(ps, st))
+                for g, cf, f in zip(given, ctx, st):
+                    # a note the file leaves blank leans toward the hand position
+                    # the passage sits in (soft: the planner still has the last word)
+                    if cf and not g:
+                        c += fill_weight * abs(f - cf)
                 for s_, f in zip(sug, st):
                     if s_ and (f not in s_[0] if isinstance(s_[0], frozenset) else s_[0] != f):
                         c += W["figure"] * s_[1]
@@ -963,6 +982,16 @@ def finger_hand(notes, left=False, beam=BEAM, context=None, pianist=None):
     vp = mirror_pitch if left else None
     return plan_fingering(group_notes(notes, vpitch=vp), vp, beam=beam,
                           hand="L" if left else "R", context=context, pianist=pianist)
+
+
+def context_fingers(groups, vpitch=None, hand=None, context=None, pianist=None):
+    """
+    {id(note): finger} for a relaxed solve of `groups` with no given fingers at
+    all: which hand position the passage sits in. The "Fill in" mode
+    (MusicXML) biases its planned fingers toward this so the gaps between the
+    file's own marks are filled in context, not from scratch.
+    """
+    return plan_fingering(groups, vpitch, hand=hand, context=context, pianist=pianist, figures=True)
 
 
 def score_fingering(groups, fingering, vpitch=None, hand=None, context=None, pianist=None):
