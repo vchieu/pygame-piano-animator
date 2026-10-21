@@ -470,6 +470,7 @@ _OTHER_WORDS = ("violin", "violini", "viola", "viole", "cello", "violoncell", "c
                 "timp", "drum", "percussion", "strings", "string", "choir", "voice", "vocal", "soprano",
                 "alto", "tenor", "guitar", "harp", "organ", "orchestra", "tutti", "ensemble")
 SAME_ONSET_T = 0.005     # s, the same pitch struck within this on two tracks is one note
+RE_STRIKE_T = 1e-6       # s, an overlap smaller than this is rounding noise, not a re-strike
 
 
 def _words(name):
@@ -674,7 +675,7 @@ def sanitize_notes(notes, min_duration: float = 0.05):
                 if n.end > kept[-1].end:
                     kept[-1] = replace(kept[-1], end=n.end)
                 continue
-            if kept and n.start < kept[-1].end:
+            if kept and n.start < kept[-1].end - RE_STRIKE_T:
                 kept[-1] = replace(kept[-1], end=max(kept[-1].start + 1e-3, n.start))
                 cut += 1
             if kept:

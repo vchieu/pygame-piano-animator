@@ -113,6 +113,37 @@ def test_divisions_and_tempo_make_seconds(tmp_path):
     assert song.bar_times[-1] == pytest.approx(4.0)  # one 4/4 bar is 4 s
 
 
+def test_beat_grid_has_no_gap_at_the_bar_line(tmp_path):
+    # Two 4/4 bars at 60 bpm, divisions 4: a beat is a second. The beat grid must
+    # run without a gap across the bar line, or the staff reads a double-length
+    # beat there and draws the bar as if it did not fill its four beats.
+    direction = '<direction><sound tempo="60"/></direction>'
+    m1 = measure(note("C", 4, 4, "quarter") * 4, number=1, direction=direction)
+    m2 = measure(note("D", 4, 4, "quarter") * 4, number=2)
+    p = one_part(tmp_path, m1 + m2)
+    song = load_musicxml(p)
+    beats = [round(b, 6) for b in song.beat_times]
+    assert beats == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+    gaps = {round(song.beat_times[i + 1] - song.beat_times[i], 6)
+            for i in range(len(song.beat_times) - 1)}
+    assert gaps == {1.0}                             # every beat the same length
+
+
+def test_repeated_note_touching_end_to_end_is_not_cut(tmp_path):
+    # The same pitch twice, back to back: the second note starts exactly where the
+    # first ends. The score's arithmetic leaves a rounding error there, and the
+    # two must still come out as two full quarters, not one cut short.
+    direction = '<direction><sound tempo="60"/></direction>'
+    body = note("C", 4, 4, "quarter") + note("C", 4, 4, "quarter") \
+        + note("E", 4, 4, "quarter") + note("C", 4, 4, "quarter")
+    p = one_part(tmp_path, measure(body, direction=direction))
+    song = load_musicxml(p)
+    cs = sorted((n for n in song.notes if n.pitch == 60), key=lambda n: n.start)
+    assert len(cs) == 3
+    assert all(n.duration == pytest.approx(1.0) for n in cs)
+    assert song.cleanup == []                        # nothing was ended early
+
+
 def test_chord_and_backup_voices(tmp_path):
     # voice 1: a C-E chord (E is a <chord/> sharing C's start); a <backup> then
     # voice 2 plays G an octave below, at the same time.
