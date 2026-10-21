@@ -27,6 +27,14 @@ v20YY.MM.DD.HHMM). Newest first.
   and beams included - and a good half staff space clear of it, rather than just over the noteheads.
 - The sheet music staff is one of the parts the video export can record, and exporting on a small window no longer
   lets the staff squeeze the falling notes away.
+- MusicXML scores (`.xml`, `.musicxml`, `.mxl`) can be opened like MIDI files, and read as what the score actually
+  says: the written spelling (a flat stays a flat, drawn on its own line), the written note values, the printed
+  fingering, and the repeats, voltas and D.C./D.S. jumps played out exactly as the score marks them.
+- Two settings under Settings choose how a MusicXML score is read: whether the hands follow the score's own staff
+  layout or are worked out from the music, and whether the fingering is planned by the app, taken from the file's
+  printed marks, or filled in around them.
+- In the fingering editor, exporting a MusicXML score writes a real `.musicxml` / `.mxl` back, with every note's
+  current hand and finger written into the score's own notes so nothing else is disturbed.
 
 ## v26.1.20 - Video export, hands on top of each other
 - Export a performance to an .mp4 from the button under the player's progress bar: choose whether the progress

@@ -45,7 +45,8 @@ gestures, editor state after scripted keys). Keep tests fast and free of local d
 | `video_export.py` | The player's "Export video": `VideoExport` (frames via `Visualizer.render_video_frame` piped to ffmpeg from imageio-ffmpeg, the sound rendered offline or cut from a synced recording, muxed; run in steps with Cancel) |
 | `recent.py` | The main menu's Recent list: the last five setups launched (play with soundfont / recording + speed, or edit), in settings.json |
 | `progress.py` | How far a long job has got: `report(frac)` from deep loops, nested `stage(lo, hi)` |
-| `midi_loader.py` | `MidiSong` / `Note`, MIDI + PIG loading, hand assignment, fingering markers, `save_fingered_midi`, `pedal_switches` |
+| `midi_loader.py` | `MidiSong` / `Note`, MIDI + PIG loading, hand assignment, fingering markers, `save_fingered_midi`, `pedal_switches`; `load_song` dispatches by extension (also MusicXML) |
+| `musicxml_loader.py` | MusicXML (`.xml` / `.musicxml` / `.mxl`) reader and writer: parts and `<staff>` → hands, `<alter>` → the written spelling, `<type>` → the printed value, `<fingering>` → `Note.finger`, repeats/voltas/D.C./D.S. unrolled as the score says, and `save_musicxml` puts the current hand and finger back into the score's own `<note>`s |
 | `hand_split.py` | Beam search that splits single-track MIDI into hands |
 | `fingering.py` | Fingering planner (beam search over chord states, cost weights, `LEARNED_W`, thumb/pinky pairs, `score_fingering`) |
 | `glissando.py` | Glissando detection (strings of next-door white or black keys), marked glissandos (`Note.gliss`), episodes |

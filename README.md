@@ -4,7 +4,8 @@
 
 What if Synthesia had nice lively hands to go along with those falling notes? Well look no further!
 
-Hand-thesia reads MIDI files and animates, in real time and seen from above, the piano keys and a pair of
+Hand-thesia reads MIDI files, MusicXML scores (`.xml`, `.musicxml`, `.mxl`) and PIG fingering files, and
+animates, in real time and seen from above, the piano keys and a pair of
 procedurally animated hands playing them - with fingering worked out automatically and
 editable by hand.
 
@@ -32,7 +33,14 @@ editable by hand.
 - **Fingering editor**: a DAW-style piano roll above the keyboard and hands. Select notes,
   right-click to set hand and finger, re-plan groups, see per-note difficulty, and finger note
   by note in **sequential mode** (number keys, or M K O ; ' / V D W A LShift). Exports a copy of
-  the MIDI file with the fingering embedded (or PIG text).
+  the source file with the fingering embedded: MIDI (or PIG text), or a MusicXML score back as
+  `.musicxml` / `.mxl`.
+- **MusicXML scores**: open a `.xml`, `.musicxml` or `.mxl` file and it is read as what the score
+  really says - the written spelling (a flat stays a flat), the written note values, the printed
+  fingering, and the repeats, voltas and D.C./D.S. jumps played out as marked. Settings choose
+  whether the hands follow the score's own staff layout or are worked out from the music, and
+  whether the fingering is planned by the app, taken from the file's marks, or filled in around
+  them.
 - **Recent**: the main menu lists the last five setups you opened - a MIDI file with its soundfont or
   synced recording, or a file in the fingering editor - to open again in one click.
 - **Settings**: drag the keyboard higher or lower on the screen, choose realistic or equal keys,
@@ -118,6 +126,13 @@ Exported files are copies of the original with a text event before each note:
 each hand's notes on its own MIDI channel (the pedals go to both).
 Loading such a file restores the hands and fingers exactly. PIG fingering files (`.txt`) can be
 opened and exported too.
+
+## Fingering in MusicXML scores
+
+A `.xml`, `.musicxml` or `.mxl` source is exported back as a copy of the same score with every
+note's hand written into `<staff>` and its finger into `<notations><technical><fingering>`, the
+rest of the score left alone; a `.mxl` name writes a compressed score. Opening a score reads its
+printed fingering (kept exactly, or planned around - see the MusicXML settings).
 
 ## Development
 

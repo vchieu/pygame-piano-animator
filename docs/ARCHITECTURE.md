@@ -625,6 +625,76 @@ menu (kept as `"keys"` in `pianists/settings.json`, read with `pianist.app_setti
   clean file with every note marked. `save_fingered_midi` counts marked notes, not marker events, so a note
   doubled on two tracks counts once and the editor's "couldn't be matched" number stays right.
 
+## MusicXML scores (musicxml_loader.py, 2026-10-22)
+
+Every file the app opens goes through `midi_loader.load_song`, which dispatches by extension:
+`.mid` / `.midi` to `load_midi`, `.txt` to `read_pig`, and `.xml` / `.musicxml` / `.mxl` to
+`musicxml_loader.load_musicxml`. Only the standard library is used (`zipfile` for `.mxl`,
+`xml.etree` for the XML), so the Nuitka build stays as it is.
+
+Where MIDI says what a piece sounds like, MusicXML says what the score says. A score read here
+therefore also carries:
+
+| Tag | Used for |
+|---|---|
+| `<score-partwise>` / `<part-list>/<score-part>` | the parts (usually one piano part) |
+| `<attributes><divisions>` | ticks per quarter (can change per measure) |
+| `<attributes><time>` | beats and beat-type, for `bar_times` / `beat_times` |
+| `<sound tempo>` / `<metronome><per-minute>` | the tempo map (position in divisions → seconds), shared by all parts |
+| `<note><pitch><step>` + `<alter>` + `<octave>` | the pitch, and the **written spelling** (a flat stays a flat) |
+| `<note><type>` + `<dot>` | the written note value, not one guessed from the length |
+| `<note><staff>` | which hand: `1` is the right, `2` the left |
+| `<note><voice>`, `<backup>`, `<forward>`, `<chord>`, `<grace>` | the measure's voices, chords and grace notes |
+| `<tie>` / `<notations><tied>` | ties, merged into one sounding note |
+| `<note><notations><technical><fingering>` | the printed fingering, where the score has one |
+| `<barline><repeat>`, `<ending>`, `<direction>` (segno/coda/D.C./D.S.) | the repeats, voltas and jumps |
+
+- **Hands.** The score's own layout is followed: `<staff>1</staff>` is the right hand,
+  `<staff>2</staff>` the left; a score written as two `<part>`s with no `<staff>` gives the
+  higher part to the right hand and the lower to the left. Notes the score leaves open go to
+  `hand_split.py`, exactly as a MIDI file would. The "MusicXML hands" setting switches this off:
+  with "Work out" the `<staff>` signs are ignored too and `hand_split.py` decides.
+- **Tempo and divisions are the score's**, not one part's: a `<sound tempo>` written once
+  (usually in part 1) applies to every part. The map is advanced once per measure of the played
+  order and each part's measure at that index is read at that moment.
+- **The playing order.** `play_order` unrolls the score's own signs - repeats (`times="n"`,
+  2 by default), voltas (`<ending number="k">` played only on pass `k`) and written jumps
+  (D.C. al Fine, D.S., al Coda with the Segno and Coda marks). Nothing is guessed: a sign naming
+  a mark the score lacks is left out (and noted in `song.cleanup`), and the walk stops rather
+  than looping forever if the signs never settle. A measure played twice is read twice, so the
+  same bar comes out again at its new times.
+- **The written notation** is kept on three back-compatible `Note` fields - `step`, `alter`,
+  `printed` - and `staff.py` uses them only where they are set (`written_step`, `printed_value`,
+  `printed_shape`), so the staff prints the composer's spelling and the score's note values
+  instead of always sharps guessed from the pitch class and the measured length.
+
+### Three fingering sources (the "MusicXML fingering" setting)
+
+The choice is not "file or project" but three, matching what `fingering.plan_fingering` already
+offers through `fixed` and `repair`:
+
+| Mode | What it does |
+|---|---|
+| **Auto** | The planner finds every finger; the score's printed marks are dropped before planning. |
+| **From the file** | The score's fingers are used exactly as written, even where a hand can't play them (`repair=False`). |
+| **Fill in** (default) | The score's fingers are kept and the notes it leaves blank are planned in that hand position. |
+
+"Fill in" runs a relaxed solve of the same notes with no given fingers at all (`context_fingers`)
+to find the hand position the passage sits in, then plans the real call with the file's fingers
+held hard and each blank note biased `W["fill_context"] * |f - context_finger|` toward that
+position - soft, so the planner still has the last word. A written finger is corrected only where
+keeping it makes the chord unplayable, the same `min(local) >= IMPOSSIBLE` test `repair=True`
+already uses; the notes whose finger changed go into `HandAnimator.repaired`.
+
+### Export
+
+The editor writes MusicXML back rather than a side file: `save_musicxml` reads the source score
+and puts each note's current hand into `<staff>` and its finger into
+`<notations><technical><fingering>`, leaving structure, layout, tempo, dynamics and ties as they
+were. A `.mxl` destination is written as a compressed score, a `.xml` / `.musicxml` one as plain
+text. `common.save_file_dialog(musicxml=True)` offers the MusicXML formats and
+`common.default_export_name` keeps the source's extension.
+
 ## Fingering stored in MIDI files
 - A text meta event just before each note-on, on the note's own track:
   - `F1`..`F5`: finger only (Hanon);
