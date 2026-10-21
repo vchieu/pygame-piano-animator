@@ -868,9 +868,23 @@ def save_pig(path: str, notes, fingers) -> int:
     return len(rows)
 
 
-def load_song(path: str) -> MidiSong:
-    """A MIDI file or a PIG fingering file, by extension."""
-    return read_pig(path) if is_pig(path) else load_midi(path)
+def load_song(path: str, musicxml_hands: str = "file", musicxml_fingering: str = "fill") -> MidiSong:
+    """
+    Load any score the app opens, by extension.
+
+    A .mid/.midi goes through load_midi, a .txt is a PIG fingering file, and a
+    .xml/.musicxml/.mxl is read by musicxml_loader. The two settings only apply
+    to a MusicXML score: `musicxml_hands` is "file" to keep the score's own
+    layout or "auto" to work the hands out from the music, and
+    `musicxml_fingering` is "auto", "file" or "fill" (see musicxml_loader).
+    """
+    if is_pig(path):
+        return read_pig(path)
+    from musicxml_loader import is_musicxml, load_musicxml
+    if is_musicxml(path):
+        return load_musicxml(path, hands_from_file=(musicxml_hands != "auto"),
+                             fingering=musicxml_fingering)
+    return load_midi(path)
 
 
 if __name__ == "__main__":

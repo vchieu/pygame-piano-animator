@@ -867,9 +867,13 @@ class Transport:
 # --------------------------------------------------------------------------- #
 # File dialogs (native, via tkinter)
 # --------------------------------------------------------------------------- #
-_MIDI_TYPES = [("MIDI or PIG files", "*.mid *.midi *.txt"), ("MIDI files", "*.mid *.midi"),
+_MIDI_TYPES = [("MIDI, MusicXML or PIG files", "*.mid *.midi *.xml *.musicxml *.mxl *.txt"),
+               ("MIDI files", "*.mid *.midi"),
+               ("MusicXML scores", "*.xml *.musicxml *.mxl"),
                ("PIG fingering files", "*.txt"), ("All files", "*.*")]
 _SAVE_MIDI = [("MIDI file", "*.mid"), ("PIG fingering file", "*.txt")]
+_SAVE_XML = [("MusicXML score", "*.musicxml"), ("Compressed MusicXML", "*.mxl"),
+             ("MusicXML score (xml)", "*.xml"), ("PIG fingering file", "*.txt")]
 _SAVE_PIG = [("PIG fingering file", "*.txt")]
 
 
@@ -900,14 +904,20 @@ def pick_file(title="Open MIDI file", initialdir=None, filetypes=None):
         _after_dialog()
 
 
-def save_file_dialog(title="Export MIDI file", initialdir=None, initialfile=None, pig_only=False):
-    """Native save dialog (MIDI or PIG; PIG only for PIG sources); '' if cancelled or unavailable."""
+def save_file_dialog(title="Export MIDI file", initialdir=None, initialfile=None, pig_only=False,
+                     musicxml=False):
+    """Native save dialog (MIDI, MusicXML or PIG; one format only when asked); '' if cancelled or unavailable."""
     try:
         from tkinter import filedialog
         root = _tk_root()
-        path = filedialog.asksaveasfilename(parent=root, title=title,
-                                            filetypes=_SAVE_PIG if pig_only else _SAVE_MIDI,
-                                            defaultextension=".txt" if pig_only else ".mid",
+        if pig_only:
+            types, default = _SAVE_PIG, ".txt"
+        elif musicxml:
+            types, default = _SAVE_XML, ".musicxml"
+        else:
+            types, default = _SAVE_MIDI, ".mid"
+        path = filedialog.asksaveasfilename(parent=root, title=title, filetypes=types,
+                                            defaultextension=default,
                                             initialdir=initialdir or None,
                                             initialfile=initialfile or None)
         root.destroy()
