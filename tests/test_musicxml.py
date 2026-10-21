@@ -1,0 +1,330 @@
+"""
+Reading and writing MusicXML scores (musicxml_loader.py), against small scores
+the tests write themselves - no local data needed.
+"""
+import os
+import zipfile
+
+import pytest
+
+from midi_loader import LEFT, RIGHT, load_song
+
+from musicxml_loader import (is_musicxml, load_musicxml, read_root, save_musicxml,
+                             play_order, _kids, _local)
+
+# --------------------------------------------------------------------------- #
+# A tiny score builder
+# --------------------------------------------------------------------------- #
+
+HEADER = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+          '<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 3.1 Partwise//EN" '
+          '"http://www.musicxml.org/dtds/partwise.dtd">\n'
+          '<score-partwise version="3.1">\n'
+          '<part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>\n'
+          '<part id="P1">\n')
+
+
+def note(step="C", octave=4, dur=4, type_="quarter", alter=0, staff=None, voice=None,
+         chord=False, rest=False, grace=False, dot=False, finger=None, tie=None):
+    """One <note> element's XML."""
+    bits = ["<note>"]
+    if grace:
+        bits.append("<grace/>")
+    if chord:
+        bits.append("<chord/>")
+    if rest:
+        bits.append("<rest/>")
+    else:
+        bits.append(f"<pitch><step>{step}</step>")
+        if alter:
+            bits.append(f"<alter>{alter}</alter>")
+        bits.append(f"<octave>{octave}</octave></pitch>")
+    if not grace:
+        bits.append(f"<duration>{dur}</duration>")
+    if tie:
+        bits.append(f'<tie type="{tie}"/>')
+    if voice is not None:
+        bits.append(f"<voice>{voice}</voice>")
+    bits.append(f"<type>{type_}</type>")
+    if dot:
+        bits.append("<dot/>")
+    if staff is not None:
+        bits.append(f"<staff>{staff}</staff>")
+    if tie or finger:
+        bits.append("<notations>")
+        if tie:
+            bits.append(f'<tied type="{tie}"/>')
+        if finger:
+            bits.append(f"<technical><fingering>{finger}</fingering></technical>")
+        bits.append("</notations>")
+    bits.append("</note>")
+    return "".join(bits)
+
+
+def measure(body, number=1, attributes=None, barlines="", direction=""):
+    a = attributes if attributes is not None else "<attributes><divisions>4</divisions></attributes>"
+    return (f'<measure number="{number}">{a}{direction}{body}{barlines}</measure>')
+
+
+def score(measures_xml, parts=1):
+    out = [HEADER]
+    if parts > 1:
+        # a two-part score: rebuild header with two score-parts and two <part>s
+        pass
+    out.append(measures_xml)
+    out.append("</part>\n</score-partwise>\n")
+    return "".join(out)
+
+
+def write(tmp_path, name, text):
+    p = tmp_path / name
+    p.write_text(text, encoding="utf-8")
+    return str(p)
+
+
+def one_part(tmp_path, measures, name="score.xml"):
+    return write(tmp_path, name, score(measures))
+
+
+# --------------------------------------------------------------------------- #
+# Reading
+# --------------------------------------------------------------------------- #
+
+def test_score_partwise_with_two_staves_splits_hands(tmp_path):
+    body = (note("C", 5, 4, "quarter", staff=1)
+            + note("C", 3, 4, "quarter", staff=2))
+    p = one_part(tmp_path, measure(body))
+    song = load_musicxml(p)
+    assert len(song.notes) == 2
+    hi = next(n for n in song.notes if n.pitch == 72)
+    lo = next(n for n in song.notes if n.pitch == 48)
+    assert hi.hand == RIGHT and lo.hand == LEFT
+
+
+def test_divisions_and_tempo_make_seconds(tmp_path):
+    direction = '<direction><sound tempo="60"/></direction>'
+    body = note("C", 4, 4, "quarter") + note("D", 4, 4, "quarter") \
+        + note("E", 4, 4, "quarter") + note("F", 4, 4, "quarter")
+    p = one_part(tmp_path, measure(body, direction=direction))
+    song = load_musicxml(p)
+    starts = sorted(n.start for n in song.notes)
+    assert starts == [0.0, 1.0, 2.0, 3.0]           # divisions 4, 60 bpm: a quarter is 1 s
+    assert song.bar_times[0] == pytest.approx(0.0)
+    assert song.bar_times[-1] == pytest.approx(4.0)  # one 4/4 bar is 4 s
+
+
+def test_chord_and_backup_voices(tmp_path):
+    # voice 1: a C-E chord (E is a <chord/> sharing C's start); a <backup> then
+    # voice 2 plays G an octave below, at the same time.
+    body = (note("C", 5, 8, "half", voice=1)
+            + note("E", 5, 8, "half", voice=1, chord=True)
+            + "<backup><duration>8</duration></backup>"
+            + note("G", 3, 8, "half", voice=2))
+    p = one_part(tmp_path, measure(body))
+    song = load_musicxml(p)
+    assert len(song.notes) == 3
+    c = next(n for n in song.notes if n.pitch == 72)
+    e = next(n for n in song.notes if n.pitch == 76)
+    g = next(n for n in song.notes if n.pitch == 55)
+    assert c.start == pytest.approx(e.start)         # the chord shares its start
+    assert g.start == pytest.approx(c.start)         # the backup restarted the cursor
+
+
+def test_ties_are_merged(tmp_path):
+    direction = '<direction><sound tempo="60"/></direction>'
+    m1 = measure(note("C", 4, 4, "quarter", tie="start"), number=1, direction=direction)
+    m2 = measure(note("C", 4, 4, "quarter", tie="stop"), number=2)
+    p = one_part(tmp_path, m1 + m2)
+    song = load_musicxml(p)
+    c = [n for n in song.notes if n.pitch == 60]
+    assert len(c) == 1
+    assert c[0].duration == pytest.approx(2.0)       # two tied quarters sound once, 2 s long
+
+
+def test_grace_note_is_short(tmp_path):
+    body = note("D", 4, 4, type_="quarter", grace=True) + note("C", 4, 4, "quarter")
+    p = one_part(tmp_path, measure(body))
+    song = load_musicxml(p)
+    grace = next(n for n in song.notes if n.pitch == 62)
+    main = next(n for n in song.notes if n.pitch == 60)
+    assert grace.duration < 0.2                      # a grace note is written, not measured
+    assert main.start == pytest.approx(0.0)          # and it doesn't shift the quarter after it
+
+
+def test_mxl_zip_is_read(tmp_path):
+    body = note("C", 4, 4, "quarter") + note("D", 4, 4, "quarter")
+    xml = score(measure(body)).encode("utf-8")
+    container = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+                 '<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+                 '<rootfiles><rootfile full-path="score.xml" '
+                 'media-type="application/vnd.recordare.musicxml+xml"/></rootfiles></container>')
+    path = str(tmp_path / "score.mxl")
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("META-INF/container.xml", container)
+        z.writestr("score.xml", xml)
+    song = load_musicxml(path)
+    assert [n.pitch for n in song.notes] == [60, 62]
+    assert song.duration == pytest.approx(1.0)
+
+
+def test_alter_keeps_the_written_spelling(tmp_path):
+    # a written Bb (step B, alter -1) sounds as 70 but stays spelled Bb
+    body = note("B", 4, 4, "quarter", alter=-1) + note("B", 3, 4, "quarter", alter=-1)
+    p = one_part(tmp_path, measure(body))
+    song = load_musicxml(p)
+    hi = next(n for n in song.notes if n.pitch == 70)
+    lo = next(n for n in song.notes if n.pitch == 58)
+    assert hi.alter == -1 and lo.alter == -1
+    assert hi.step == 4 * 7 + "CDEFGAB".index("B")   # octave 4, step B
+
+
+def test_fingering_from_file_is_kept(tmp_path):
+    body = (note("C", 4, 4, "quarter", finger=3)
+            + note("D", 4, 4, "quarter"))
+    p = one_part(tmp_path, measure(body))
+    song = load_musicxml(p, fingering="file")
+    c = next(n for n in song.notes if n.pitch == 60)
+    assert c.finger == 3
+    assert song.cleanup and any("kept 1 printed fingering" in line for line in song.cleanup)
+
+
+def test_fingering_modes_on_one_score(tmp_path):
+    # a playable written 3, then an unplayable written octave 4-5
+    body = (note("C", 4, 4, "quarter", finger=3)
+            + note("C", 4, 4, "quarter", finger=4)
+            + note("C", 5, 4, "quarter", finger=5, chord=True))
+    p = one_part(tmp_path, measure(body))
+
+    auto = load_musicxml(p, fingering="auto")
+    assert all(n.finger is None for n in auto.notes)
+
+    # "file": the marks stay exactly as the score wrote them, playable or not
+    file = load_musicxml(p, fingering="file")
+    thirds = [n for n in file.notes if n.pitch == 60]
+    assert sorted(n.finger for n in thirds) == [3, 4]
+    assert next(n for n in file.notes if n.pitch == 72).finger == 5
+
+    # "fill": the marks are kept too (their correction, if any, is the planner's)
+    fill = load_musicxml(p, fingering="fill")
+    ft = [n for n in fill.notes if n.pitch == 60]
+    assert sorted(n.finger for n in ft) == [3, 4]
+
+
+def test_hands_modes(tmp_path):
+    # a high note written on staff 2: following the file it is the left hand,
+    # working the hands out it is the right (its register says so).
+    body = note("C", 6, 4, "quarter", staff=2) + note("C", 5, 4, "quarter", staff=1)
+    p = one_part(tmp_path, measure(body))
+    by_file = load_musicxml(p, hands_from_file=True)
+    assert next(n for n in by_file.notes if n.pitch == 84).hand == LEFT
+    by_auto = load_musicxml(p, hands_from_file=False)
+    assert next(n for n in by_auto.notes if n.pitch == 84).hand == RIGHT
+
+
+def test_volta_repeats_are_played(tmp_path):
+    # bar 1 opens a repeat, bar 2 closes it (twice); bar 2 carries the 1st
+    # ending and bar 3 the 2nd, so the bars come out 1, 2, 1, 3
+    m1 = measure(note("C", 4, 4, "quarter") * 4, number=1,
+                 barlines='<barline location="left"><repeat direction="forward"/></barline>')
+    m2 = measure(note("D", 4, 4, "quarter") * 4, number=2,
+                 barlines='<barline location="right"><repeat direction="backward" times="2"/>'
+                          '<ending number="1" type="start"/></barline>')
+    m3 = measure(note("E", 4, 4, "quarter") * 4, number=3,
+                 barlines='<barline location="left"><ending number="1" type="discontinue"/></barline>')
+    p = one_part(tmp_path, m1 + m2 + m3)
+    song = load_musicxml(p)
+    # 4 played bars of 4 quarters, default 120 bpm: 2 s a bar, 8 s total
+    assert len(song.bar_times) == 5                  # 4 played bars: 5 bar lines
+    assert song.duration == pytest.approx(8.0)
+    # the 1st ending (bar 2, D) sounds only on the first pass, the 2nd (bar 3,
+    # E) only on the last
+    ds = sorted(n.start for n in song.notes if n.pitch == 62)
+    assert ds == [pytest.approx(x) for x in (2.0, 2.5, 3.0, 3.5)]
+    es = [n.start for n in song.notes if n.pitch == 64]
+    assert es == [pytest.approx(x) for x in (6.0, 6.5, 7.0, 7.5)]
+    # bar 1 plays twice (0.0 and 4.0)
+    cs = sorted(n.start for n in song.notes if n.pitch == 60)
+    assert cs == [pytest.approx(x) for x in (0.0, 0.5, 1.0, 1.5, 4.0, 4.5, 5.0, 5.5)]
+
+
+def test_play_order_directly():
+    from musicxml_loader import _Measure
+    import xml.etree.ElementTree as ET
+    def mk(num, bl=""):
+        return _Measure(ET.fromstring(f'<measure number="{num}">{bl}</measure>'))
+    fwd = '<barline location="left"><repeat direction="forward"/></barline>'
+    back = '<barline location="right"><repeat direction="backward" times="2"/></barline>'
+    # a repeat with no volta: bars 1, 2, 1, 2, then 3
+    measures = [mk(1, fwd), mk(2, back), mk(3)]
+    assert play_order(measures, []) == [0, 1, 0, 1, 2]
+    # the same with a 1st ending on bar 2 and a 2nd on bar 3: 1, 2, 1, 3
+    e1 = '<barline location="right"><repeat direction="backward" times="2"/>' \
+         '<ending number="1" type="start"/></barline>'
+    e2 = '<barline location="left"><ending number="1" type="discontinue"/></barline>'
+    measures2 = [mk(1, fwd), mk(2, e1), mk(3, e2)]
+    assert play_order(measures2, []) == [0, 1, 0, 2]
+
+
+# --------------------------------------------------------------------------- #
+# Writing
+# --------------------------------------------------------------------------- #
+
+def test_musicxml_round_trip(tmp_path):
+    body = (note("C", 4, 4, "quarter", finger=3)
+            + note("D", 4, 4, "quarter", finger=2)
+            + note("E", 4, 4, "quarter"))
+    p = one_part(tmp_path, measure(body))
+    song = load_musicxml(p, fingering="file")
+    fingers = {id(n): n.finger for n in song.notes}
+    # re-finger the first note by hand
+    first = next(n for n in song.notes if n.pitch == 60)
+    fingers[id(first)] = 1
+    out = str(tmp_path / "out.musicxml")
+    marked = save_musicxml(p, out, song.notes, fingers)
+    assert marked == 2                               # the 3 (now 1) and the 2
+    back = load_musicxml(out, fingering="file")
+    assert len(back.notes) == len(song.notes)
+    assert next(n for n in back.notes if n.pitch == 60).finger == 1
+    assert next(n for n in back.notes if n.pitch == 62).finger == 2
+    assert next(n for n in back.notes if n.pitch == 64).finger is None
+
+
+def test_mxl_export_is_a_zip(tmp_path):
+    body = note("C", 4, 4, "quarter", finger=1) + note("D", 4, 4, "quarter")
+    p = one_part(tmp_path, measure(body))
+    song = load_musicxml(p, fingering="file")
+    fingers = {id(n): n.finger for n in song.notes}
+    out = str(tmp_path / "out.mxl")
+    save_musicxml(p, out, song.notes, fingers)
+    assert zipfile.is_zipfile(out)
+    with zipfile.ZipFile(out) as z:
+        names = z.namelist()
+        assert any(n.endswith(".xml") for n in names)
+        root = read_root(out)
+    assert _local(root.tag) == "score-partwise"
+
+
+def test_save_adds_staff_from_the_hand(tmp_path):
+    body = note("C", 5, 4, "quarter") + note("C", 3, 4, "quarter", staff=2)
+    p = one_part(tmp_path, measure(body))
+    song = load_musicxml(p, hands_from_file=True)
+    out = str(tmp_path / "handed.xml")
+    save_musicxml(p, out, song.notes, {})
+    root = read_root(out)
+    staffs = {}
+    for part in _kids(root, "part"):
+        for m in _kids(part, "measure"):
+            for c in m:
+                if _local(c.tag) == "note":
+                    s = next((x.text for x in c if _local(x.tag) == "staff"), None)
+                    staffs[s] = staffs.get(s, 0) + 1
+    assert staffs.get("1") == 1 and staffs.get("2") == 1
+
+
+def test_load_song_dispatches_by_extension(tmp_path):
+    assert is_musicxml("a.xml") and is_musicxml("a.musicxml") and is_musicxml("a.mxl")
+    assert not is_musicxml("a.mid")
+    body = note("C", 4, 4, "quarter") + note("D", 4, 4, "quarter")
+    p = one_part(tmp_path, measure(body))
+    song = load_song(p)
+    assert [n.pitch for n in song.notes] == [60, 62]

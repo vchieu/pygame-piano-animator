@@ -34,6 +34,33 @@ def test_demo_song_loads_with_hands():
     assert s.duration > 0
 
 
+def test_musicxml_song_loads_with_hands(tmp_path):
+    # a two-staff score: a right-hand scale over a left-hand held chord
+    def note(step, octave, staff):
+        pitch = ["C", "D", "E", "F", "G", "A", "B"].index(step)
+        return (f"<note><pitch><step>{step}</step><octave>{octave}</octave></pitch>"
+                f"<duration>2</duration><type>eighth</type><staff>{staff}</staff></note>")
+    body = "".join(note(s, 5, 1) for s in "CDEFGAB") + note("C", 3, 2)
+    xml = ('<?xml version="1.0" encoding="UTF-8"?><score-partwise version="3.1">'
+           '<part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>'
+           '<part id="P1"><measure number="1"><attributes><divisions>2</divisions></attributes>'
+           + body + '</measure></part></score-partwise>')
+    p = tmp_path / "song.musicxml"
+    p.write_text(xml, encoding="utf-8")
+
+    song, h = hands.load_with_hands(str(p), musicxml_hands="file", musicxml_fingering="fill")
+    assert h and RIGHT in h and LEFT in h
+    import pygame
+    from common import Keyboard, bottom_layout
+    pygame.init()
+    kb = Keyboard(bottom_layout((1600, 900))[0])
+    for a in h.values():
+        pose = a.pose(song.duration / 2, kb)
+        pts = [q for c in pose["struct"]["chains"].values() for q in c]
+        assert len(pose["struct"]["chains"]) == 5
+        assert all(math.isfinite(v) for q in pts for v in q)
+
+
 def test_pedals_are_switches():
     raw = [(0.0, 64, 44), (0.1, 64, 59), (0.2, 64, 70), (0.3, 64, 90), (0.4, 64, 30), (0.5, 67, 127)]
     assert midi_loader.pedal_switches(raw) == [(0.2, 64, 127), (0.4, 64, 0), (0.5, 67, 127)]

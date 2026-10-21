@@ -1833,3 +1833,25 @@ def test_grace_notes_never_join_a_beam():
     # ...but a grace hangs off the note it leans on: it ends a beam and starts none
     assert staff.group_beams(clusters, info, beat_of, measure_of) == []
 
+
+def test_written_spelling_and_printed_value_come_from_the_file():
+    # A written Bb: step B (octave 4), alter -1, sounding as 70. The staff must
+    # print B-flat (a flat, on B's step), not the pitch's own A-sharp.
+    bb = Note(70, 0.0, 0.5, 64, 0, RIGHT, None, False,
+              4 * 7 + "CDEFGAB".index("B"), -1, "quarter")
+    step, alter = staff.written_step(bb)
+    assert step == 4 * 7 + 6 and alter == -1
+    assert staff.has_accidental(bb)
+    assert staff.accidental_extra_sp(bb) == 0.0        # a single accidental takes no extra room
+    # The pitch alone (no written spelling) still falls back to sharps.
+    plain = Note(70, 0.0, 0.5, 64, 0, RIGHT)
+    pstep, palter = staff.written_step(plain)
+    assert (pstep, palter) == staff.diatonic_step(70)   # A#, the sharp reading
+
+    # A printed whole note that lasts only a quarter (a whole tied, written short):
+    # the <type> wins over the duration maths.
+    assert staff.printed_value(bb, 0.5, 0.5) == QUARTER        # from <type>
+    short = Note(60, 0.0, 0.5, 64, 0, RIGHT, None, False, None, 0, "whole")
+    assert staff.printed_value(short, 0.5, 0.5) == "whole"     # the written value, not the length's
+    assert staff.printed_value(plain, 0.5, 0.5) == QUARTER     # no <type>: from the duration
+
