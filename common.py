@@ -958,7 +958,14 @@ def _after_dialog():
 
 def default_export_name(path):
     base, ext = os.path.splitext(os.path.basename(path or "song"))
-    return f"{base} (fingered){'.txt' if ext.lower() == '.txt' else '.mid'}"
+    ext = ext.lower()
+    if ext in (".xml", ".musicxml", ".mxl"):
+        keep = ".mxl" if ext == ".mxl" else ".musicxml"
+    elif ext == ".txt":
+        keep = ".txt"
+    else:
+        keep = ".mid"
+    return f"{base} (fingered){keep}"
 
 
 # --------------------------------------------------------------------------- #

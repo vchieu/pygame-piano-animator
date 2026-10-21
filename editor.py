@@ -64,6 +64,7 @@ from version import VERSION
 from midi_loader import (HIGHEST_PIANO_KEY, LEFT, LOWEST_PIANO_KEY, RIGHT, MidiSong,
                          is_black_key, is_pig, note_name, save_fingered_midi,
                          save_pig)
+from musicxml_loader import is_musicxml, save_musicxml
 
 INFO_H = 24                  # status line under the top bar
 RULER_H = 20                 # bar numbers above the roll
@@ -589,11 +590,13 @@ class FingeringEditor(Transport):
     def export(self):
         self._flush()
         src_pig = is_pig(self.song.path)
+        src_xml = is_musicxml(self.song.path)
         if not src_pig and (not self.song.path or not os.path.exists(self.song.path)):
-            self.say("Can't export: the original MIDI file is no longer where it was loaded from")
+            self.say("Can't export: the original file is no longer where it was loaded from")
             return False
         path = save_file_dialog(initialdir=os.path.dirname(os.path.abspath(self.song.path or ".")),
-                                initialfile=default_export_name(self.song.path), pig_only=src_pig)
+                                initialfile=default_export_name(self.song.path), pig_only=src_pig,
+                                musicxml=src_xml)
         self.press = None
         if not path:
             return False
@@ -603,6 +606,9 @@ class FingeringEditor(Transport):
                 # PIG text: the notes as they are, with each note's hand and finger
                 count = save_pig(path if is_pig(path) else os.path.splitext(path)[0] + ".txt",
                                  self.notes, fing)
+            elif src_xml or is_musicxml(path):
+                # MusicXML: the score's own <note>s get the current hand and finger
+                count = save_musicxml(self.song.path, path, self.notes, fing)
             else:
                 count = save_fingered_midi(self.song.path, path, self.notes, fing)
         except Exception as exc:

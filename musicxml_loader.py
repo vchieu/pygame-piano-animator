@@ -781,3 +781,134 @@ def _part_program(root, index: int) -> int:
         if p:
             return max(0, p - 1)
     return 0
+
+
+# --------------------------------------------------------------------------- #
+# Writing fingering back (export)
+# --------------------------------------------------------------------------- #
+
+def _note_key(staff, voice, pitch):
+    return (staff or 1, voice or "", pitch)
+
+
+def _set_staff(note_elem, hand):
+    """Add or replace <staff> from the hand (1 = right, 2 = left); leave it when unknown."""
+    want = None if hand is None else (1 if hand == RIGHT else 2)
+    existing = _kid(note_elem, "staff")
+    if want is None:
+        return
+    if existing is not None:
+        existing.text = str(want)
+    else:
+        el = ET.SubElement(note_elem, "staff")
+        el.text = str(want)
+        # <staff> belongs after <voice>, before <type>: move it there if we can
+        order = ["grace", "cue", "chord", "pitch", "rest", "duration", "tie", "voice",
+                 "type", "dot", "accidental", "time-modification", "stem", "notehead",
+                 "staff", "beam", "notations", "lyric"]
+        kids = list(note_elem)
+        kids.sort(key=lambda c: order.index(_local(c.tag)) if _local(c.tag) in order else len(order))
+        note_elem[:] = kids
+
+
+def _set_fingering(note_elem, finger):
+    """Add or replace <notations><technical><fingering> with `finger` (None removes it)."""
+    notations = _kid(note_elem, "notations")
+    tech = _kid(notations, "technical") if notations is not None else None
+    if finger:
+        if notations is None:
+            notations = ET.SubElement(note_elem, "notations")
+        if tech is None:
+            tech = ET.SubElement(notations, "technical")
+        f = _kid(tech, "fingering")
+        if f is None:
+            f = ET.SubElement(tech, "fingering")
+        f.text = str(int(finger))
+        f.attrib.pop("substitution", None)
+        f.attrib.pop("alternate", None)
+        # keep <notations> after the notes' other children
+        kids = list(note_elem)
+        kids.sort(key=lambda c: 0 if _local(c.tag) != "notations" else 1)
+        note_elem[:] = kids
+    elif tech is not None:
+        f = _kid(tech, "fingering")
+        if f is not None:
+            tech.remove(f)
+        if not list(tech):
+            notations.remove(tech)
+        if not list(notations):
+            note_elem.remove(notations)
+
+
+def _write_fingers(root, notes, fingers):
+    """
+    Put each note's hand and finger into the score's own <note> elements, in
+    place. Notes are matched to the loaded ones by (part, <staff>, <voice>,
+    pitch); a repeated measure's notes are consumed first play first. Returns
+    how many note elements were fingered.
+    """
+    by_part = {}
+    for n in notes:
+        by_part.setdefault(n.track, []).append(n)
+    for ps in by_part.values():
+        ps.sort(key=lambda n: n.start)
+    used = set()
+    marked = 0
+    parts = _kids(root, "part")
+    for pi, part in enumerate(parts):
+        group = by_part.get(pi, [])
+        index = {}
+        for n in group:
+            index.setdefault(n.pitch, []).append(n)
+        for measure in _kids(part, "measure"):
+            for c in measure:
+                if _local(c.tag) != "note":
+                    continue
+                pitch_el = _kid(c, "pitch")
+                if pitch_el is None:                      # a rest: nothing to finger
+                    continue
+                step = (_text(pitch_el, "step") or "").upper()
+                octave = _int(pitch_el, "octave")
+                if step not in STEP_SEMITONES or octave is None:
+                    continue
+                alter = _int(pitch_el, "alter", 0) or 0
+                pitch = _fit_to_piano((octave + 1) * 12 + STEP_SEMITONES[step] + alter)
+                n = next((x for x in index.get(pitch, []) if id(x) not in used), None)
+                if n is None:                             # a note the editor added: no <note> of its own
+                    continue
+                used.add(id(n))
+                _set_staff(c, n.hand)
+                f = fingers.get(id(n)) if fingers is not None else None
+                _set_fingering(c, f)
+                if f:
+                    marked += 1
+    return marked
+
+
+def save_musicxml(src_path: str, dst_path: str, notes, fingers) -> int:
+    """
+    Write a copy of the MusicXML score at `src_path` to `dst_path`, with every
+    note's hand in <staff> and its finger in <notations><technical><fingering>
+    - what the score said plus whatever the fingering editor changed. Every
+    other part of the score (structure, layout, tempo, dynamics, ties) is left
+    as it was. A .mxl destination is written as a compressed score, a .xml one
+    as plain text. `notes` are the loaded Note objects and `fingers` maps
+    id(note) -> finger. Returns how many notes were marked.
+    """
+    root = read_root(src_path)
+    marked = _write_fingers(root, notes, fingers)
+    data = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    if os.path.splitext(dst_path)[1].lower() == ".mxl":
+        container = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+                     '<container version="1.0" '
+                     'xmlns="urn:oasis:names:tc:opendocument:xmlns:container">\n'
+                     '  <rootfiles>\n'
+                     '    <rootfile full-path="score.xml" media-type="application/vnd.recordare.musicxml+xml"/>\n'
+                     '  </rootfiles>\n</container>\n')
+        with zipfile.ZipFile(dst_path, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("META-INF/container.xml", container)
+            z.writestr("score.xml", data)
+    else:
+        with open(dst_path, "wb") as fh:
+            fh.write(data)
+    return marked
