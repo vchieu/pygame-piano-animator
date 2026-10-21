@@ -35,6 +35,9 @@ v20YY.MM.DD.HHMM). Newest first.
   printed marks, or filled in around them.
 - In the fingering editor, exporting a MusicXML score writes a real `.musicxml` / `.mxl` back, with every note's
   current hand and finger written into the score's own notes so nothing else is disturbed.
+- The beat grid every measure is drawn against now runs unbroken across bar lines, so a bar no longer reads as if
+  it did not fill its beats and a written half note stays a half note; and a score's rounding error no longer ends
+  a note early where a repeated key merely touches the one before it.
 
 ## v26.1.20 - Video export, hands on top of each other
 - Export a performance to an .mp4 from the button under the player's progress bar: choose whether the progress
