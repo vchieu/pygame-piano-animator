@@ -59,6 +59,7 @@ DYNAMICS = {"pppp": 20, "ppp": 28, "pp": 36, "p": 45, "mp": 56, "mf": 68,
 
 DEFAULT_VELOCITY = 64
 GRACE_DURATION = 0.06      # s, a grace note has no <duration>: it is written, not measured
+GRACE_STEP = 0.05          # s, how far back from its main note each grace of a run is placed
 MAX_PASSES = 256           # guard against a score whose repeat signs would never settle
 
 
@@ -544,6 +545,7 @@ def _read_measure(measure, tempo: _Tempo, start_div: int, at: float,
     origin = tempo.sec(start_div)
     cursor = 0
     prev_onset = 0
+    pending_graces: List[Note] = []     # the graces seen since the last main note
     for c in measure:
         tag = _local(c.tag)
         if tag in ("backup", "forward"):
@@ -585,6 +587,16 @@ def _read_measure(measure, tempo: _Tempo, start_div: int, at: float,
         n = Note(pitch, start, end, _velocity(c, DEFAULT_VELOCITY), part_index, note_hand,
                  _fingering(c), False, octave * 7 + "CDEFGAB".index(step_name), alter,
                  _printed_value(c))
+        if is_grace:
+            # A grace note has no <duration>: every grace of a measure lands on the
+            # same cursor. They are placed once their main note is seen, so a run of
+            # graces comes out one after another into that note (as MuseScore plays
+            # and prints them), not stacked up on one instant.
+            if not is_chord:
+                pending_graces.append(n)
+        elif pending_graces:
+            _place_graces(notes, pending_graces, n)
+            pending_graces = []
         starts, ends = _tie(c)
         # A tie runs between notes of the same voice and pitch. The staff is not
         # part of the key: a grand staff writes the hands as different voices
@@ -606,6 +618,40 @@ def _read_measure(measure, tempo: _Tempo, start_div: int, at: float,
         if starts:
             ties[key] = n
     return tempo.sec(start_div + _measure_divisions(measure, tempo.divisions)) - origin
+
+
+def _grace_run_starts(main_start: float, count: int) -> List[float]:
+    """
+    Where each grace of a run begins, in written order, given its main note's start.
+
+    Each grace takes GRACE_STEP of seconds and the run ends exactly at the main note.
+    A run at the very start of the music has no room to reach back into, so its step
+    shrinks to fit instead of pushing the whole song later.
+    """
+    step = GRACE_STEP
+    if main_start < count * step:
+        step = main_start / count if count else 0.0
+    return [max(0.0, main_start - (count - k) * step) for k in range(count)]
+
+
+def _place_graces(notes: List[Note], graces: List[Note], main: Note):
+    """
+    Put a run of grace notes just before the note they lean on, one after another.
+
+    A MusicXML grace note carries no <duration>, so every grace of a measure lands
+    on the same cursor. Written to one instant they would draw as one grace chord;
+    MuseScore plays and prints them as a run that flickers into the main note. Each
+    grace takes GRACE_STEP of seconds, the run ending exactly where its main note
+    starts, so the staff sees them in played order and the falling notes strike in
+    turn.
+    """
+    starts = _grace_run_starts(main.start, len(graces))
+    bounds = starts + [main.start]
+    for g, start, end in zip(graces, starts, bounds[1:]):
+        for i, old in enumerate(notes):
+            if old is g:
+                notes[i] = replace(g, start=start, end=end)
+                break
 
 
 def _note_hand(staff: Optional[int], part_hand: Optional[str]) -> Optional[str]:
@@ -866,6 +912,7 @@ def _note_start(measure, measure_at: float, start_div: int, tempo: _Tempo):
     origin = tempo.sec(start_div)
     cursor = 0
     prev_onset = 0
+    grace_idx: List[int] = []       # positions in `out` of the graces since the last main note
     out = []
     for c in measure:
         tag = _local(c.tag)
@@ -876,14 +923,26 @@ def _note_start(measure, measure_at: float, start_div: int, tempo: _Tempo):
             continue
         if tag != "note" or _kid(c, "pitch") is None:
             continue
-        dur = 0 if _kid(c, "grace") is not None else (_num(c, "duration") or 0)
+        is_grace = _kid(c, "grace") is not None
+        dur = 0 if is_grace else (_num(c, "duration") or 0)
         if _kid(c, "chord") is not None:
             onset = prev_onset
         else:
             onset = cursor
             prev_onset = onset
             cursor += dur
-        out.append((c, measure_at + tempo.sec(start_div + onset) - origin))
+        start = measure_at + tempo.sec(start_div + onset) - origin
+        out.append((c, start))
+        if is_grace:
+            if _kid(c, "chord") is None:
+                grace_idx.append(len(out) - 1)
+        elif grace_idx:
+            # The graces of a run are placed in _read_measure's own way, so a <note>
+            # still pairs with the Note it made.
+            starts = _grace_run_starts(start, len(grace_idx))
+            for k, idx in enumerate(grace_idx):
+                out[idx] = (out[idx][0], starts[k])
+            grace_idx = []
     return out
 
 

@@ -182,6 +182,43 @@ def test_grace_note_is_short(tmp_path):
     assert main.start == pytest.approx(0.0)          # and it doesn't shift the quarter after it
 
 
+def test_a_run_of_graces_comes_out_one_after_another(tmp_path):
+    # Two graces written on one cursor (a grace carries no <duration>) that lead
+    # into a half note: they must play in turn into that note, not strike together
+    # as one grace chord. See 50-nam-ve-sau.mxl bar 20, where MuseScore prints them
+    # as a little run above the beat.
+    direction = '<direction><sound tempo="60"/></direction>'
+    m1 = measure(note("C", 4, 4, "quarter") + note("C", 4, 4, "quarter")
+                 + note("C", 4, 4, "quarter") + note("C", 4, 4, "quarter"),
+                 number=1, direction=direction)
+    m2 = measure(note("D", 4, 4, "quarter", grace=True)
+                 + note("E", 4, 4, "quarter", grace=True)
+                 + note("G", 4, 8, "half"), number=2)
+    p = one_part(tmp_path, m1 + m2)
+    song = load_musicxml(p)
+    d, e = (next(n for n in song.notes if n.pitch == p_) for p_ in (62, 64))
+    g = next(n for n in song.notes if n.pitch == 67)
+    assert d.start < e.start < g.start              # a run, in written order
+    assert e.end == pytest.approx(g.start)          # it leads straight into the half note
+    assert d.end == pytest.approx(e.start)          # and the two graces touch
+    assert g.duration == pytest.approx(2.0)         # the main note keeps its own length
+    assert song.cleanup == []                       # nothing shifted or cut
+
+
+def test_a_grace_at_the_start_does_not_shift_the_song(tmp_path):
+    # No room to reach back into: the run is squeezed into the start instead of
+    # pushing the whole song later.
+    body = (note("D", 4, 4, "quarter", grace=True)
+            + note("E", 4, 4, "quarter", grace=True)
+            + note("G", 4, 8, "half"))
+    p = one_part(tmp_path, measure(body))
+    song = load_musicxml(p)
+    g = next(n for n in song.notes if n.pitch == 67)
+    assert min(n.start for n in song.notes) == pytest.approx(0.0)
+    assert g.start == pytest.approx(0.0)
+    assert song.cleanup == []
+
+
 def test_mxl_zip_is_read(tmp_path):
     body = note("C", 4, 4, "quarter") + note("D", 4, 4, "quarter")
     xml = score(measure(body)).encode("utf-8")
