@@ -5,7 +5,7 @@ import pytest
 
 from conftest import midi_path
 import main
-from midi_loader import LEFT, RIGHT, Note, load_midi
+from midi_loader import LEFT, RIGHT, Note, load_midi, MidiSong
 import notation
 import pianist
 import staff
@@ -699,6 +699,79 @@ def test_visualizer_staff_zoom_shortcuts_and_wheel(screen):
     # and the shortcut list mentions them
     controls = dict(vis._key_controls())
     assert any("zoom" in d.lower() for d in controls.values())
+    assert any("reset" in d.lower() for d in controls.values())
+
+
+def test_staff_zoom_reset_button_and_shortcuts(screen):
+    app = main.App(screen, sound=False)
+    app.play(midi_path("demo_song.mid"))
+    vis = app.mode
+
+    # Change zoom away from default
+    vis.set_staff_target_dur(6.0)
+    vis.set_staff_scale(1.25)
+    assert vis.staff_target_dur == 6.0
+    assert abs(vis.staff_scale - 1.25) < 1e-6
+
+    # When rendered with custom zoom, the reset button is visible
+    vis.render()
+    assert vis.staff_reset_button.w > 0 and vis.staff_reset_button.h > 0
+
+    # Clicking the reset button resets zoom
+    reset_click = vis.staff_reset_button.center
+    app.handle_event(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=reset_click))
+    assert vis.staff_target_dur == 10.0
+    assert abs(vis.staff_scale - 1.0) < 1e-6
+
+    # When rendered at default zoom, reset button is hidden
+    vis.render()
+    assert vis.staff_reset_button.h == 0
+
+    # Shortcut '0' resets zoom
+    vis.set_staff_target_dur(5.0)
+    app.handle_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_0, mod=0))
+    assert vis.staff_target_dur == 10.0
+
+    # Double click on staff resets zoom
+    vis.set_staff_scale(1.3)
+    staff_pt = (vis.staff_rect.centerx, vis.staff_rect.centery)
+    vis._last_staff_click = pygame.time.get_ticks()
+    app.handle_event(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=staff_pt))
+    assert abs(vis.staff_scale - 1.0) < 1e-6
+
+
+def test_per_song_zoom_persistence(screen, tmp_path):
+    app = main.App(screen, sound=False)
+    song_a_path = midi_path("demo_song.mid")
+    app.play(song_a_path)
+    vis = app.mode
+
+    # Configure Song A custom zoom
+    vis.set_staff_target_dur(7.5)
+    vis.set_staff_scale(1.2)
+    saved_dur, saved_scale = pianist.get_song_zoom(vis.song)
+    assert saved_dur == 7.5
+    assert abs(saved_scale - 1.2) < 1e-6
+
+    # Switch to synthetic Song B (has different path / identity)
+    notes_b = [Note(pitch=60, start=0.0, end=1.0, velocity=80, track=0, hand=RIGHT)]
+    song_b = MidiSong(notes_b, [], 5.0, [], [], path=str(tmp_path / "song_b.mid"))
+    vis.set_song(song_b)
+    # Song B should use defaults or global settings, not Song A's custom zoom
+    assert vis.staff_target_dur == 10.0 or vis.staff_target_dur != 7.5
+
+    # Switch back to Song A: custom zoom restored
+    vis.set_song(load_midi(song_a_path))
+    assert vis.staff_target_dur == 7.5
+    assert abs(vis.staff_scale - 1.2) < 1e-6
+
+    # Resetting Song A clears override
+    vis.reset_staff_zoom()
+    assert vis.staff_target_dur == 10.0
+    assert abs(vis.staff_scale - 1.0) < 1e-6
+    # Calling get_song_zoom now falls back to default
+    dur, scale = pianist.get_song_zoom(vis.song, default_dur=10.0, default_scale=1.0)
+    assert dur == 10.0 and abs(scale - 1.0) < 1e-6
 
 
 def test_staff_height_dragging_and_clamping(screen):

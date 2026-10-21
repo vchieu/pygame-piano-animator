@@ -496,6 +496,103 @@ def set_app_setting(key, value):
         print(f"Couldn't save the setting {key} ({exc})")
 
 
+def song_key(song):
+    """A stable string key identifying `song` for per-song preferences."""
+    if not song:
+        return None
+    path = getattr(song, "path", None)
+    if path:
+        try:
+            return os.path.abspath(path)
+        except Exception:
+            return str(path)
+    title = getattr(song, "title", None)
+    if title:
+        return str(title)
+    return f"song_{id(song)}"
+
+
+def has_song_zoom(song_or_key):
+    """True if `song` has a saved custom zoom setting."""
+    key = song_or_key if isinstance(song_or_key, str) else song_key(song_or_key)
+    if not key:
+        return False
+    zooms = app_setting("song_zooms", {}) or {}
+    if key in zooms:
+        return True
+    base = (
+        os.path.basename(song_or_key)
+        if isinstance(song_or_key, str)
+        else getattr(song_or_key, "title", None)
+        or (os.path.basename(song_or_key.path) if getattr(song_or_key, "path", None) else None)
+    )
+    return bool(base and base in zooms)
+
+
+def get_song_zoom(song_or_key, default_dur=None, default_scale=None):
+    """Return (target_dur, scale) for a song. Falls back to global app settings or defaults."""
+    if default_dur is None:
+        default_dur = float(app_setting("staff_target_dur", 10.0))
+    if default_scale is None:
+        default_scale = float(app_setting("staff_scale", 1.0))
+    key = song_or_key if isinstance(song_or_key, str) else song_key(song_or_key)
+    if not key:
+        return default_dur, default_scale
+    zooms = app_setting("song_zooms", {}) or {}
+    if key in zooms:
+        entry = zooms[key]
+        return entry.get("target_dur", default_dur), entry.get("scale", default_scale)
+    # Check by filename / title fallback
+    if isinstance(song_or_key, str):
+        base = os.path.basename(song_or_key)
+    else:
+        base = getattr(song_or_key, "title", None) or (
+            os.path.basename(song_or_key.path) if getattr(song_or_key, "path", None) else None
+        )
+    if base and base in zooms:
+        entry = zooms[base]
+        return entry.get("target_dur", default_dur), entry.get("scale", default_scale)
+    return default_dur, default_scale
+
+
+def set_song_zoom(song_or_key, target_dur=None, scale=None):
+    """Save custom zoom setting (target_dur, scale) for a song into pianists/settings.json."""
+    key = song_or_key if isinstance(song_or_key, str) else song_key(song_or_key)
+    if not key:
+        return
+    zooms = dict(app_setting("song_zooms", {}) or {})
+    entry = dict(zooms.get(key, {}))
+    if target_dur is not None:
+        entry["target_dur"] = float(target_dur)
+    if scale is not None:
+        entry["scale"] = float(scale)
+    zooms[key] = entry
+    set_app_setting("song_zooms", zooms)
+
+
+def delete_song_zoom(song_or_key):
+    """Remove per-song zoom override, reverting to default."""
+    key = song_or_key if isinstance(song_or_key, str) else song_key(song_or_key)
+    if not key:
+        return
+    zooms = dict(app_setting("song_zooms", {}) or {})
+    changed = False
+    if key in zooms:
+        del zooms[key]
+        changed = True
+    if isinstance(song_or_key, str):
+        base = os.path.basename(song_or_key)
+    else:
+        base = getattr(song_or_key, "title", None) or (
+            os.path.basename(song_or_key.path) if getattr(song_or_key, "path", None) else None
+        )
+    if base and base in zooms:
+        del zooms[base]
+        changed = True
+    if changed:
+        set_app_setting("song_zooms", zooms)
+
+
 def set_active(p):
     global _active
     _active = p.copy()

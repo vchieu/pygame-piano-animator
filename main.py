@@ -159,8 +159,17 @@ class Visualizer(Transport):
         # the staff is drawn (smaller = more room for notes above and below the staves)
         self.staff_target_dur = clamp_target_dur(pianists.app_setting("staff_target_dur", 10.0))
         self.staff_scale = clamp_scale(pianists.app_setting("staff_scale", 1.0))
+        if song:
+            if pianists.has_song_zoom(song):
+                dur, sc = pianists.get_song_zoom(song, default_dur=10.0, default_scale=1.0)
+            else:
+                dur, sc = 10.0, 1.0
+            self.staff_target_dur = clamp_target_dur(dur)
+            self.staff_scale = clamp_scale(sc)
         self.staff_view = StaffView(song, target_dur=self.staff_target_dur, scale=self.staff_scale)
         self.staff_rect = pygame.Rect(0, 0, 0, 0)
+        self.staff_reset_button = pygame.Rect(0, 0, 0, 0)
+        self._last_staff_click = 0
         self.layout(screen.get_size())
         if song:
             self.set_song(song, hands)
@@ -170,6 +179,13 @@ class Visualizer(Transport):
         """Play `song`; `hands` (hands.build_hands), when already built for it, saves planning them again."""
         self.midi.silence()
         self.song = song
+        if song:
+            if pianists.has_song_zoom(song):
+                dur, sc = pianists.get_song_zoom(song, default_dur=10.0, default_scale=1.0)
+            else:
+                dur, sc = 10.0, 1.0
+            self.staff_target_dur = clamp_target_dur(dur)
+            self.staff_scale = clamp_scale(sc)
         if hasattr(self, "staff_view"):
             self.staff_view.set_song(song, target_dur=self.staff_target_dur, scale=self.staff_scale)
         self.hands = hands if hands is not None else build_hands(song)
@@ -216,6 +232,7 @@ class Visualizer(Transport):
         self.staff_target_dur = value
         pianists.set_app_setting("staff_target_dur", value)
         if getattr(self, "song", None) is not None:
+            pianists.set_song_zoom(self.song, target_dur=value, scale=self.staff_scale)
             self.staff_view.set_song(self.song, target_dur=value, scale=self.staff_scale)
 
     def set_staff_scale(self, value):
@@ -227,6 +244,15 @@ class Visualizer(Transport):
         self.staff_scale = value
         self.staff_view.scale = value
         pianists.set_app_setting("staff_scale", value)
+        if getattr(self, "song", None) is not None:
+            pianists.set_song_zoom(self.song, target_dur=self.staff_target_dur, scale=value)
+
+    def reset_staff_zoom(self):
+        """Reset staff zoom (both target_dur and scale) back to default (10.0s, 1.0x)."""
+        self.set_staff_target_dur(10.0)
+        self.set_staff_scale(1.0)
+        if getattr(self, "song", None) is not None:
+            pianists.delete_song_zoom(self.song)
 
     def zoom_staff(self, steps: int, vertical: bool = False):
         """Zoom the staff by `steps` (up is positive = closer). `vertical` scales the staff
@@ -291,6 +317,8 @@ class Visualizer(Transport):
                 self.zoom_staff(-1, vertical=bool(event.mod & pygame.KMOD_SHIFT))
             elif k == pygame.K_RIGHTBRACKET:
                 self.zoom_staff(1, vertical=bool(event.mod & pygame.KMOD_SHIFT))
+            elif k in (pygame.K_0, pygame.K_KP0):
+                self.reset_staff_zoom()
             elif k == pygame.K_m:
                 self.toggle_mute()
             elif k in (pygame.K_COMMA, pygame.K_PERIOD) and self.audio:
@@ -337,6 +365,16 @@ class Visualizer(Transport):
             if self.staff_rect.h > 0 and abs(event.pos[1] - self.staff_rect.bottom) <= 6:
                 self.dragging_staff_height = True
                 return True
+            if self.staff_reset_button.h > 0 and self.staff_reset_button.collidepoint(event.pos):
+                self.reset_staff_zoom()
+                return True
+            if self.staff_rect.h > 0 and self.staff_rect.collidepoint(event.pos):
+                now = pygame.time.get_ticks()
+                if now - getattr(self, "_last_staff_click", 0) < 400:
+                    self.reset_staff_zoom()
+                    self._last_staff_click = 0
+                    return True
+                self._last_staff_click = now
             if self.keys_button.collidepoint(event.pos):
                 self.show_keys = not self.show_keys
                 pianists.set_app_setting("player_keys", self.show_keys)
@@ -674,6 +712,7 @@ class Visualizer(Transport):
             self._draw_wave()
         self._draw_controls()
         self._draw_export_button()
+        self._draw_staff_reset()
         self._draw_tooltip()
         if not self.song:
             center_text(s, self.fonts, self.fall_rect, "Drop a MIDI file here, or press O to open one")
@@ -818,6 +857,7 @@ class Visualizer(Transport):
                  ("M", "Mute / unmute the recording" if self.audio else "Mute / unmute"),
                  ("S", "Show / hide sheet music staff (Shift+S: opacity)"),
                  ("[ ]", "Zoom the staff out / in (Shift: its size)"),
+                 ("0", "Reset staff zoom to default (10s, 100%)"),
                  ("Ctrl+Wheel", "Zoom the staff's notes (on the staff)"),
                  ("Shift+Wheel", "Zoom the staff's size (on the staff)"),
                  ("H", "Show / hide the hands"), ("F", "Show / hide the finger numbers"),
@@ -962,6 +1002,37 @@ class Visualizer(Transport):
         pygame.draw.rect(s, mix(ACCENT, (255, 255, 255), 0.15) if over else ACCENT, btn, border_radius=8)
         img = bfont.render("Confirm Export", True, (20, 20, 24))
         s.blit(img, img.get_rect(center=btn.center))
+
+    def _draw_staff_reset(self, video=None):
+        """Draw a 'Reset zoom' button on the staff when zoom is not default."""
+        is_custom = abs(self.staff_target_dur - 10.0) > 0.05 or abs(self.staff_scale - 1.0) > 0.01
+        if not is_custom or video is not None or self.staff_rect.h <= 0:
+            self.staff_reset_button = pygame.Rect(0, 0, 0, 0)
+            return
+
+        s = self.screen
+        font = self.fonts["small"]
+        label = "Reset zoom (0)"
+        tw, th = font.size(label)
+        bw, bh = tw + 14, max(20, th + 6)
+        bx = self.staff_rect.right - bw - 14
+        by = self.staff_rect.top + 8
+        b = pygame.Rect(bx, by, bw, bh)
+        self.staff_reset_button = b
+
+        mouse = pygame.mouse.get_pos()
+        hot = b.collidepoint(mouse)
+
+        btn_surf = pygame.Surface(b.size, pygame.SRCALPHA)
+        bg = (*BAR_BG, 210 if hot else 140)
+        pygame.draw.rect(btn_surf, bg, btn_surf.get_rect(), border_radius=5)
+        edge = (*ACCENT, 200) if hot else (*PANEL_EDGE, 120)
+        pygame.draw.rect(btn_surf, edge, btn_surf.get_rect(), width=1, border_radius=5)
+        s.blit(btn_surf, b.topleft)
+
+        col = ACCENT if hot else TEXT_DIM
+        blit_shadowed(s, font, label, col, (b.centerx - tw // 2, b.centery - th // 2))
+        self._top_items.append((b, "Reset sheet zoom to default (10.0s, 100%) - key: 0"))
 
     def _draw_export_progress(self):
         """
