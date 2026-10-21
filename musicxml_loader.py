@@ -732,12 +732,18 @@ def _bar_and_beat_times(part_measures, order: List[int]):
     A bar line is where the measure before it ends, so the times come from the
     same shared tempo map the notes were read with, plus each measure's own time
     signature for the beats in between.
+
+    The beat grid runs without a gap: every measure contributes its own downbeat
+    too, not only the beats after it, so a note on a bar line still sits one beat
+    from its neighbours (get_beat_duration reads the spacing straight off this
+    list).
     """
     bar_times: List[float] = []
     beat_times: List[float] = []
     tempo = _Tempo()
     div = 0
     beats, beat_type = 4, 4
+    span = 0
     for idx in order:
         present = [its[idx].elem for its in part_measures if idx < len(its)]
         if not present:
@@ -753,12 +759,17 @@ def _bar_and_beat_times(part_measures, order: List[int]):
                     beats = int(_num(time, "beats", beats) or beats)
                     beat_type = int(_num(time, "beat-type", beat_type) or beat_type)
         bar_times.append(tempo.sec(div))
-        for b in range(1, beats):
+        for b in range(beats):
             step = b * (4.0 / beat_type) * tempo.divisions
             beat_times.append(tempo.sec(div + step))
-        div += _measure_span(part_measures, idx, tempo.divisions)
+        span = _measure_span(part_measures, idx, tempo.divisions)
+        if span > 0:
+            div += span
     if bar_times:
         bar_times.append(tempo.sec(div))
+        # The closing bar line is a beat of its own: without it the final measure's
+        # last beat would be read as stretching to the end of the music.
+        beat_times.append(tempo.sec(div))
     return bar_times, beat_times
 
 
