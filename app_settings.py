@@ -19,6 +19,11 @@ app_settings.py - The Settings screen (main menu > Settings).
     on the computer (FontPicker: each name in its own face, type to filter)
     or a font file (App.set_font; "font": {"system": name} / {"file": path},
     none = the bundled one, also used when the chosen font can't be found).
+  * MusicXML hands: follow a score's own layout (<staff> says the hand), or
+    work the hands out from the music ("musicxml_hands").
+  * MusicXML fingering: Auto plans every finger, File keeps the score's
+    printed fingers exactly, Fill in keeps them and plans what the score
+    leaves blank ("musicxml_fingering").
 """
 import os
 
@@ -36,9 +41,21 @@ TO_MENU = "menu"
 FPS_CAP_MIN, FPS_CAP_MAX = 24, 240      # (as main.py's: the slider's top step past FPS_CAP_MAX is "uncapped")
 ROW_H = 56                              # each setting's row in the panel (less in a small window...
 ROW_H_MIN = 46                          # ...down to this: the panel kept above the window's centre)
-ROWS = 6
+ROWS = 8
 PICK_ROW_H = 34                         # the font list's rows...
 PICK_PREVIEW = 20                       # ...each name drawn in its own face this big
+
+# The MusicXML settings: which hand layout and which fingering a score is read
+# with (musicxml_loader; pianist settings.json).
+MUSICXML_HANDS = ("file", "auto")
+MUSICXML_HANDS_LABEL = {"file": "From the file", "auto": "Work out"}
+MUSICXML_FINGERING = ("auto", "file", "fill")
+MUSICXML_FINGERING_LABEL = {"auto": "Auto", "file": "From the file", "fill": "Fill in"}
+
+
+def _next_choice(choices, current):
+    """The choice after `current` in the list (wrapping), for a click-to-cycle button."""
+    return choices[(choices.index(current) + 1) % len(choices)] if current in choices else choices[0]
 
 
 class SettingsScreen:
@@ -53,6 +70,8 @@ class SettingsScreen:
         self.sf_default = Button("Use default", "sf_default", font="small")
         self.font_choose = Button("Choose…", "font_choose", font="small")
         self.font_default = Button("Use default", "font_default", font="small")
+        self.xml_hands = Button("", "xml_hands", font="small")
+        self.xml_fingering = Button("", "xml_fingering", font="small")
         self.picker = None               # the font list (FontPicker) while it's open
         cap = app.fps_cap
         self.fps = Slider("", FPS_CAP_MIN, FPS_CAP_MAX + 1, FPS_CAP_MAX + 1 if cap is None else cap,
@@ -81,6 +100,8 @@ class SettingsScreen:
         self.sf_browse.rect = pygame.Rect(right - 110 - 8 - 110, y + 4 * rh + 6, 110, 30)
         self.font_default.rect = pygame.Rect(right - 110, y + 5 * rh + 6, 110, 30)
         self.font_choose.rect = pygame.Rect(right - 110 - 8 - 110, y + 5 * rh + 6, 110, 30)
+        self.xml_hands.rect = pygame.Rect(right - 150, y + 6 * rh + 6, 150, 30)
+        self.xml_fingering.rect = pygame.Rect(right - 150, y + 7 * rh + 6, 150, 30)
         self._rows = (x, y)
 
     # ----- the soundfont ---------------------------------------------------------
@@ -186,6 +207,14 @@ class SettingsScreen:
                 self.app.perf_overlay = not self.app.perf_overlay
                 pianists.set_app_setting("perf_overlay", self.app.perf_overlay)
                 return True
+            if self.xml_hands.hit(event.pos):
+                cur = pianists.app_setting("musicxml_hands", "file")
+                pianists.set_app_setting("musicxml_hands", _next_choice(MUSICXML_HANDS, cur))
+                return True
+            if self.xml_fingering.hit(event.pos):
+                cur = pianists.app_setting("musicxml_fingering", "fill")
+                pianists.set_app_setting("musicxml_fingering", _next_choice(MUSICXML_FINGERING, cur))
+                return True
             kb_rect, _ = self._kb()
             grab = kb_rect.inflate(0, 2 * FELT_H).move(0, -FELT_H // 2)
             if grab.collidepoint(event.pos):
@@ -243,7 +272,10 @@ class SettingsScreen:
                 ("Frame rate cap", "The most frames a second (all the way right: uncapped)."),
                 ("Performance profiling", "Frame rate and a frame-time graph in the top-left corner."),
                 ("Soundfont", self.sound_text()),
-                ("Font", self.font_text())]
+                ("Font", self.font_text()),
+                ("MusicXML hands", "Follow the score's own layout, or work the hands out from the music."),
+                ("MusicXML fingering", "Auto: plan every finger. From the file: keep the score's printed "
+                                       "fingers. Fill in: keep them, plan what the score leaves blank.")]
         for i, (title, desc) in enumerate(rows):
             ry = y + i * self.row_h
             if i:
@@ -260,10 +292,12 @@ class SettingsScreen:
         self.perf.active = self.app.perf_overlay
         self.sf_default.enabled = bool(self.app.midi.name or pianists.app_setting("soundfont"))
         self.font_default.enabled = bool(font_choice() or pianists.app_setting("font"))
+        self.xml_hands.label = MUSICXML_HANDS_LABEL[pianists.app_setting("musicxml_hands", "file")]
+        self.xml_fingering.label = MUSICXML_FINGERING_LABEL[pianists.app_setting("musicxml_fingering", "fill")]
         if self.picker is not None:
             mouse = (-1, -1)                         # (no hover under the font list)
         for b in (self.reset, self.keys, self.perf, self.sf_browse, self.sf_default, self.font_choose,
-                  self.font_default):
+                  self.font_default, self.xml_hands, self.xml_fingering):
             b.draw(s, f, mouse)
         self.fps.draw(s, f)
 

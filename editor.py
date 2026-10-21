@@ -622,7 +622,10 @@ class FingeringEditor(Transport):
     def _load_path(self, path):
         try:
             song, hands = run_busy(self.screen, self.fonts, f"Loading {os.path.basename(path)}…",
-                                   lambda: load_with_hands(path, repair=False))
+                                   lambda: load_with_hands(
+                                       path,
+                                       musicxml_hands=pianists.app_setting("musicxml_hands", "file"),
+                                       musicxml_fingering=pianists.app_setting("musicxml_fingering", "fill")))
             self.load_song(song, hands)
             self.app.last_dir = os.path.dirname(os.path.abspath(path))
         except Exception as exc:
