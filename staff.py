@@ -163,6 +163,50 @@ def diatonic_step(pitch: int) -> Tuple[int, int]:
     return octave * 7 + step_in_oct, is_sharp
 
 
+def written_step(note: Note) -> Tuple[int, int]:
+    """
+    Return (diatonic_step, accidental) as the score wrote the note.
+
+    A MIDI file only carries the pitch, so the speller falls back to the sharp
+    reading (C# rather than Db) - what this has always drawn. A MusicXML score
+    says what it wrote: `step` is the diatonic step and `alter` the semitones
+    beside it, -1 for a flat, +1 for a sharp, +2 / -2 for the doubles. So Db is
+    step D and -1, and the staff prints a flat where the composer wrote one.
+    """
+    if getattr(note, "step", None) is not None:
+        return note.step, getattr(note, "alter", 0) or 0
+    return diatonic_step(note.pitch)
+
+
+def has_accidental(note: Note) -> bool:
+    """True when the note is drawn with an accidental (a sharp, flat or natural)."""
+    return written_step(note)[1] != 0
+
+
+# How wide an accidental's ink is, in spaces, by the semitones it spells. A sharp,
+# flat or natural is the plain sign the note has always been given room for; the
+# doubles are wider, and take that much more.
+ACCIDENTAL_WIDTH_SP = {1: 0.8, 2: 1.6}
+
+
+def accidental_width_sp(note: Note) -> float:
+    """The width of the note's accidental, in spaces (0 when it has none)."""
+    alt = written_step(note)[1]
+    return ACCIDENTAL_WIDTH_SP.get(min(2, abs(alt)), 0.8) if alt else 0.0
+
+
+def accidental_extra_sp(note: Note) -> float:
+    """
+    How much wider than a plain sign the note's accidental is, in spaces.
+
+    A sharp, flat or natural is the one sign the layout has always allowed for, so
+    its extra is 0 - the caller adds the plain sign's room itself. The doubles are
+    a second sign wide.
+    """
+    alt = abs(written_step(note)[1])
+    return 0.8 if alt > 1 else 0.0
+
+
 def clef_for_note(note: Note) -> str:
     """Determine whether a note belongs to Treble clef or Bass clef."""
     if note.hand == RIGHT:
@@ -219,6 +263,44 @@ _NOTE_VALUES = {
     ("black", 1, 0): EIGHTH,
     ("black", 2, 0): SIXTEENTH,
 }
+
+# A MusicXML <type> (with its dots) in the shapes notation.note_shape returns, and
+# the same shapes named as the staff names them (WHOLE, DOTTED_HALF, ...). A written
+# value the staff has no name for (a 32nd) is drawn as its shape but named as the
+# nearest it knows (a 16th), so the beaming and flag code keeps working.
+_PRINTED_SHAPES = {
+    "whole": ("whole", 0, 0), "dotted_whole": ("whole", 0, 1), "half": ("half", 0, 0),
+    "dotted_half": ("half", 0, 1), "double_dotted_half": ("half", 0, 2),
+    "quarter": ("black", 0, 0), "dotted_quarter": ("black", 0, 1),
+    "double_dotted_quarter": ("black", 0, 2), "eighth": ("black", 1, 0),
+    "dotted_eighth": ("black", 1, 1), "sixteenth": ("black", 2, 0),
+    "thirty_second": ("black", 3, 0), "sixty_fourth": ("black", 4, 0),
+}
+_PRINTED_VALUES = {name: _NOTE_VALUES.get(shape, SIXTEENTH)
+                   for name, shape in _PRINTED_SHAPES.items()}
+
+
+def printed_value(note: Note, duration: float, beat_len: float = 0.5) -> str:
+    """
+    The note's value as the score wrote it, when it has one, else the guessed one.
+
+    A MIDI file says how long a note lasts, not how it is written, so the value is
+    guessed from the seconds against the beat (note_value). A MusicXML score wrote
+    it down: a quarter tied to a sixteenth, or a triplet, keeps the value the score
+    printed instead of one rounded out of its length.
+    """
+    name = getattr(note, "printed", None)
+    return _PRINTED_VALUES.get(name) or note_value(duration, beat_len)
+
+
+def printed_shape(note: Note, duration: float, beat_len: float = 0.5):
+    """
+    The note's drawn shape: the score's own written value when it has one, else
+    the shape guessed from its length.
+    """
+    name = getattr(note, "printed", None)
+    shape = _PRINTED_SHAPES.get(name)
+    return shape if shape is not None else note_shape(duration, beat_len)
 
 
 class Measure:
@@ -346,7 +428,13 @@ def split_at_bar_lines(notes: List[Note], bar_times: List[float]) -> Tuple[List[
             piece = Note(pitch=n.pitch, start=bounds[i], end=bounds[i + 1],
                          velocity=n.velocity, track=n.track, hand=n.hand,
                          finger=n.finger if i == 0 else None,
-                         gliss=n.gliss if i == 0 else False)
+                         gliss=n.gliss if i == 0 else False,
+                         # the written spelling and value belong to the note the score
+                         # wrote: they stay on the piece that opens it (the value is
+                         # reworked per piece downstream anyway, from the piece's own span)
+                         step=n.step if i == 0 else None,
+                         alter=n.alter if i == 0 else 0,
+                         printed=n.printed if i == 0 else None)
             pieces.append(piece)
             if prev is not None:
                 ties.append((prev, piece))
@@ -498,7 +586,7 @@ def get_octave_transposition(n: Note, clef: str) -> Tuple[int, int, str]:
     Thresholds are set so normal piano ranges use standard ledger lines (easy to read),
     and 8va/8vb is reserved for extreme pitches (> 3-4 ledger lines).
     """
-    step, _ = diatonic_step(n.pitch)
+    step, _ = written_step(n)
     if clef == CLEF_TREBLE:
         if n.pitch >= 100:            # E7 and above (> 6 ledger lines)
             return step - 14, -2, "15ma"
@@ -586,7 +674,7 @@ def resolve_octave_transpositions(sys_notes: List[Note], info: dict, max_gap: fl
             # ledger lines rather than a momentary, flickering 8va/8vb bracket.
             if len(final_phrase) == 1 and not any(is_extreme(fn, target_shift) for fn in final_phrase):
                 for fn in final_phrase:
-                    step_nat, _ = diatonic_step(fn.pitch)
+                    step_nat, _ = written_step(fn)
                     info[id(fn)]["step_draw"] = step_nat
                     info[id(fn)]["octave_shift"] = 0
                     info[id(fn)]["label"] = ""
@@ -594,7 +682,7 @@ def resolve_octave_transpositions(sys_notes: List[Note], info: dict, max_gap: fl
                 continue
 
             for fn in final_phrase:
-                step_nat, _ = diatonic_step(fn.pitch)
+                step_nat, _ = written_step(fn)
                 step_shift = 7 if abs(target_shift) == 1 else 14
                 if target_shift < 0:
                     step_draw = step_nat - step_shift
@@ -649,7 +737,8 @@ def group_chords(sorted_notes: List[Note], beat_len: float) -> List[List[Note]]:
 
 def is_beamable(sub: List[Note], beat_of) -> bool:
     """True when a chord is short enough to be joined to its neighbours by a beam."""
-    return note_value(sub[0].duration, beat_of(sub[0].start)) in (EIGHTH, DOTTED_EIGHTH, SIXTEENTH)
+    return printed_value(sub[0], sub[0].duration, beat_of(sub[0].start)) in (
+        EIGHTH, DOTTED_EIGHTH, SIXTEENTH)
 
 
 def group_beams(chords: List[List[Note]], notes_info: dict, beat_of, measure_of) -> List[Tuple[str, List[List[Note]]]]:
@@ -1019,7 +1108,7 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
                 "octave_shift": oct_shift,
                 "label": label,
                 "grace": id(n) in grace_ids,
-                "value": note_value(n.duration, beat_len),
+                "value": printed_value(n, n.duration, beat_len),
             }
 
     # Resolve phrase-level octave transpositions so intermediate notes under 8va/8vb
@@ -1042,7 +1131,7 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
                 if n_info["octave_shift"] != 0:
                     other_steps = [info[id(other)]["step_draw"] for other in c_notes if other is not n]
                     if any(abs(n_info["step_draw"] - ost) <= 1 for ost in other_steps):
-                        step_nat, _ = diatonic_step(n.pitch)
+                        step_nat, _ = written_step(n)
                         n_info["step_draw"] = step_nat
                         n_info["octave_shift"] = 0
                         n_info["label"] = ""
@@ -1069,9 +1158,8 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
     def note_head_reach(n: Note) -> float:
         """How far to the left of its x a note's ink reaches (its accidental, if any)."""
         mag = notation.GRACE_MAG if id(n) in grace_ids else 1.0
-        if diatonic_step(n.pitch)[1]:
-            return s * 0.8 * mag
-        return 0.0
+        acc_w = accidental_width_sp(n)
+        return (acc_w * s + notation.ACC_DIST_SP * s) * mag if acc_w else 0.0
 
     def note_tail_reach(n: Note) -> float:
         """How far to the right of its x a note's ink reaches (notehead, dot, flag)."""
@@ -1081,7 +1169,7 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
             l, _t, r, _b = notation.HEAD_BOX[head]
             return (r - l) * s * 0.5 * notation.GRACE_MAG
         tail = nw
-        nv = note_value(n.duration, beat_len)
+        nv = printed_value(n, n.duration, beat_len)
         if nv in (DOTTED_HALF, DOTTED_QUARTER, DOTTED_EIGHTH):
             tail = nw + s * 0.6
         elif nv in (EIGHTH, SIXTEENTH):
@@ -1114,8 +1202,9 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
                 half = (right - left) * s / 2.0 * mag
                 # ledger lines reach a legerLineExtension past the head on each side
                 r = half + notation.LEDGER_EXT_SP * s * mag
-                if diatonic_step(n.pitch)[1]:       # the sharp, left of the head
-                    r = max(r, half + (right - left) * s * mag + notation.ACC_DIST_SP * s * mag)
+                if has_accidental(n):               # the accidental, left of the head
+                    r = max(r, half + (right - left) * s * mag + notation.ACC_DIST_SP * s * mag
+                            + accidental_extra_sp(n) * s * mag)
                 reach = max(reach, r)
             return reach
 
@@ -1203,8 +1292,9 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
         l, _t, r, _b = notation.HEAD_BOX[head]
         mag = notation.GRACE_MAG
         half = (r - l) * s * 0.5 * mag
-        if diatonic_step(n.pitch)[1]:
-            return x - (half + (r - l) * s * mag + notation.ACC_DIST_SP * s * mag)
+        if has_accidental(n):
+            acc_w = accidental_extra_sp(n)
+            return x - (half + (r - l) * s * mag + notation.ACC_DIST_SP * s * mag + acc_w * s * mag)
         return x - half
 
     if bar_times:
@@ -1214,8 +1304,9 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
         m_clef = info[id(main)]["clef"]
         m_head = note_shape(main.duration, beat_len)[0]
         ml, _mt, mr, _mb = notation.HEAD_BOX[m_head]
-        if diatonic_step(main.pitch)[1]:
-            m_left = (mr - ml) * s * 1.5 + notation.ACC_DIST_SP * s  # its sharp sits left too
+        if has_accidental(main):
+            m_left = ((mr - ml) * s * 1.5 + notation.ACC_DIST_SP * s
+                      + accidental_extra_sp(main) * s)   # its accidental sits left too
         else:
             m_left = (mr - ml) * s * 0.5
         # grace struck together share one x, like the notes of any chord
@@ -1662,8 +1753,8 @@ class StaffView:
                     for n in sys_pieces:
                         i = notes_info[id(n)]
                         ny_ = note_y(i["step_draw"], i["clef"], treble_mid_y, bass_mid_y, s)
-                        hw = round(nw * 1.15) if note_value(n.duration,
-                                                             get_beat_duration(self.song, n.start)) == WHOLE else nw
+                        hw = round(nw * 1.15) if printed_value(n, n.duration,
+                                                              get_beat_duration(self.song, n.start)) == WHOLE else nw
                         all_heads.append((i["x"] - hw, i["x"] + hw, ny_ - nh, ny_ + nh, id(n)))
                     heads = NoteHeads(all_heads)
 
@@ -1711,11 +1802,11 @@ class StaffView:
                             # and the other side is clear, and only then, so a chord with
                             # nothing in the way keeps the direction the engraver chose.
                             # A beamed chord is settled with its group instead (below).
-                            if (note_value(c_notes[0].duration, beat_len) != WHOLE
+                            if (printed_value(c_notes[0], c_notes[0].duration, beat_len) != WHOLE
                                     and not any(id(n) in beamed_note_ids for n in c_notes)):
                                 own_c = {id(n) for n in c_notes}
                                 cx = notes_info[id(c_notes[0])]["x"]
-                                flags = max(notation.note_shape(n.duration, beat_len)[1]
+                                flags = max(printed_shape(n, n.duration, beat_len)[1]
                                             for n in c_notes)
                                 near = heads.near(cx - nw - s, cx + nw + 2 * s)
                                 up_hit = place_stem(chord_stem_up, cx, y_top, y_bot,
@@ -1769,7 +1860,7 @@ class StaffView:
                             x = notes_info[id(sub[0])]["x"]
                             y_top = min(notes_info[id(n)]["y_top"] for n in sub)
                             y_bot = max(notes_info[id(n)]["y_bot"] for n in sub)
-                            is16 = any(note_value(n.duration, get_beat_duration(self.song, n.start)) == SIXTEENTH
+                            is16 = any(printed_value(n, n.duration, get_beat_duration(self.song, n.start)) == SIXTEENTH
                                        for n in sub)
                             stops.append((x, y_top, y_bot, is16))
 
@@ -1876,7 +1967,8 @@ class StaffView:
                         nx = n_info["x"]
                         clef = n_info["clef"]
                         step = n_info["step_draw"]
-                        _, is_sharp = diatonic_step(n.pitch)
+                        _, alter = written_step(n)
+                        accidental = alter if alter else None
                         ny = note_y(step, clef, treble_mid_y, bass_mid_y, s)
 
                         sounding = (id(n) in active_ids) or (n.start <= t < n.end)
@@ -1890,7 +1982,7 @@ class StaffView:
                         nh_g = round(g_s * 0.52)
 
                         b_len = get_beat_duration(self.song, n.start)
-                        shape = note_shape(n.duration, b_len)
+                        shape = printed_shape(n, n.duration, b_len)
                         if is_grace:
                             shape = (shape[0], 0, shape[2])   # the stroke replaces its flags
                         head_half = notation.HEAD_BOX[shape[0]][2] * 0.5 * g_s
@@ -1949,7 +2041,7 @@ class StaffView:
                         notation.draw_staff_note(staff_surf, nx, ny, g_s, shape, hand_col, stem_up,
                                                  sounding, stem=stem,
                                                  beamed=id(n) in beamed_note_ids,
-                                                 sharp=is_sharp, on_line=(step % 2 == 0),
+                                                 accidental=accidental, on_line=(step % 2 == 0),
                                                  grace=is_grace)
 
                     # Ties: after the noteheads, so the crescent reads over the ink, the way
@@ -1974,7 +2066,7 @@ class StaffView:
                         # one y for both ends - the pieces share a pitch, so they sit at the
                         # same height; the offset lifts the crescent to the notehead's outer
                         # edge, clear of the head, on the side the tie goes
-                        head = note_shape(left.duration, get_beat_duration(self.song, left.start))[0]
+                        head = printed_shape(left, left.duration, get_beat_duration(self.song, left.start))[0]
                         head_half = notation.HEAD_BOX[head][2] * 0.5 * s
                         side = -1.0 if up else 1.0
                         y = note_y(li["step_draw"], li["clef"], treble_mid_y, bass_mid_y, s) \

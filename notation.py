@@ -72,6 +72,10 @@ LEDGER_EXT_SP = ENGRAVING["ledgerLineLength"]
 DOT_DIST_SP = ENGRAVING["dotNoteDistance"]
 DOT_GAP_SP = ENGRAVING["dotDotDistance"]
 ACC_DIST_SP = ENGRAVING["accidentalNoteDistance"]
+# The accidental a written <alter> asks for: -2 a double flat .. +2 a double sharp,
+# 0 a natural (a score spells one out where a bar's earlier note changed the pitch).
+ACCIDENTAL_GLYPHS = {-2: "accidentalDoubleFlat", -1: "accidentalFlat", 0: "accidentalNatural",
+                     1: "accidentalSharp", 2: "accidentalDoubleSharp"}
 GRACE_MAG = ENGRAVING["graceNoteMag"]
 GRACE_TO_MAIN_SP = ENGRAVING["graceToMainNoteDist"]
 GRACE_TO_GRACE_SP = ENGRAVING["graceToGraceNoteDist"]
@@ -124,7 +128,11 @@ GLYPHS = {
     "noteheadWhole": 0xE0A2,
     "noteheadHalf": 0xE0A3,
     "noteheadBlack": 0xE0A4,
+    "accidentalFlat": 0xE260,
+    "accidentalNatural": 0xE261,
     "accidentalSharp": 0xE262,
+    "accidentalDoubleSharp": 0xE263,
+    "accidentalDoubleFlat": 0xE264,
     "augmentationDot": 0xE1E7,
     "flag8thUp": 0xE240,
     "flag8thDown": 0xE241,
@@ -544,7 +552,7 @@ def _dots(surf, sp, x_head_right, y, count, color):
 
 def draw_staff_note(surf, x, y, sp, shape, color, stem_up, sounding=False,
                     stem=None, beamed=False, sharp=False, on_line=False,
-                    grace=False):
+                    grace=False, accidental=None):
     """
     A note on the staff, MuseScore's way: the accidental, the notehead, the dots and
     the stem with its flags (TDraw::draw(const ShadowNote*), tdraw.cpp:2598-2695).
@@ -554,28 +562,34 @@ def draw_staff_note(surf, x, y, sp, shape, color, stem_up, sounding=False,
     notes of a chord share one stem and a beamed note's stem reaches its beam; None
     leaves the stem, and its flags, out (a whole note, or a chord's other notes).
     `beamed`: this note's flags are a beam's, which the caller draws.
-    `sharp`: draw the accidental left of the head. `on_line`: the note is on a line,
-    so its dot rises into the space above (tdraw.cpp:2648). A sounding note is drawn
-    lighter, as the staff has always drawn it.
+    `sharp`: draw a sharp left of the head (kept for callers that still pass it);
+    `accidental`, when given, is the semitones to draw instead - +1 a sharp, -1 a
+    flat, 0 a natural, +2 / -2 the doubles - what a MusicXML score's own spelling
+    asks for. `on_line`: the note is on a line, so its dot rises into the space
+    above (tdraw.cpp:2648). A sounding note is drawn lighter, as the staff has
+    always drawn it.
     `grace`: a grace note drawn at graceNoteMag by the caller; a flagless one is an
     acciaccatura, and gets MuseScore's stroke across its stem instead of a flag.
 
     Without the font this draws the plain ellipses it drew before Leland.
     """
+    if accidental is None:
+        accidental = 1 if sharp else None
     if sounding:
         color = mix(color, (255, 255, 255), 0.5)
     head, flags, dots = shape
     g = glyph(HEADS[head], sp, color)
     if g is None:
-        _fallback_staff_note(surf, x, y, sp, shape, color, stem_up, stem, sharp, on_line)
+        _fallback_staff_note(surf, x, y, sp, shape, color, stem_up, stem,
+                             accidental is not None, on_line, accidental)
         return
 
     box = HEAD_BOX[head]
     ox = x - (box[2] - box[0]) * sp / 2.0 - box[0] * sp      # the head is centred on (x, y)
     oy = y - (box[1] + box[3]) * sp / 2.0
 
-    if sharp:                                               # the accidental, left of the head
-        acc = glyph("accidentalSharp", sp, color)
+    if accidental is not None:                              # the accidental, left of the head
+        acc = glyph(ACCIDENTAL_GLYPHS.get(accidental, "accidentalSharp"), sp, color)
         if acc is not None:
             acc.draw(surf, ox - (box[2] - box[0]) * sp - ACC_DIST_SP * sp, oy)
 
@@ -593,18 +607,37 @@ def draw_staff_note(surf, x, y, sp, shape, color, stem_up, sounding=False,
             _stem_slash(surf, sp, ox + ax * sp, stem[1], stem_up, color)
 
 
-def _fallback_staff_note(surf, x, y, sp, shape, color, stem_up, stem, sharp, on_line):
+def _fallback_staff_note(surf, x, y, sp, shape, color, stem_up, stem, sharp, on_line,
+                         accidental=None):
     """A staff note as it was drawn before the music font: an ellipse, a line, a dot."""
     head, flags, dots = shape
     hw = round(sp * (0.65 if head == "black" else 0.75))
     hh = round(sp * 0.53)
     box = pygame.Rect(round(x - hw), round(y - hh), hw * 2, hh * 2)
-    if sharp:
-        ax, ay, w, h = x - hw - round(sp * 0.8), y, sp * 0.3, sp * 0.45
-        pygame.draw.line(surf, color, (round(ax - w), round(ay - h)), (round(ax - w), round(ay + h)), 1)
-        pygame.draw.line(surf, color, (round(ax + w), round(ay - h)), (round(ax + w), round(ay + h)), 1)
-        pygame.draw.line(surf, color, (round(ax - w * 2), round(ay - h * 0.4)), (round(ax + w * 2), round(ay - h)), 2)
-        pygame.draw.line(surf, color, (round(ax - w * 2), round(ay + h * 0.2)), (round(ax + w * 2), round(ay - h * 0.2)), 2)
+    if accidental is None:
+        accidental = 1 if sharp else None
+    if accidental:                                  # a plain sign, left of the head
+        ax, w, h = x - hw - round(sp * 0.8), sp * 0.3, sp * 0.45
+        if accidental > 0:                          # a sharp (the doubles: two of them)
+            for k in range(abs(accidental)):
+                ax -= k * w * 1.4
+                pygame.draw.line(surf, color, (round(ax - w), round(y - h)), (round(ax - w), round(y + h)), 1)
+                pygame.draw.line(surf, color, (round(ax + w), round(y - h)), (round(ax + w), round(y + h)), 1)
+                pygame.draw.line(surf, color, (round(ax - w * 2), round(y - h * 0.4)), (round(ax + w * 2), round(y - h)), 2)
+                pygame.draw.line(surf, color, (round(ax - w * 2), round(y + h * 0.2)), (round(ax + w * 2), round(y - h * 0.2)), 2)
+        else:                                       # a flat (or, at 0, a natural)
+            for k in range(abs(accidental) or 1):
+                ax -= k * w * 1.4
+                if accidental == 0:                 # natural: two uprights and two arms
+                    pygame.draw.line(surf, color, (round(ax - w), round(y - h)), (round(ax - w), round(y + h)), 1)
+                    pygame.draw.line(surf, color, (round(ax + w), round(y - h * 0.7)), (round(ax + w), round(y + h * 0.7)), 1)
+                    pygame.draw.line(surf, color, (round(ax - w), round(y + h * 0.3)), (round(ax + w), round(y - h * 0.1)), 2)
+                    pygame.draw.line(surf, color, (round(ax - w), round(y + h * 0.6)), (round(ax + w), round(y + h * 0.2)), 2)
+                else:                           # flat: an upright with a rounded belly
+                    pygame.draw.line(surf, color, (round(ax - w), round(y - h)), (round(ax - w), round(y + h)), 2)
+                    pygame.draw.arc(surf, color,
+                                    pygame.Rect(round(ax - w), round(y), round(2 * w), round(h * 1.4)),
+                                    math.pi, 2 * math.pi, 2)
     if head == "black":
         pygame.draw.ellipse(surf, color, box)
         pygame.draw.ellipse(surf, mix(color, (0, 0, 0), 0.4), box, 1)
