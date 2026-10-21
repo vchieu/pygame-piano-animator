@@ -456,7 +456,7 @@ def _part_hands(parts) -> List[Optional[str]]:
 
 
 def _read_all_parts(parts, order: List[int], hands: List[Optional[str]],
-                    notes: List[Note]) -> float:
+                    notes: List[Note], staff_from_file: bool = True) -> float:
     """
     Read every part together, measure by measure, in playing order.
 
@@ -488,7 +488,7 @@ def _read_all_parts(parts, order: List[int], hands: List[Optional[str]],
             if idx >= len(its):
                 continue
             length = max(length, _read_measure(its[idx].elem, tempo, div, at, i,
-                                               hands[i], notes, ties[i]))
+                                               hands[i], notes, ties[i], staff_from_file))
         div += _measure_span(part_measures, idx, tempo.divisions)
         at += length
     return at
@@ -532,7 +532,7 @@ def _measure_divisions(measure, divisions: int) -> int:
 
 def _read_measure(measure, tempo: _Tempo, start_div: int, at: float,
                   part_index: int, hand: Optional[str],
-                  notes: List[Note], ties: dict) -> float:
+                  notes: List[Note], ties: dict, staff_from_file: bool = True) -> float:
     """
     Read one measure's notes into `notes`; returns its length in seconds.
 
@@ -576,7 +576,7 @@ def _read_measure(measure, tempo: _Tempo, start_div: int, at: float,
         alter = _int(pitch_el, "alter", 0) or 0
         pitch = _fit_to_piano((octave + 1) * 12 + STEP_SEMITONES[step_name] + alter)
         staff = _int(c, "staff")
-        note_hand = _note_hand(staff, hand)
+        note_hand = _note_hand(staff if staff_from_file else None, hand)
         start = at + tempo.sec(start_div + onset) - origin
         end = start + (GRACE_DURATION if is_grace
                        else max(0.0, tempo.sec(start_div + onset + dur)
@@ -659,7 +659,7 @@ def load_musicxml(path: str, hands_from_file: bool = True, fingering: str = "fil
 
         notes: List[Note] = []
         tracks: List[TrackInfo] = []
-        duration = _read_all_parts(parts, order, part_hand, notes)
+        duration = _read_all_parts(parts, order, part_hand, notes, hands_from_file)
         for i in range(len(parts)):
             hand = part_hand[i] if hands_from_file else None
             tracks.append(TrackInfo(i, (names[i] if i < len(names) else "") or f"Part {i + 1}",
