@@ -586,7 +586,11 @@ def _read_measure(measure, tempo: _Tempo, start_div: int, at: float,
                  _fingering(c), False, octave * 7 + "CDEFGAB".index(step_name), alter,
                  _printed_value(c))
         starts, ends = _tie(c)
-        key = (staff or 1, voice, pitch)
+        # A tie runs between notes of the same voice and pitch. The staff is not
+        # part of the key: a grand staff writes the hands as different voices
+        # (1/2 up, 5/6 down), and keying on the staff too would break the tie
+        # the moment a hand is re-written into <staff> on export.
+        key = (voice, pitch)
         if ends:
             prev = ties.pop(key, None)
             if prev is not None:
@@ -840,48 +844,118 @@ def _set_fingering(note_elem, finger):
             note_elem.remove(notations)
 
 
+def _note_start(measure, measure_at: float, start_div: int, tempo: _Tempo):
+    """
+    (note element, its start in seconds) for each <note> of a measure, in the
+    order _read_measure reads them: the cursor advances note by note, a <chord>
+    note keeps the note before it's onset, a <backup>/<forward> moves the cursor
+    (that is how one measure holds several voices), and a <grace> note takes no
+    time. This is how the loaded Note knows its start, so the two can be paired.
+    """
+    origin = tempo.sec(start_div)
+    cursor = 0
+    prev_onset = 0
+    out = []
+    for c in measure:
+        tag = _local(c.tag)
+        if tag in ("backup", "forward"):
+            n = _num(c, "duration") or 0
+            cursor += -n if tag == "backup" else n
+            cursor = max(0, cursor)
+            continue
+        if tag != "note" or _kid(c, "pitch") is None:
+            continue
+        dur = 0 if _kid(c, "grace") is not None else (_num(c, "duration") or 0)
+        if _kid(c, "chord") is not None:
+            onset = prev_onset
+        else:
+            onset = cursor
+            prev_onset = onset
+            cursor += dur
+        out.append((c, measure_at + tempo.sec(start_div + onset) - origin))
+    return out
+
+
+def _score_note_times(parts, order):
+    """
+    [(part index, note element, start in seconds)] for the whole score, in the
+    order the loader reads it, so a <note> can be paired with its loaded Note by
+    (part, pitch, start) - the same (pitch, start) key save_fingered_midi uses.
+    A measure played twice (a repeat) is walked once: the score writes it once,
+    so only the first pass's note is in the file to finger.
+    """
+    part_measures = [[_Measure(m) for m in _kids(p, "measure")] for p in parts]
+    tempo = _Tempo()
+    at = 0.0
+    div = 0
+    done = []
+    out = []
+    for idx in order:
+        if idx in done:
+            continue
+        done.append(idx)
+        present = [its[idx].elem for its in part_measures if idx < len(its)]
+        if not present:
+            continue
+        for measure in present:
+            _apply_tempo(measure, div, tempo)
+            for attributes in _kids(measure, "attributes"):
+                d = _int(attributes, "divisions")
+                if d:
+                    tempo.set_divisions(d, div)
+        length = 0.0
+        for i, its in enumerate(part_measures):
+            if idx >= len(its):
+                continue
+            rows = _note_start(its[idx].elem, at, div, tempo)
+            for c, start in rows:
+                out.append((i, c, start))
+            length = max(length, tempo.sec(div + _measure_divisions(its[idx].elem, tempo.divisions))
+                         - tempo.sec(div))
+        div += _measure_span(part_measures, idx, tempo.divisions)
+        at += length
+    return out
+
+
 def _write_fingers(root, notes, fingers):
     """
     Put each note's hand and finger into the score's own <note> elements, in
-    place. Notes are matched to the loaded ones by (part, <staff>, <voice>,
-    pitch); a repeated measure's notes are consumed first play first. Returns
-    how many note elements were fingered.
+    place. Each <note> is paired with the loaded Note it produced by (part,
+    pitch, start in seconds) - the same key save_fingered_midi uses - so notes
+    of the same pitch in one measure (different voices, or two hands) keep their
+    own mark. A note the editor added has no <note> of its own and is skipped.
+    Returns how many note elements were fingered.
     """
-    by_part = {}
+    parts = _kids(root, "part")
+    if not parts:
+        return 0
+    part_measures = [[_Measure(m) for m in _kids(p, "measure")] for p in parts]
+    order = play_order(max(part_measures, key=len), [])
+    times = _score_note_times(parts, order)
+
+    index = {}
     for n in notes:
-        by_part.setdefault(n.track, []).append(n)
-    for ps in by_part.values():
-        ps.sort(key=lambda n: n.start)
+        index.setdefault((n.track, n.pitch, round(n.start * 1000)), []).append(n)
     used = set()
     marked = 0
-    parts = _kids(root, "part")
-    for pi, part in enumerate(parts):
-        group = by_part.get(pi, [])
-        index = {}
-        for n in group:
-            index.setdefault(n.pitch, []).append(n)
-        for measure in _kids(part, "measure"):
-            for c in measure:
-                if _local(c.tag) != "note":
-                    continue
-                pitch_el = _kid(c, "pitch")
-                if pitch_el is None:                      # a rest: nothing to finger
-                    continue
-                step = (_text(pitch_el, "step") or "").upper()
-                octave = _int(pitch_el, "octave")
-                if step not in STEP_SEMITONES or octave is None:
-                    continue
-                alter = _int(pitch_el, "alter", 0) or 0
-                pitch = _fit_to_piano((octave + 1) * 12 + STEP_SEMITONES[step] + alter)
-                n = next((x for x in index.get(pitch, []) if id(x) not in used), None)
-                if n is None:                             # a note the editor added: no <note> of its own
-                    continue
-                used.add(id(n))
-                _set_staff(c, n.hand)
-                f = fingers.get(id(n)) if fingers is not None else None
-                _set_fingering(c, f)
-                if f:
-                    marked += 1
+    for pi, c, start in times:
+        pitch_el = _kid(c, "pitch")
+        step = (_text(pitch_el, "step") or "").upper()
+        octave = _int(pitch_el, "octave")
+        if step not in STEP_SEMITONES or octave is None:
+            continue
+        alter = _int(pitch_el, "alter", 0) or 0
+        pitch = _fit_to_piano((octave + 1) * 12 + STEP_SEMITONES[step] + alter)
+        pool = index.get((pi, pitch, round(start * 1000)), [])
+        n = next((x for x in pool if id(x) not in used), None)
+        if n is None:                       # a note the editor added, or a shifted one
+            continue
+        used.add(id(n))
+        _set_staff(c, n.hand)
+        f = fingers.get(id(n)) if fingers is not None else None
+        _set_fingering(c, f)
+        if f:
+            marked += 1
     return marked
 
 
