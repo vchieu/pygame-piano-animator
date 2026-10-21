@@ -61,6 +61,13 @@ class Note:
     hand: str         # LEFT or RIGHT (from track names/registers, else hand_split.py)
     finger: Optional[int] = None   # 1..5 when the file carries fingering (see below)
     gliss: bool = False            # part of a glissando marked in the file ("Rg" / "Lg")
+    # How the score wrote this note (MusicXML only; None for MIDI and PIG). The
+    # MIDI number cannot tell C# from Db or a quarter note from four sixteenths
+    # written as a quarter, so a score that says exactly keeps what it said and
+    # staff.py prints that instead of falling back to pitch % 12 and the length.
+    step: Optional[int] = None     # written diatonic step (octave * 7 + C..B); None = from pitch
+    alter: int = 0                 # -2..+2 semitones written beside `step` (a flat is -1)
+    printed: Optional[str] = None  # written note value ("quarter", "eighth", ...); None = from length
 
     @property
     def duration(self) -> float:
