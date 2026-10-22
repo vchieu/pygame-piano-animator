@@ -1,12 +1,14 @@
 """
 Reading and writing MusicXML scores (musicxml_loader.py), against small scores
-the tests write themselves - no local data needed.
+the tests write themselves - no local data needed, except for the one tuplet
+check that reads the real MIDIs/Khong-mon-dang-ho-doi.mxl.
 """
 import os
 import zipfile
 
 import pytest
 
+from conftest import midi_path
 from midi_loader import LEFT, RIGHT, load_song
 
 from musicxml_loader import (is_musicxml, load_musicxml, read_root, save_musicxml,
@@ -25,8 +27,11 @@ HEADER = ('<?xml version="1.0" encoding="UTF-8"?>\n'
 
 
 def note(step="C", octave=4, dur=4, type_="quarter", alter=0, staff=None, voice=None,
-         chord=False, rest=False, grace=False, dot=False, finger=None, tie=None):
-    """One <note> element's XML."""
+         chord=False, rest=False, grace=False, dot=False, finger=None, tie=None,
+         tuplet=None):
+    """One <note> element's XML. `tuplet` is (num, kind): the <time-modification>'s
+    <actual-notes> (with <normal-notes> 2), and the <notations><tuplet type> mark -
+    "start", "stop", or None for a note in the middle of the group."""
     bits = ["<note>"]
     if grace:
         bits.append("<grace/>")
@@ -48,14 +53,20 @@ def note(step="C", octave=4, dur=4, type_="quarter", alter=0, staff=None, voice=
     bits.append(f"<type>{type_}</type>")
     if dot:
         bits.append("<dot/>")
+    if tuplet is not None:
+        num, kind = tuplet
+        bits.append(f"<time-modification><actual-notes>{num}</actual-notes>"
+                    "<normal-notes>2</normal-notes></time-modification>")
     if staff is not None:
         bits.append(f"<staff>{staff}</staff>")
-    if tie or finger:
+    if tie or finger or (tuplet and tuplet[1]):
         bits.append("<notations>")
         if tie:
             bits.append(f'<tied type="{tie}"/>')
         if finger:
             bits.append(f"<technical><fingering>{finger}</fingering></technical>")
+        if tuplet and tuplet[1]:
+            bits.append(f'<tuplet type="{tuplet[1]}"/>')
         bits.append("</notations>")
     bits.append("</note>")
     return "".join(bits)
@@ -170,6 +181,50 @@ def test_ties_are_merged(tmp_path):
     c = [n for n in song.notes if n.pitch == 60]
     assert len(c) == 1
     assert c[0].duration == pytest.approx(2.0)       # two tied quarters sound once, 2 s long
+
+
+def test_tuplets_are_read(tmp_path):
+    # A triplet (liên ba): <time-modification><actual-notes> says three written
+    # notes take the time of two - it is on every note of the group - and
+    # <notations><tuplet type="start"> / type="stop" mark the notes that open
+    # and close it. The note in the middle carries the number but no mark, and a
+    # note outside any tuplet keeps the defaults (None, None).
+    body = (note("G", 4, 4, "quarter", tuplet=(3, "start"))
+            + note("C", 5, 4, "quarter", tuplet=(3, None))
+            + note("D", 5, 4, "quarter", tuplet=(3, "stop"))
+            + note("E", 5, 4, "quarter"))
+    p = one_part(tmp_path, measure(body))
+    song = load_musicxml(p)
+    assert [n.tuplet_num for n in song.notes] == [3, 3, 3, None]
+    assert [n.tuplet_type for n in song.notes] == ["start", None, "stop", None]
+
+
+def test_a_tuplets_marks_survive_a_tie_merge(tmp_path):
+    # A tie's stopping note is not drawn - the two tied notes sound once - so a
+    # tuplet mark only that note carries moves onto the note it joined, instead
+    # of disappearing with it.
+    direction = '<direction><sound tempo="60"/></direction>'
+    m1 = measure(note("C", 4, 4, "quarter", tie="start"), number=1, direction=direction)
+    m2 = measure(note("C", 4, 4, "quarter", tie="stop", tuplet=(3, "stop")), number=2)
+    p = one_part(tmp_path, m1 + m2)
+    song = load_musicxml(p)
+    c = [n for n in song.notes if n.pitch == 60]
+    assert len(c) == 1
+    assert c[0].tuplet_type == "stop"                # the merged note carries the mark
+
+
+def test_tuplets_in_khong_mon_dang_ho_doi_measure_51():
+    # The real score: bar 51 holds a triplet of G#4, C#5, D#5 - the first note
+    # opens the group, the last closes it, the middle one only carries the
+    # number. The bar is played twice (a repeat), so the group comes out twice.
+    song = load_musicxml(midi_path("Khong-mon-dang-ho-doi.mxl"))
+    tuplets = sorted((n for n in song.notes if getattr(n, "tuplet_num", None) is not None),
+                     key=lambda n: n.start)
+    assert len(tuplets) == 12                        # four triplet groups, bar 51 among them
+    assert all(n.tuplet_num == 3 for n in tuplets)
+    assert [n.tuplet_type for n in tuplets] == ["start", None, "stop"] * 4
+    # ...and bar 51's own group is the first: G#4, C#5, D#5
+    assert [n.name for n in tuplets[:3]] == ["G#4", "C#5", "D#5"]
 
 
 def test_grace_note_is_short(tmp_path):

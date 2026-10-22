@@ -413,6 +413,29 @@ def _tie(note) -> tuple:
     return starts, ends
 
 
+def _tuplet(note) -> tuple:
+    """
+    (tuplet_num, tuplet_type): the tuplet this note is written in, when the score
+    wrote one.
+
+    <time-modification><actual-notes> says how many written notes take the place
+    of how many (3 in a triplet, against <normal-notes> 2), and it is on every
+    note of the group; <notations><tuplet type="start"> / type="stop"> marks the
+    notes that open and close the group. A note with the number but no mark is
+    one in the middle, so its tuplet_type is None.
+    """
+    num = _int(_kid(note, "time-modification"), "actual-notes")
+    kind = None
+    notations = _kid(note, "notations")
+    if notations is not None:
+        for t in _kids(notations, "tuplet"):
+            typ = t.attrib.get("type")
+            if typ in ("start", "stop"):
+                kind = typ
+                break
+    return num, kind
+
+
 def _mean_pitch(part) -> Optional[float]:
     """The average written pitch of a part (its register), for the part-order rule."""
     ps = []
@@ -611,9 +634,10 @@ def _read_measure(measure, tempo: _Tempo, start_div: int, at: float,
                        else max(0.0, tempo.sec(start_div + onset + dur)
                                 - tempo.sec(start_div + onset)))
         voice = _text(c, "voice") or ""
+        tuplet_num, tuplet_type = _tuplet(c)
         n = Note(pitch, start, end, _velocity(c, DEFAULT_VELOCITY), part_index, note_hand,
                  _fingering(c), False, octave * 7 + "CDEFGAB".index(step_name), alter,
-                 _printed_value(c))
+                 _printed_value(c), tuplet_num, tuplet_type)
         if is_grace:
             # A grace note has no <duration>: every grace of a measure lands on the
             # same cursor. They are placed once their main note is seen, so a run of
@@ -634,6 +658,11 @@ def _read_measure(measure, tempo: _Tempo, start_div: int, at: float,
             prev = ties.pop(key, None)
             if prev is not None:
                 held = replace(prev, end=max(prev.end, end))
+                # replace() keeps the held note's own fields; a tuplet mark only
+                # the dropped stop note carries (a tie running through a tuplet's
+                # start or stop note) moves over, or it would never be seen.
+                if tuplet_type is not None and held.tuplet_type is None:
+                    held = replace(held, tuplet_num=tuplet_num, tuplet_type=tuplet_type)
                 for k, old in enumerate(notes):
                     if old is prev:
                         notes[k] = held

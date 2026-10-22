@@ -90,6 +90,9 @@ def test_glyph_codepoints_are_smufl():
     assert notation.GLYPHS["fClef"] == 0xE062
     assert notation.GLYPHS["timeSig4"] == 0xE084
     assert [notation.GLYPHS[f"timeSig{d}"] for d in range(10)] == list(range(0xE080, 0xE08A))
+    # ...and the tuplets' digits (SMuFL "Tuplets", U+E880-U+E889) - a triplet's "3",
+    # in the heavier weight a bracket's number is engraved in
+    assert [notation.GLYPHS[f"tuplet{d}"] for d in range(10)] == list(range(0xE880, 0xE88A))
 
 
 # --------------------------------------------------------------------------- #
@@ -397,6 +400,82 @@ def test_a_ties_arc_depth_follows_its_length(screen):
         ys.append(y - min(yy for _, yy in ink))
     assert ys[0] < ys[1] < ys[2] or ys[0] == ys[1] < ys[2]
     assert all(d >= notation.TIE_MIN_SHOULDER_SP * sp - 1 for d in ys)
+
+
+# --------------------------------------------------------------------------- #
+# The tuplets
+# --------------------------------------------------------------------------- #
+def test_a_tuplet_bracket_is_a_line_with_a_gap_and_legs(screen):
+    # `┌── 3 ──┐`: the line runs from the group's first notehead to its last, with
+    # a gap at the middle for the number, and a short leg at each end reaching
+    # towards the notes - down when the stems point up, up when they point down.
+    sp, x0, x1, y = 12.0, 100, 300, 200
+    leg = round(notation.TUPLET_LEG_SP * sp)
+
+    surf = _paper((400, 300))
+    notation.draw_tuplet_bracket(surf, sp, x0, x1, y, "3", (20, 20, 30), stem_up=True)
+    ink = _ink(surf, PAPER)
+    assert ink
+    # the line starts at both ends of the group's reach ...
+    assert any(xx == x0 and yy == y for xx, yy in ink)
+    assert any(xx == x1 and yy == y for xx, yy in ink)
+    # ...but is broken at the middle, where the number stands in the gap
+    row = {xx for xx, yy in ink if yy == y}
+    holes = [xx for xx in range(x0 + 1, x1) if xx not in row]
+    cx = (x0 + x1) // 2
+    assert holes and holes[0] < cx < holes[-1]
+    # the number itself is drawn at the middle, on the line
+    assert any(abs(xx - cx) <= 8 and abs(yy - y) <= notation.NOTEHEAD_H_SP * sp
+               for xx, yy in ink)
+    # the legs drop towards the notes, TUPLET_LEG_SP below the line
+    assert y + leg in {yy for xx, yy in ink if xx == x0}
+    assert y + leg in {yy for xx, yy in ink if xx == x1}
+
+    # stems pointing down: the bracket goes under them, legs rising
+    surf = _paper((400, 300))
+    notation.draw_tuplet_bracket(surf, sp, x0, x1, y, "3", (20, 20, 30), stem_up=False)
+    ink = _ink(surf, PAPER)
+    assert y - leg in {yy for xx, yy in ink if xx == x0}
+    # ...and no leg drops below the line (its own thickness aside)
+    thick = max(1, round(notation.STEM_SP * sp * 1.3)) // 2 + 1
+    assert not any(yy > y + thick for xx, yy in ink if xx in (x0, x1))
+
+
+def test_the_tuplet_number_falls_back_to_the_ui_font_without_the_music_font(no_font, screen):
+    # no music font: the bracket is still drawn, and its number in the UI font -
+    # the count is what has to be there.
+    surf = _paper((400, 300))
+    notation.draw_tuplet_bracket(surf, 12.0, 100, 300, 200, "3", (20, 20, 30))
+    ink = _ink(surf, PAPER)
+    assert any(xx == 100 and yy == 200 for xx, yy in ink)          # the line is drawn
+    assert any(abs(xx - 200) <= 10 and abs(yy - 200) <= 12 for xx, yy in ink)   # ...and the 3
+
+
+def test_the_staff_finds_and_draws_tuplet_groups(screen):
+    # A triplet's group comes off the score's own marks: <time-modification>'s
+    # number on every note, the start/stop marks on the notes that open and
+    # close it - and the bracket is drawn over the group.
+    from midi_loader import RIGHT, Note
+    kinds = ["start", None, "stop"]
+    notes = [Note(p, i * 0.2, i * 0.2 + 0.15, 80, 0, RIGHT, tuplet_num=3, tuplet_type=k)
+             for i, (p, k) in enumerate(zip((68, 73, 75), kinds))]  # G#4, C#5, D#5
+    info = staff.compute_notes_info(notes, 0.0, 1.0, 600.0, staff.MARGIN_LEFT, 10.0)
+
+    groups = staff.find_tuplet_groups(notes, info)
+    assert len(groups) == 1
+    grp, num = groups[0]
+    assert [n.name for n in grp] == ["G#4", "C#5", "D#5"]
+    assert num == "3"
+    xs = [info[id(n)]["x"] for n in grp]
+    assert max(xs) - min(xs) > 0                     # spread over the group's reach
+
+    surf = _paper((900, 400))
+    staff.draw_tuplet_brackets(surf, info, notes, 120.0, 220.0, 10.0)
+    ink = _ink(surf, PAPER)
+    assert ink                                       # the bracket was drawn
+    # over the whole group: from its first notehead's left to its last one's right
+    assert min(xx for xx, _ in ink) <= min(xs)
+    assert max(xx for xx, _ in ink) >= max(xs)
 
 
 # --------------------------------------------------------------------------- #

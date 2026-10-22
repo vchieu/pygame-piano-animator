@@ -30,8 +30,13 @@ import math
 
 import pygame
 
+try:
+    import pygame.freetype    # `import pygame` alone does not load it in every pygame
+except ImportError:           # build: without it the music font simply never opens,
+    pass                      # and every painter falls back to its plain shapes
+
 import paths
-from common import mix
+from common import mix, ui_font
 
 # --------------------------------------------------------------------------- #
 # MuseScore's metrics
@@ -94,6 +99,10 @@ TIE_SHOULDER_W = 0.6
 # TLayout::layoutStemSlash pulls a slash with no hook to reach for to 0.66 of
 # stemSlashPosition, closer to the stem's tip (tlayout.cpp:5393,5408).
 STEM_SLASH_HEIGHT_REDUCTION = 0.66
+# A tuplet's bracket: how far its legs reach towards the notes, and the white the
+# line keeps either side of the number standing in the gap at its middle.
+TUPLET_LEG_SP = 0.4
+TUPLET_GAP_SP = 0.35
 
 # The noteheads Leland draws, and each one's ink box in sp (bBoxSW..bBoxNE, y up,
 # from fonts/leland/leland_metadata.json): black and half 1.300 x 1.060 sp, whole
@@ -154,6 +163,18 @@ GLYPHS = {
     "timeSig7": 0xE087,
     "timeSig8": 0xE088,
     "timeSig9": 0xE089,
+    # The tuplets' digits (SMuFL "Tuplets", U+E880-U+E889): a triplet's "3" over
+    # its bracket, in the tuplets' own weight - heavier than a time signature's.
+    "tuplet0": 0xE880,
+    "tuplet1": 0xE881,
+    "tuplet2": 0xE882,
+    "tuplet3": 0xE883,
+    "tuplet4": 0xE884,
+    "tuplet5": 0xE885,
+    "tuplet6": 0xE886,
+    "tuplet7": 0xE887,
+    "tuplet8": 0xE888,
+    "tuplet9": 0xE889,
 }
 # A stem's flags, by how many the note has: the 16th-note glyph carries both of
 # them, as in MuseScore, where a stem has a single Hook (hook.cpp:symIdForHookIndex).
@@ -218,10 +239,13 @@ def _load_font():
             pygame.register_quit(clear_cache)
             _quit_hooked = True
         try:
-            pygame.freetype.init()             # in case the app never called pygame.init()
-            _font = pygame.freetype.Font(paths.resource("assets", "fonts", FONT_FILE),
-                                         int(REF_SP * SP_PER_EM))
-        except (pygame.error, OSError, RuntimeError):
+            freetype = getattr(pygame, "freetype", None)     # a build without it: no font
+            if freetype is None:
+                raise OSError("pygame.freetype is not available")
+            freetype.init()             # in case the app never called pygame.init()
+            _font = freetype.Font(paths.resource("assets", "fonts", FONT_FILE),
+                                  int(REF_SP * SP_PER_EM))
+        except (pygame.error, OSError, RuntimeError, AttributeError):
             _font = False                    # tried and missing: don't try again
     return _font or None
 
@@ -665,3 +689,72 @@ def ledger_line(surf, x0, x1, y, sp, color):
     """A ledger line: MuseScore's thickness (ledgerLineWidth), flat-capped (tdraw.cpp:2185-2201)."""
     pygame.draw.line(surf, color, (round(x0), round(y)), (round(x1), round(y)),
                      max(1, round(LEDGER_SP * sp)))
+
+
+def _tuplet_number_glyphs(num_str, sp, color):
+    """The glyphs of a tuplet's number, one per digit: the tuplets' own digits (the
+    weight a bracket's number is engraved in), the time signature's as the second
+    choice. None when neither is there, so the caller draws the number in the UI
+    font instead - the count is what has to be there, with or without the music font."""
+    glyphs = []
+    for d in num_str:
+        g = glyph(f"tuplet{d}", sp, color)
+        if g is None:
+            g = glyph(f"timeSig{d}", sp, color)
+        glyphs.append(g)
+    return glyphs if all(g is not None for g in glyphs) else None
+
+
+def draw_tuplet_bracket(surf, s, x0, x1, y, num_str, color, stem_up=True):
+    """
+    A tuplet's bracket: the line over (or under) a triplet's notes with the number
+    in the gap at its middle - `┌── 3 ──┐`, with a short leg at each end reaching
+    towards the notes.
+
+    `x0`..`x1` is the group's reach (its first and last notehead) and `y` where the
+    bracket's line stands - clear of the ink on the side the group's stems point to.
+    `stem_up` says which side that is: with the stems up the bracket stands above
+    the notes and its legs drop towards them, with them down it stands below and
+    the legs rise. The number is centred between the two ends, drawn with the
+    tuplets' own digits (SMuFL U+E880-U+E889), falling back to the time
+    signature's digits and then the UI font.
+    """
+    x0, x1 = sorted((float(x0), float(x1)))
+    y = float(y)
+    text = str(num_str)
+    line_w = max(1, round(STEM_SP * s * 1.3))
+
+    # The number's own width, so the line knows where its gap is.
+    glyphs = _tuplet_number_glyphs(text, s, color)
+    if glyphs is not None:
+        widths = [g.size[0] for g in glyphs]
+        num_w = sum(widths) + DIGIT_GAP_SP * s * (len(widths) - 1)
+    else:
+        widths = None
+        font = ui_font(max(9, int(s * 1.35)), bold=True)
+        num_w = font.size(text)[0]
+
+    # The line, in the two stretches either side of the number's gap.
+    cx = (x0 + x1) / 2.0
+    gap = num_w / 2.0 + TUPLET_GAP_SP * s
+    if cx - gap > x0:
+        pygame.draw.line(surf, color, (round(x0), round(y)), (round(cx - gap), round(y)), line_w)
+    if cx + gap < x1:
+        pygame.draw.line(surf, color, (round(cx + gap), round(y)), (round(x1), round(y)), line_w)
+
+    # The legs, one at each end, reaching towards the notes: down when the stems
+    # point up (the bracket stands above them), up when they point down.
+    dy = round(TUPLET_LEG_SP * s if stem_up else -TUPLET_LEG_SP * s)
+    for x in (x0, x1):
+        pygame.draw.line(surf, color, (round(x), round(y)), (round(x), round(y + dy)), line_w)
+
+    # The number itself, centred in the gap.
+    if glyphs is not None:
+        gap_px = DIGIT_GAP_SP * s
+        left = cx - (num_w - gap_px) / 2.0
+        for g, w in zip(glyphs, widths):
+            g.draw_centred(surf, left + w / 2.0, y)
+            left += w + gap_px
+    else:
+        img = font.render(text, True, color)
+        surf.blit(img, img.get_rect(center=(round(cx), round(y))))

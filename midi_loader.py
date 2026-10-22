@@ -138,6 +138,13 @@ class Note:
     step: Optional[int] = None     # written diatonic step (octave * 7 + C..B); None = from pitch
     alter: int = 0                 # -2..+2 semitones written beside `step` (a flat is -1)
     printed: Optional[str] = None  # written note value ("quarter", "eighth", ...); None = from length
+    # The tuplet this note is written in (MusicXML only; None for MIDI and PIG).
+    # tuplet_num is how many written notes share the time of fewer ones (3 for a
+    # triplet - <time-modification><actual-notes>), and tuplet_type says where this
+    # note sits in the group: "start", "stop" (the <notations><tuplet> marks), or
+    # None for the notes in between and for notes not in a tuplet at all.
+    tuplet_num: Optional[int] = None
+    tuplet_type: Optional[str] = None
 
     @property
     def duration(self) -> float:
@@ -811,6 +818,105 @@ def sanitize_notes(notes, min_duration: float = 0.05):
     return result, report
 
 
+def _local_beat_len(t: float, beat_times: List[float]) -> float:
+    if not beat_times or len(beat_times) < 2:
+        return 0.5
+    import bisect
+    idx = bisect.bisect_right(beat_times, t) - 1
+    if idx < 0:
+        return max(0.05, beat_times[1] - beat_times[0])
+    if idx >= len(beat_times) - 1:
+        return max(0.05, beat_times[-1] - beat_times[-2])
+    return max(0.05, beat_times[idx + 1] - beat_times[idx])
+
+
+def detect_midi_tuplets(notes: List[Note], beat_times: List[float],
+                        bar_times: Optional[List[float]] = None) -> Tuple[List[Note], int]:
+    """
+    Detect triplets in MIDI notes from onset timing against the beat grid.
+
+    A MIDI file carries no notation marks of its own: three quarter notes
+    written in the space of two (or three eighths in the space of one) would
+    otherwise be rounded into dotted eighths or flags. Sets tuplet_num=3,
+    tuplet_type="start"/"stop", and printed="quarter" / "eighth" / "sixteenth".
+
+    Returns (updated_notes, tuplet_count).
+    """
+    if not notes or not beat_times or len(beat_times) < 2:
+        return notes, 0
+
+    replaced = {}
+    tuplet_count = 0
+
+    for hand in (RIGHT, LEFT):
+        hnotes = [n for n in notes if n.hand == hand and n.tuplet_num is None]
+        if not hnotes:
+            continue
+
+        # Group notes into onset clusters (within 0.02s) so chords are handled together
+        clusters: List[List[Note]] = []
+        for n in sorted(hnotes, key=lambda n: n.start):
+            if clusters and abs(n.start - clusters[-1][0].start) < 0.02:
+                clusters[-1].append(n)
+            else:
+                clusters.append([n])
+
+        i = 0
+        while i <= len(clusters) - 3:
+            c1, c2, c3 = clusters[i], clusters[i + 1], clusters[i + 2]
+            t1 = c1[0].start
+            t2 = c2[0].start
+            t3 = c3[0].start
+
+            # Cannot cross a bar line
+            if bar_times and any(t1 + 0.01 < bt < t3 + 0.01 for bt in bar_times):
+                i += 1
+                continue
+
+            bl = _local_beat_len(t1, beat_times)
+            s1_b = (t2 - t1) / bl
+            s2_b = (t3 - t2) / bl
+
+            end3 = max(n.end for n in c3)
+            if i + 3 < len(clusters):
+                t4 = clusters[i + 3][0].start
+                s3_b = min(t4 - t3, end3 - t3) / bl
+                span_b = (t4 - t1) / bl
+            else:
+                s3_b = (end3 - t3) / bl
+                span_b = (end3 - t1) / bl
+
+            tup_printed = None
+            # Quarter triplet: 3 in 2 beats (step ~ 0.667)
+            if (0.55 <= s1_b <= 0.78 and 0.55 <= s2_b <= 0.78 and abs(s1_b - s2_b) <= 0.12
+                    and (1.70 <= span_b <= 2.30 or 0.55 <= s3_b <= 0.78)):
+                tup_printed = "quarter"
+            # Eighth triplet: 3 in 1 beat (step ~ 0.333)
+            elif (0.26 <= s1_b <= 0.40 and 0.26 <= s2_b <= 0.40 and abs(s1_b - s2_b) <= 0.08
+                  and (0.85 <= span_b <= 1.20 or 0.26 <= s3_b <= 0.40)):
+                tup_printed = "eighth"
+            # Sixteenth triplet: 3 in 0.5 beat (step ~ 0.167)
+            elif (0.13 <= s1_b <= 0.21 and 0.13 <= s2_b <= 0.21 and abs(s1_b - s2_b) <= 0.05
+                  and (0.42 <= span_b <= 0.60 or 0.13 <= s3_b <= 0.21)):
+                tup_printed = "sixteenth"
+
+            if tup_printed:
+                tuplet_count += 1
+                for n in c1:
+                    replaced[id(n)] = replace(n, tuplet_num=3, tuplet_type="start", printed=tup_printed)
+                for n in c2:
+                    replaced[id(n)] = replace(n, tuplet_num=3, tuplet_type=None, printed=tup_printed)
+                for n in c3:
+                    replaced[id(n)] = replace(n, tuplet_num=3, tuplet_type="stop", printed=tup_printed)
+                i += 3
+            else:
+                i += 1
+
+    if not replaced:
+        return notes, 0
+    return [replaced.get(id(n), n) for n in notes], tuplet_count
+
+
 def load_midi(path: str, include_drums: bool = False, split_pitch: int = MIDDLE_C,
               min_duration: float = 0.05) -> MidiSong:
     """
@@ -900,6 +1006,10 @@ def load_midi(path: str, include_drums: bool = False, split_pitch: int = MIDDLE_
     except Exception:  # odd time-signature data; bar lines are only cosmetic
         bar_times, beat_times = [], []
 
+    notes, tuplet_count = detect_midi_tuplets(notes, beat_times, bar_times)
+    if tuplet_count:
+        report.append("detected %d triplet group(s) from timing" % tuplet_count)
+
     controls = []
     for inst in pm.instruments:                   # a pedal may sit on a track of its own
         if inst.is_drum:
@@ -913,7 +1023,11 @@ def load_midi(path: str, include_drums: bool = False, split_pitch: int = MIDDLE_
                     key_fifths=key_fifths)
     song.cleanup = report                      # what sanitizing changed, for the curious
     for line in report:
-        print("%s: %s" % (os.path.basename(path), line))
+        try:
+            print("%s: %s" % (os.path.basename(path), line))
+        except UnicodeEncodeError:
+            safe_name = os.path.basename(path).encode("ascii", "replace").decode("ascii")
+            print("%s: %s" % (safe_name, line))
     return song
 
 

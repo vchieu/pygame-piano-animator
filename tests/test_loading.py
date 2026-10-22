@@ -78,3 +78,31 @@ def test_the_editor_opens_another_file(screen):
     assert ed.song is not first and ed.hands and len(ed.finger) == len(ed.notes)
     ed._load_path(midi_path("demo_song.mid") + ".missing")    # a message, not a crash
     ed.render()
+
+
+def test_midi_triplet_detection():
+    """MIDI notes whose onset timing matches 3:2 triplets are marked with tuplet_num=3 and printed shape."""
+    import midi_loader
+    from midi_loader import Note, RIGHT, detect_midi_tuplets
+
+    # 3 notes in 2 beats (beat_len = 0.5s): starts 0.0, 0.333, 0.667, ends 0.33, 0.66, 1.0 -> quarter triplet
+    notes = [
+        Note(60, 0.000, 0.330, 64, 0, RIGHT),
+        Note(62, 0.333, 0.660, 64, 0, RIGHT),
+        Note(64, 0.667, 1.000, 64, 0, RIGHT),
+    ]
+    beat_times = [0.0, 0.5, 1.0, 1.5, 2.0]
+    updated, count = detect_midi_tuplets(notes, beat_times)
+    assert count == 1
+    assert [n.tuplet_num for n in updated] == [3, 3, 3]
+    assert [n.tuplet_type for n in updated] == ["start", None, "stop"]
+    assert [n.printed for n in updated] == ["quarter", "quarter", "quarter"]
+
+    # In khong-mon-dang-ho-doi.mid, bar 51 triplet at ~96.19s is detected
+    song = midi_loader.load_midi(midi_path("khong-mon-dang-ho-doi.mid"))
+    m51 = [n for n in song.notes if 96.0 <= n.start <= 97.2 and n.hand == RIGHT and n.tuplet_num]
+    assert len(m51) == 3
+    assert [n.tuplet_num for n in m51] == [3, 3, 3]
+    assert [n.tuplet_type for n in m51] == ["start", None, "stop"]
+    assert [n.printed for n in m51] == ["quarter", "quarter", "quarter"]
+

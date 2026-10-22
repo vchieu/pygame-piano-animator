@@ -482,7 +482,11 @@ def split_at_bar_lines(notes: List[Note], bar_times: List[float]) -> Tuple[List[
                          # is written the same way - a Db stays a Db after the bar line.
                          step=n.step,
                          alter=n.alter,
-                         printed=n.printed if i == 0 else None)
+                         printed=n.printed if i == 0 else None,
+                         # so is the tuplet the note is written in: the bracket spans
+                         # whichever pieces of it this system can see
+                         tuplet_num=n.tuplet_num,
+                         tuplet_type=n.tuplet_type)
             pieces.append(piece)
             if prev is not None:
                 ties.append((prev, piece))
@@ -1800,6 +1804,114 @@ def draw_octave_brackets(surf: pygame.Surface, notes_info: dict, sys_notes: List
                 hook_y = max(bracket_y - span, edge + max(1.0, s * 0.1))
             pygame.draw.line(surf, color, (round(x_max), round(bracket_y)), (round(x_max), round(hook_y)), line_w)
 
+# How far a tuplet's bracket stands off the ink its group draws, in staff spaces:
+# clear of the stems' tips and the beams on the side the bracket goes, so the
+# number never sits on the notes it counts.
+TUPLET_GAP_SPACES = 0.8
+
+
+def find_tuplet_groups(sys_notes: List[Note], notes_info: dict) -> List[Tuple[List[Note], str]]:
+    """
+    The tuplet groups of a system: (the notes of one group, the number to print).
+
+    A MusicXML score writes a tuplet on every note of the group -
+    <time-modification>'s <actual-notes> is the number (3 for a triplet) - and
+    marks the notes that open and close it with <notations><tuplet type="start">
+    / type="stop">. So a group is one hand's on one staff's run of notes with the
+    same tuplet number, opened by its start mark and closed by its stop; a group
+    the score never stopped (or never marked at all) ends where the next note's
+    number or place changes. Two groups of the same ratio side by side stay
+    apart, each opening with its own start. A grace note is left out: it hangs
+    off the group's note, it is not one of the notes being counted.
+    """
+    open_groups: dict = {}            # (hand, clef, tuplet_num) -> the notes so far
+    order: List[tuple] = []
+    done: List[Tuple[List[Note], str]] = []
+
+    def close(key) -> None:
+        notes = open_groups.pop(key, None)
+        if notes:
+            done.append((notes, str(key[2])))
+        if key in order:
+            order.remove(key)
+
+    for n in sorted((n for n in sys_notes
+                     if getattr(n, "tuplet_num", None)
+                     and not notes_info[id(n)].get("grace")),
+                    key=lambda n: (n.start, n.pitch)):
+        info = notes_info[id(n)]
+        key = (n.hand, info["clef"], n.tuplet_num)
+        kind = getattr(n, "tuplet_type", None)
+        if kind == "start":
+            close(key)                # a group the score never stopped: this one takes over
+            open_groups[key] = [n]
+            order.append(key)
+            continue
+        if key in open_groups:
+            open_groups[key].append(n)
+        else:
+            # No open group for this hand/staff/ratio: the score wrote no start mark
+            # for it (or its start sits in an earlier system), so the run of notes
+            # with the same number is the group.
+            open_groups[key] = [n]
+            order.append(key)
+        if kind == "stop":
+            close(key)
+    for key in list(order):
+        close(key)
+    return done
+
+
+def draw_tuplet_brackets(surf: pygame.Surface, notes_info: dict, sys_notes: List[Note],
+                         treble_mid_y: float, bass_mid_y: float, s: float,
+                         local_rect: Optional[pygame.Rect] = None):
+    """
+    The tuplets' brackets - the line with the number in it that says three written
+    notes take the time of two (a triplet, "liên ba").
+
+    Each group's bracket stands on the side its stems point to, its line kept clear
+    of the ink the group really draws - the noteheads, and the stems or beams that
+    reach past them - by TUPLET_GAP_SPACES, with the legs dropping towards the
+    notes. Call this after the beams are placed: `notes_info` then carries the stem
+    directions the layout settled on.
+    """
+    head_half = notation.NOTEHEAD_W_SP * s / 2.0
+    stem_len = STEM_LEN_SPACES * s
+    for grp, num_str in find_tuplet_groups(sys_notes, notes_info):
+        info = notes_info[id(grp[0])]
+        clef = info["clef"]
+
+        up = info.get("beam_stem_up", info.get("chord_stem_up"))
+        if up is None:                                  # no layout behind us: the engraver's
+            up = stem_up_for([notes_info[id(n)]["step_draw"] for n in grp],
+                             TREBLE_MID_STEP if clef == CLEF_TREBLE else BASS_MID_STEP)
+
+        # The bracket spans the group's outer noteheads, a little past them.
+        xs = [notes_info[id(n)]["x"] for n in grp]
+        x0, x1 = min(xs) - head_half, max(xs) + head_half
+
+        # The group's nearest ink on the side the bracket goes: the noteheads' far
+        # edge, or the stem tips / beam that reach past them.
+        gap = TUPLET_GAP_SPACES * s
+        edge = None
+        for n in grp:
+            i = notes_info[id(n)]
+            y = note_y(i["step_draw"], clef, treble_mid_y, bass_mid_y, s)
+            y_top, y_bot = i.get("y_top", y), i.get("y_bot", y)
+            tip = i.get("beam_tip_y")
+            if tip is not None:
+                near = min(y_top, tip) if up else max(y_bot, tip)
+            else:
+                near = y_top - stem_len if up else y_bot + stem_len
+            edge = near if edge is None else (min(edge, near) if up else max(edge, near))
+
+        y = edge - gap if up else edge + gap
+        if local_rect is not None:                      # keep the bracket on the paper
+            y = max(local_rect.top + s * 0.4, min(local_rect.bottom - s * 0.4, y))
+        notation.draw_tuplet_bracket(surf, s, x0, x1, y, num_str,
+                                     HAND_COLORS.get(grp[0].hand, HAND_COLORS[RIGHT])[0],
+                                     stem_up=up)
+
 class StaffView:
     """
     Renders a Grand Staff sheet music system with dynamic cursor and paging.
@@ -2236,6 +2348,12 @@ class StaffView:
                     # which way each stem ended up pointing.
                     draw_octave_brackets(staff_surf, notes_info, sys_pieces, treble_mid_y, bass_mid_y,
                                          s, local_rect)
+
+                    # The tuplet brackets (3 over the line: a triplet) come after the stems
+                    # and beams for the same reason: the bracket stands on the side the
+                    # group's stems point to.
+                    draw_tuplet_brackets(staff_surf, notes_info, sys_pieces,
+                                         treble_mid_y, bass_mid_y, s, local_rect)
 
                     # Draw individual notes - through notation.py, which draws Leland's
                     # SMuFL glyphs at MuseScore's metrics (see docs/ARCHITECTURE.md)
