@@ -281,6 +281,40 @@ Detailed design notes, kept up to date as features were added. Start with `CLAUD
   nothing: `staff.draw_treble_clef` / `draw_bass_clef` then draw the hand-drawn polylines they
   always had, and `StaffView.draw` falls back to the UI font's "4"/"4". The time signature is
   still a hardcoded 4/4 - the app has no meter model; only its drawing changed.
+- **The key signature is drawn at the head of each system, and it silences the sharps it
+  covers** (2026-10-22). `Khong-mon-dang-ho-doi.mxl` declares four sharps (F♯ C♯ G♯ D♯) and
+  the staff drew **no key signature**: every F, C, G and D carried a ♯ of its own - 17 of
+  them in the first system - so a reader could not tell the key from the ink.
+  - **Reading the key.** MusicXML says it outright: `<attributes><key><fifths>` -
+    `musicxml_loader._key_fifths`, the first declaration being the key of the piece and a
+    later one a **change** (`key_changes`). A `.mid` carries no such element, but the SMF
+    does: the `FF 59 02` **key-signature meta event** (`sf` signed, `mi`), which
+    `midi_loader.read_key_signature` picks up from the same track chunks `_smf_tracks`
+    already walks - no new dependency. `MidiSong.key_fifths` / `key_changes` / `key_at(t)`
+    carry it to the staff (a rebuilt song in `editor.py` keeps them).
+  - **What the key alters.** `key_alterations(fifths)` builds the letter → alteration map
+    in the order of sharps (F C G D A E B) or of flats (B E A D G C F); it alters that
+    letter in **every octave**, as an engraver's does. `spell_with_key` also respells a MIDI
+    pitch the way the key would write it - a flat key reads 70 as B♭, not A♯ - while a sharp
+    key keeps the sharp spelling the app has always used.
+  - **Which notes still print a sign** (`staff.plan_accidentals`): a note prints one when
+    its written alteration differs from the **state** of its step, i.e. from the key
+    signature, or from an accidental already printed for that step and octave in this
+    measure. That includes a **natural** (`alter == 0`) after a sharp. A note that matches
+    the state prints nothing - the key or the earlier sign already says it. The state is
+    cleared at every measure start and at the system's first measure.
+  - **The head of the staff grows to hold it.** The signature stands between the clef and
+    the time signature, one glyph per altered letter on its own staff step
+    (`KEY_SHARP_STEPS` / `KEY_FLAT_STEPS`, MuseScore's `KeySig::layout` order; treble F♯ on
+    the top line, bass F♯ on the fourth line), `KEY_SIG_GAP_SPACES` (0.35 sp) off the clef
+    and `KEY_SIG_ADVANCE_SP` (1.0 sp) apart. The time signature and the first note move
+    right by its width (`key_sig_x`, `key_sig_width_sp`, `time_sig_x`), and
+    `header_margin` grows `margin_left` from `MARGIN_LEFT` only as far as the head needs -
+    a score without a key signature keeps exactly the old margins.
+  - **Limitation**: the key drawn, and the one the accidentals are read against, is the key
+    in force at the **system's start**. A key change inside a system is not drawn (its
+    notes are still read from the system's key); `key_changes` is already carried for when
+    a score needs it.
 - **The 8va / 8vb bracket's height is worked out from the notes it covers** (same task).
   `get_octave_transposition` shifts *each* note by its own amount, so one group covers a range
   of drawn heights - a chord of E7 + C6 put the E7 at -1.5 sp and the C6 at -2.5 sp from the
@@ -390,6 +424,22 @@ Detailed design notes, kept up to date as features were added. Start with `CLAUD
   0.2-0.9 sp past it, where the note before leaves no room to pull it further left (2 notes at
   140 px, 3 at 200 px, and 2 at the end of a system in `ke_say_tinh_3.mid`); the closest pair
   left clear is 0.5 sp at 90 px. Nothing is drawn *on* a line any more.
+  - **A measure must hold its notes** (2026-10-22). The pull-left can only borrow the room the
+    note before it leaves, and at a crowded measure there is none: the spacing loop pushes the
+    last fast notes of a measure right to keep their flags apart, and the last one lands
+    **past** the bar line, printed on the next measure's side of it, with its beam through the
+    line. `50-nam-ve-sau` note 5: beat x 268.6, pushed to 291.5, bar line at 280.8 - the
+    notehead 3 px off the bar and the beam across it. `compute_notes_info` now ends with
+    `squeeze_into_measures`: each measure is squeezed **from its closing bar line backwards** -
+    the last note stands `noteBarDistance` off the bar, every note before it keeps its minimum
+    gap (`cluster_tail + min_gap`) to the one after, and the cascade stops at the bar line
+    that opens the measure (a measure with no room left simply closes up, as an engraver's
+    does). A note carries the **grace run** leaning on it along, which is why the pass runs
+    after the grace placement: a run picked up against a bar line pushes every note after it
+    right, and without that last look three measures of `50-nam-ve-sau` came back 13 px off
+    their bars and the system's last note sat on the paper's edge. Measured over
+    `50-nam-ve-sau` (`.mid` and `.mxl`) and `Khong-mon-dang-ho-doi` - 305 + 296 + 372 clusters,
+    every system: no notehead on or past a bar line and none closer than the full 1.5 sp.
 - **A note that runs past a bar line is split and tied** (2026-10-21). An engraver never
   writes one note across a bar line: the note is cut at the bar, the piece that ends the
   measure and the piece that opens the next one are written out separately and joined by a
@@ -430,7 +480,9 @@ Detailed design notes, kept up to date as features were added. Start with `CLAUD
   note and one that keeps the engraver's when nothing is in the way, the panel giving way
   before the engraver's direction does, a sixteenth's second bar inboard of the first, a stem's
   own scoring, a note keeping `noteBarDistance` off the bar lines and the bar line being drawn
-  where its beat is).
+  where its beat is, the key signature drawn at the head with the time signature and the first
+  note moving right of it and the sharps it covers left off the notes, a crowded measure
+  squeezed back inside its bar lines without closing its notes up).
 
 ## Fonts and frame pacing (v26.1.19.SNAPSHOT-14, -15)
 - Every font comes from the bundled typeface: Source Sans Pro, regular and bold (`assets/fonts`, SIL Open Font

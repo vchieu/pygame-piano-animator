@@ -23,7 +23,7 @@ import pygame
 
 from common import (ACCENT, BAR_BG, BAR_LINE, BG, HAND_COLORS, PANEL_EDGE,
                     TEXT, TEXT_DIM, ui_font)
-from midi_loader import LEFT, RIGHT, Note
+from midi_loader import LEFT, PITCH_MAP, RIGHT, Note, key_alterations
 import notation
 from notation import note_shape
 
@@ -50,23 +50,6 @@ MEASURE_NUM_COLOR = (130, 130, 145)
 STEM_COLOR = (35, 35, 45)
 CURSOR_COLOR = (220, 40, 60)
 
-# Diatonic step in octave (C=0, D=1, E=2, F=3, G=4, A=5, B=6) and sharp flag (0 or 1)
-# MIDI pitch % 12 -> (diatonic_step_in_octave, is_sharp)
-PITCH_MAP = {
-    0: (0, 0),   # C
-    1: (0, 1),   # C#
-    2: (1, 0),   # D
-    3: (1, 1),   # D#
-    4: (2, 0),   # E
-    5: (3, 0),   # F
-    6: (3, 1),   # F#
-    7: (4, 0),   # G
-    8: (4, 1),   # G#
-    9: (5, 0),   # A
-    10: (5, 1),  # A#
-    11: (6, 0),  # B
-}
-
 # Diatonic step definitions:
 # Treble middle line = B4 = step 34 (Lines: E4=30, G4=32, B4=34, D5=36, F5=38)
 # Bass middle line = D3 = step 22 (Lines: G2=18, B2=20, D3=22, F3=24, A3=26)
@@ -77,6 +60,10 @@ MIDDLE_C_STEP = 28
 
 MARGIN_LEFT = 85
 MARGIN_RIGHT = 20
+
+# Where the staff's own left edge stands inside the panel: the bracket sits a little
+# further left, the clefs a little further right.
+STAFF_LEFT_X = 18
 
 # Zoom of the staff: MIN/MAX_TARGET_DUR bound how many seconds of music may share one system
 # (MIN_SCALE / MAX_SCALE bound how big the staff itself is drawn).
@@ -189,10 +176,33 @@ def has_accidental(note: Note) -> bool:
 ACCIDENTAL_WIDTH_SP = {1: 0.8, 2: 1.6}
 
 
+def accidental_width_of(alt: Optional[int]) -> float:
+    """
+    The width of the sign that spells `alt` semitones, in spaces (0 for no sign).
+
+    `alt` is None when the note prints no sign at all, 0 for a natural, +1 for a
+    sharp, -1 for a flat, and +2 / -2 for the doubles.
+    """
+    if alt is None:
+        return 0.0
+    return ACCIDENTAL_WIDTH_SP.get(min(2, abs(alt)), 0.8)
+
+
+def accidental_extra_of(alt: Optional[int]) -> float:
+    """
+    How much wider than a plain sign the sign that spells `alt` is, in spaces.
+
+    A sharp, flat or natural is the one sign the layout has always allowed for, so
+    its extra is 0 - the caller adds the plain sign's room itself. The doubles are
+    a second sign wide.
+    """
+    return 0.8 if alt is not None and abs(alt) > 1 else 0.0
+
+
 def accidental_width_sp(note: Note) -> float:
     """The width of the note's accidental, in spaces (0 when it has none)."""
     alt = written_step(note)[1]
-    return ACCIDENTAL_WIDTH_SP.get(min(2, abs(alt)), 0.8) if alt else 0.0
+    return accidental_width_of(alt if alt else None)
 
 
 def accidental_extra_sp(note: Note) -> float:
@@ -203,8 +213,44 @@ def accidental_extra_sp(note: Note) -> float:
     its extra is 0 - the caller adds the plain sign's room itself. The doubles are
     a second sign wide.
     """
-    alt = abs(written_step(note)[1])
-    return 0.8 if alt > 1 else 0.0
+    return accidental_extra_of(written_step(note)[1] or None)
+
+
+def plan_accidentals(notes: List[Note], measure_starts: List[float],
+                     key_fifths: int) -> dict:
+    """
+    Which notes print an accidental, and which do not: {id(note): the sign}.
+
+    A key signature already alters the notes it covers - the four sharps of E major
+    are the F, C, G and D of every octave - so those notes print no sign at all.
+    A note that differs from the key (an A# in E major) prints one, and that sign
+    holds for the rest of its measure: the notes of that step and octave after it
+    print no sign, and a note that comes back to the key's spelling prints the
+    sign that says so - a natural after a sharp.
+
+    The sign is None when the note prints none, 0 for a natural, +1 for a sharp,
+    -1 for a flat and +2 / -2 for the doubles.
+    """
+    out = {}
+    if not notes:
+        return out
+    key_alt = key_alterations(key_fifths)
+    state = {}                       # (clef, step) -> the alteration in force
+    bounds = sorted(measure_starts)
+    measure = None
+    for n in sorted(notes, key=lambda n: (n.start, n.pitch)):
+        step, alter = written_step(n)
+        where = bisect.bisect_right(bounds, n.start + 1e-6) - 1
+        if where != measure:
+            measure = where
+            state.clear()            # an accidental holds for its measure only
+        k = (clef_for_note(n), step)
+        if alter != state.get(k, key_alt.get(step % 7, 0)):
+            out[id(n)] = alter
+            state[k] = alter
+        else:
+            out[id(n)] = None
+    return out
 
 
 def clef_for_note(note: Note) -> str:
@@ -429,11 +475,13 @@ def split_at_bar_lines(notes: List[Note], bar_times: List[float]) -> Tuple[List[
                          velocity=n.velocity, track=n.track, hand=n.hand,
                          finger=n.finger if i == 0 else None,
                          gliss=n.gliss if i == 0 else False,
-                         # the written spelling and value belong to the note the score
-                         # wrote: they stay on the piece that opens it (the value is
-                         # reworked per piece downstream anyway, from the piece's own span)
-                         step=n.step if i == 0 else None,
-                         alter=n.alter if i == 0 else 0,
+                         # the written value belongs to the note the score wrote: it stays
+                         # on the piece that opens it (the value is reworked per piece
+                         # downstream anyway, from the piece's own span). The spelling
+                         # (step and alter) is the note's, and every piece of a tied note
+                         # is written the same way - a Db stays a Db after the bar line.
+                         step=n.step,
+                         alter=n.alter,
                          printed=n.printed if i == 0 else None)
             pieces.append(piece)
             if prev is not None:
@@ -538,17 +586,115 @@ def clef_ink_w(sp: float) -> float:
 # The gap the time signature's column keeps off the clefs, in staff spaces.
 TIME_SIG_GAP_SPACES = 0.35
 
+# The gap the key signature keeps off the clef, in staff spaces.
+KEY_SIG_GAP_SPACES = 0.35
 
-def time_sig_x(left_x: float, sp: float) -> float:
+# The gap the first note keeps off the time signature's column, in staff spaces.
+FIRST_NOTE_GAP_SPACES = 1.15
+
+# A key signature's accidentals, in the order the key signature writes them - the
+# sharps go F C G D A E B, the flats B E A D G C F, the circle of fifths - and the
+# staff step each one stands on. The treble staff's sharps start on its top line
+# (F5) and its flats on its middle line (B4); the bass staff's start a third
+# lower, on its fourth line (F3) and its second line (B2).
+KEY_SHARP_STEPS = {CLEF_TREBLE: (38, 35, 39, 36, 33, 37, 34),
+                   CLEF_BASS: (24, 21, 25, 22, 19, 23, 20)}
+KEY_FLAT_STEPS = {CLEF_TREBLE: (34, 37, 33, 36, 32, 35, 31),
+                  CLEF_BASS: (20, 23, 19, 22, 18, 21, 24)}
+
+# How far apart a key signature's accidentals stand, in spaces. A sharp's ink is
+# 0.98 sp wide in Leland and a flat's 0.81, so a space between them leaves them
+# clear of each other the way MuseScore packs them (KeySig::layout).
+KEY_SIG_ADVANCE_SP = 1.0
+
+
+def key_sig_steps(fifths: int, clef: str) -> List[Tuple[int, int]]:
+    """
+    The accidentals a key signature holds, as (staff step, sign) in the order they
+    are written: the sharps of a sharp key, the flats of a flat one.
+    """
+    if not fifths:
+        return []
+    steps = KEY_SHARP_STEPS if fifths > 0 else KEY_FLAT_STEPS
+    sign = 1 if fifths > 0 else -1
+    return [(st, sign) for st in steps[clef][:min(7, abs(fifths))]]
+
+
+def key_sig_ink_w(sp: float, fifths: int) -> float:
+    """How wide one accidental of a key signature is, in spaces."""
+    name = "accidentalSharp" if fifths > 0 else "accidentalFlat"
+    g = notation.glyph(name, sp, TIME_SIG_COLOR)
+    if g is None:                       # no music font: the hand-drawn width
+        return 0.98 if fifths > 0 else 0.81
+    return g.size[0] / sp
+
+
+def key_sig_width_sp(fifths: int, sp: float) -> float:
+    """How wide the whole key signature stands, in spaces."""
+    n = min(7, abs(fifths))
+    if not n:
+        return 0.0
+    return key_sig_ink_w(sp, fifths) + (n - 1) * KEY_SIG_ADVANCE_SP
+
+
+def key_sig_x(left_x: float, sp: float) -> float:
+    """Where a key signature's first accidental stands: clear of the clef."""
+    return left_x + 8 + clef_ink_w(sp) + KEY_SIG_GAP_SPACES * sp
+
+
+def draw_key_signature(surf: pygame.Surface, x: float, mid_y: float, mid_step: int,
+                       sp: float, fifths: int, clef: str,
+                       color: Tuple[int, int, int] = TIME_SIG_COLOR) -> bool:
+    """
+    A key signature: the accidentals of the key, each on the staff step the
+    tradition gives it, a space apart.
+
+    `x` is where the first accidental's ink starts, `mid_y` the staff's middle line
+    and `mid_step` the step on it (the treble staff's B4, the bass staff's D3).
+    False when the music font is missing, so the caller can leave the column out.
+    """
+    if not fifths:
+        return False
+    name = "accidentalSharp" if fifths > 0 else "accidentalFlat"
+    g = notation.glyph(name, sp, color)
+    if g is None:
+        return False
+    for i, (step, _sign) in enumerate(key_sig_steps(fifths, clef)):
+        g.draw(surf, x + i * KEY_SIG_ADVANCE_SP * sp,
+               mid_y - (step - mid_step) * (sp * 0.5))
+    return True
+
+
+def time_sig_x(left_x: float, sp: float, key_end: float = 0.0) -> float:
     """
     Where the time signature's column sits: `left_x + 4.6 sp`, or further right if the
     clefs would run into it (a 2.66 sp bass clef at `left_x + 8` reaches `left_x + 4.6 sp`
-    at the smallest staff sizes, s = 4). The left margin is only so wide - the first note
-    is at MARGIN_LEFT - so the column does not move further than it has to.
+    at the smallest staff sizes, s = 4), or if a key signature stands between the two.
+    The left margin is only so wide - the first note is at MARGIN_LEFT - so the column
+    does not move further than it has to.
     """
     half = notation.TIME_SIG_HALF_W_SP * sp
-    return max(left_x + round(sp * 4.6),
-               left_x + 8 + round(clef_ink_w(sp) + (TIME_SIG_GAP_SPACES * sp + half)))
+    x = max(left_x + round(sp * 4.6),
+            left_x + 8 + round(clef_ink_w(sp) + (TIME_SIG_GAP_SPACES * sp + half)))
+    if key_end:
+        x = max(x, key_end + TIME_SIG_GAP_SPACES * sp + half)
+    return x
+
+
+def header_margin(left_x: float, sp: float, fifths: int) -> float:
+    """
+    Where the first note of a system stands: past the clef, the key signature and
+    the time signature, or at MARGIN_LEFT when they all fit before it.
+
+    A key signature makes the head of the staff wider - the time signature has to
+    stand clear of the sharps, and the first bar of the system clear of the digits.
+    Music without a key signature keeps the margin it always had.
+    """
+    if not fifths:
+        return MARGIN_LEFT
+    key_end = key_sig_x(left_x, sp) + key_sig_width_sp(fifths, sp) * sp
+    end = time_sig_x(left_x, sp, key_end) + notation.TIME_SIG_HALF_W_SP * sp
+    return max(MARGIN_LEFT, end + FIRST_NOTE_GAP_SPACES * sp)
 
 
 def draw_arpeggio_wavy_line(surf: pygame.Surface, x: float, y_top: float, y_bottom: float, s: float, color: Tuple[int, int, int]):
@@ -1060,7 +1206,8 @@ def find_grace_runs(notes: List[Note], beat_len: float) -> List[Tuple[List[Note]
 
 def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: float, usable_w: float,
                        margin_left: float, s: float, beat_len: float = 0.5,
-                       bar_times: Optional[List[float]] = None) -> dict:
+                       bar_times: Optional[List[float]] = None,
+                       accidentals: Optional[dict] = None) -> dict:
     """
     Computes rendering info for notes in a system:
     x coordinate (with clashing/overlap offset), clef, step_draw, octave_shift, label_text.
@@ -1074,10 +1221,20 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
       between the two, styledef.cpp). `bar_times` is where the system's bar lines stand -
       the times `StaffView.draw` draws them at; without them no note is moved for a bar.
     The other notes of a chord stay on the same x, so it reads as a chord, not a staircase.
+
+    `accidentals` is the plan of which notes print a sign (plan_accidentals): the room a
+    note's accidental takes is the room the sign it actually prints takes.
     """
     info = {}
     if not sys_notes:
         return info
+
+    def acc_of(n: Note) -> Optional[int]:
+        """The sign this note prints beside it (None: none)."""
+        if accidentals is not None:
+            return accidentals.get(id(n))
+        alt = written_step(n)[1]
+        return alt if alt else None
 
     nw = round(s * 0.75)
     right_limit = margin_left + usable_w
@@ -1158,7 +1315,7 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
     def note_head_reach(n: Note) -> float:
         """How far to the left of its x a note's ink reaches (its accidental, if any)."""
         mag = notation.GRACE_MAG if id(n) in grace_ids else 1.0
-        acc_w = accidental_width_sp(n)
+        acc_w = accidental_width_of(acc_of(n))
         return (acc_w * s + notation.ACC_DIST_SP * s) * mag if acc_w else 0.0
 
     def note_tail_reach(n: Note) -> float:
@@ -1186,6 +1343,81 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
 
     min_gap = nw + 1.0
 
+    # Which grace run leans on which note: a run moves with its note, and the note carries
+    # the run's clearance of a bar line with it.
+    graces_of = {id(main): run for run, main in grace_runs}
+
+    def grace_left_ink(n: Note, x: float) -> float:
+        """How far to the left of its x a grace note's ink reaches."""
+        head = note_shape(n.duration, beat_len)[0]
+        l, _t, r, _b = notation.HEAD_BOX[head]
+        mag = notation.GRACE_MAG
+        half = (r - l) * s * 0.5 * mag
+        if acc_of(n) is not None:
+            acc_w = accidental_extra_of(acc_of(n))
+            return x - (half + (r - l) * s * mag + notation.ACC_DIST_SP * s * mag
+                        + acc_w * s * mag)
+        return x - half
+
+    def squeeze_into_measures() -> None:
+        """Fit each measure's notes between the bar lines that enclose it.
+
+        The spacing above only ever moves a note aside to keep it clear of its neighbours,
+        and at a crowded measure that can push the last notes past the bar line that ends
+        it: a note of one measure is then printed on the next measure's side of the bar,
+        and a beam runs through the bar. A grace run at a bar line pushes the same way: it
+        takes its room from the measure it opens, so the notes after it travel right with
+        it. So each measure is squeezed from its closing bar line backwards - the last note
+        stands a noteBarDistance off the bar, each note before it keeps its minimum gap to
+        the one after, down to the bar line that opens the measure. A note carries the
+        grace run leaning on it along, and never moves further left than the run's own
+        clearance allows. A measure with no room left closes up, as an engraver's does.
+        """
+        if not bar_times:
+            return
+        bar_gap = NOTE_BAR_DISTANCE_SP * s
+
+        def head_of(cluster: List[Note]) -> float:
+            """The cluster's left ink, the grace run leaning on it included."""
+            head = cluster_head(cluster)
+            for n in cluster:
+                run = graces_of.get(id(n))
+                if run:
+                    nx = info[id(n)]["x"]
+                    head = max(head, nx - min(grace_left_ink(g, info[id(g)]["x"])
+                                               for g in run))
+            return head
+
+        left_edge = margin_left            # the paper's edge, then each bar line
+        measure_start = sys_start
+        for k, bar_t in enumerate(bar_times):
+            bx = margin_left + (bar_t - sys_start) / sys_duration * usable_w
+            mine = [c for c in clusters
+                    if measure_start - 1e-9 <= c[0].start < bar_t - 1e-9]
+            right = bx - bar_gap
+            for c in reversed(mine):
+                x_min = min(info[id(n)]["x"] for n in c)
+                x_max = max(info[id(n)]["x"] for n in c)
+                # A grace is placed against the note it leans on, not by this spacing: it
+                # stays where it stands and the note before it only keeps off its ink.
+                if not any(id(n) in grace_ids for n in c):
+                    over = x_max + cluster_tail(c) - right
+                    if over > 0:
+                        # never left of the paper, the opening bar line, or the grace run
+                        if k == 0:
+                            over = min(over, x_min - head_of(c) - margin_left)
+                        else:
+                            over = min(over, x_min - head_of(c) - (left_edge + bar_gap))
+                        if over > 0:
+                            for n in c:
+                                info[id(n)]["x"] -= over
+                                for g in graces_of.get(id(n), ()):
+                                    info[id(g)]["x"] -= over
+                            x_min -= over
+                right = min(right, x_min - head_of(c) - min_gap)
+            left_edge = bx
+            measure_start = bar_t
+
     # A bar line is music too: a note may not be printed on top of it. MuseScore keeps
     # noteBarDistance (1.5 spaces, styledef.cpp) between a note's ink and the bar line, so a
     # note at the start of a measure stands off it by its accidental's width plus that gap.
@@ -1202,9 +1434,9 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
                 half = (right - left) * s / 2.0 * mag
                 # ledger lines reach a legerLineExtension past the head on each side
                 r = half + notation.LEDGER_EXT_SP * s * mag
-                if has_accidental(n):               # the accidental, left of the head
+                if acc_of(n) is not None:        # the accidental, left of the head
                     r = max(r, half + (right - left) * s * mag + notation.ACC_DIST_SP * s * mag
-                            + accidental_extra_sp(n) * s * mag)
+                            + accidental_extra_of(acc_of(n)) * s * mag)
                 reach = max(reach, r)
             return reach
 
@@ -1287,16 +1519,6 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
     # Like MuseScore's, the run is laid out from its main note leftwards, so it belongs
     # to that note's measure even when the file's own timings put its onsets a hair
     # before the bar line.
-    def grace_left_ink(n: Note, x: float) -> float:
-        head = note_shape(n.duration, beat_len)[0]
-        l, _t, r, _b = notation.HEAD_BOX[head]
-        mag = notation.GRACE_MAG
-        half = (r - l) * s * 0.5 * mag
-        if has_accidental(n):
-            acc_w = accidental_extra_sp(n)
-            return x - (half + (r - l) * s * mag + notation.ACC_DIST_SP * s * mag + acc_w * s * mag)
-        return x - half
-
     if bar_times:
         bar_gap = NOTE_BAR_DISTANCE_SP * s
     for graces, main in grace_runs:
@@ -1304,9 +1526,9 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
         m_clef = info[id(main)]["clef"]
         m_head = note_shape(main.duration, beat_len)[0]
         ml, _mt, mr, _mb = notation.HEAD_BOX[m_head]
-        if has_accidental(main):
+        if acc_of(main) is not None:
             m_left = ((mr - ml) * s * 1.5 + notation.ACC_DIST_SP * s
-                      + accidental_extra_sp(main) * s)   # its accidental sits left too
+                      + accidental_extra_of(acc_of(main)) * s)   # its accidental sits left too
         else:
             m_left = (mr - ml) * s * 0.5
         # grace struck together share one x, like the notes of any chord
@@ -1377,6 +1599,11 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
             placed = [(g, cx + shift) for g, cx in placed]
         for g, cx in placed:
             info[id(g)]["x"] = cx
+
+    # The grace runs above pushed the notes after them right (a run at a bar line takes its
+    # room from the measure it opens), so the fit is made now, with every note and every
+    # grace run standing in its final place.
+    squeeze_into_measures()
 
     return info
 
@@ -1611,12 +1838,9 @@ class StaffView:
     def cursor_x(self, t: float, staff_rect: pygame.Rect) -> float:
         """Compute the X coordinate of the cursor within staff_rect at song time t."""
         sys = self.system_for_time(t)
-        if sys is None:
-            return float(staff_rect.x + MARGIN_LEFT)
-
-        usable_w = staff_rect.w - MARGIN_LEFT - MARGIN_RIGHT
-        if usable_w <= 10:
-            return float(staff_rect.x + MARGIN_LEFT)
+        margin_left, usable_w = self._header(staff_rect, sys)
+        if sys is None or usable_w <= 10:
+            return float(staff_rect.x + margin_left)
 
         if t < sys.start_t:
             frac = 0.0
@@ -1624,7 +1848,37 @@ class StaffView:
             frac = 1.0
         else:
             frac = (t - sys.start_t) / sys.duration
-        return staff_rect.x + MARGIN_LEFT + frac * usable_w
+        return staff_rect.x + margin_left + frac * usable_w
+
+    def _staff_size(self, rect: pygame.Rect) -> float:
+        """How big the staff itself is drawn, in pixels (the user's zoom scales it)."""
+        return max(4.0, min(12.0, ((rect.h - 26) / 14.0) * self.scale))
+
+    def _key_fifths(self, sys) -> int:
+        """
+        The key signature in force at the head of this system: how many sharps
+        (positive) or flats (negative) it holds.
+
+        A key change inside a system is drawn at the head of the next one, so the
+        signature and the accidentals of a system always belong to the same key.
+        """
+        if sys is None or self.song is None:
+            return 0
+        key_at = getattr(self.song, "key_at", None)
+        return int(key_at(sys.start_t)) if key_at else 0
+
+    def _header(self, rect: pygame.Rect, sys) -> Tuple[float, float]:
+        """
+        (margin_left, usable_w): where the system's notes start and how much room
+        they have before the right margin.
+
+        The head of the system holds the clef, the key signature and the time
+        signature, and a key signature makes it wider - so the notes start further
+        right, and the music between them is a little narrower.
+        """
+        s = self._staff_size(rect)
+        margin_left = header_margin(STAFF_LEFT_X, s, self._key_fifths(sys))
+        return margin_left, rect.w - margin_left - MARGIN_RIGHT
 
     def draw(self, surf: pygame.Surface, staff_rect: pygame.Rect, t: float, active_notes: Optional[list] = None, opacity: float = 1.0):
         """Draw the sheet music Grand Staff, active system notes, and playback cursor."""
@@ -1640,14 +1894,20 @@ class StaffView:
         local_rect = pygame.Rect(0, 0, staff_rect.w, staff_rect.h)
 
         # 2. Staff geometry (the user's zoom scales the staff itself)
-        s = max(4.0, min(12.0, ((local_rect.h - 26) / 14.0) * self.scale))
+        s = self._staff_size(local_rect)
         center_y = local_rect.centery
         treble_mid_y = center_y - round(3.0 * s)
         bass_mid_y = center_y + round(3.0 * s)
 
         line_color = STAFF_LINE
-        left_x = local_rect.x + 18
+        left_x = local_rect.x + STAFF_LEFT_X
         right_x = local_rect.right - 12
+
+        # The system being drawn: its key signature stands at the head of the staff
+        # and decides how much room the head takes before the first note.
+        sys = self.system_for_time(t) if (self.song and self.systems) else None
+        key_fifths = self._key_fifths(sys)
+        margin_left, usable_w = self._header(local_rect, sys)
 
         # 3. Staff lines (5 for Treble, 5 for Bass) - MuseScore's thickness (staffLineThickness)
         line_w = max(1, round(notation.STAFF_LINE_SP * s))
@@ -1671,10 +1931,22 @@ class StaffView:
         draw_treble_clef(staff_surf, left_x + 8, treble_mid_y, s, CLEF_COLOR)
         draw_bass_clef(staff_surf, left_x + 8, bass_mid_y, s, CLEF_COLOR)
 
+        # 4b. Key signature - the sharps or flats of the key, each on the staff step
+        # the tradition gives it, between the clef and the time signature.
+        key_end = 0.0
+        if key_fifths:
+            key_x = key_sig_x(left_x, s)
+            drawn_key = [
+                draw_key_signature(staff_surf, key_x, mid_y, mid_step, s, key_fifths, clef)
+                for mid_y, mid_step, clef in ((treble_mid_y, TREBLE_MID_STEP, CLEF_TREBLE),
+                                              (bass_mid_y, BASS_MID_STEP, CLEF_BASS))]
+            if all(drawn_key):
+                key_end = key_x + key_sig_width_sp(key_fifths, s) * s
+
         # 5. Time signature '4/4' - the numerator on the line above the middle one and the
         # denominator on the line below (notation.draw_time_signature places them). The
         # old UI-font digits are the fallback for a build without the music font.
-        ts_x = time_sig_x(left_x, s)
+        ts_x = time_sig_x(left_x, s, key_end)
         drawn = [notation.draw_time_signature(staff_surf, ts_x, ts_mid, s, 4, 4, TIME_SIG_COLOR)
                  for ts_mid in (treble_mid_y, bass_mid_y)]
         if not all(drawn):
@@ -1686,23 +1958,21 @@ class StaffView:
 
         if self.song and self.systems:
             # 6. Active system
-            sys = self.system_for_time(t)
             if sys is not None:
-                usable_w = local_rect.w - MARGIN_LEFT - MARGIN_RIGHT
                 if usable_w > 10:
                     # Measure bar lines
                     num_font = ui_font(10)
                     for m in sys.measures:
                         if m.index > sys.measures[0].index:
                             frac_bar = (m.start_t - sys.start_t) / sys.duration
-                            bx = round(local_rect.x + MARGIN_LEFT + frac_bar * usable_w)
+                            bx = round(local_rect.x + margin_left + frac_bar * usable_w)
                             pygame.draw.line(staff_surf, BAR_LINE_COLOR, (bx, treble_top), (bx, bass_bot), 1)
                             # Measure number at the top of the bar line
                             num_surf = num_font.render(str(m.index + 1), True, MEASURE_NUM_COLOR)
                             staff_surf.blit(num_surf, (bx + 3, treble_top - num_surf.get_height() - 1))
 
                     # System ending bar line
-                    sys_end_x = round(local_rect.x + MARGIN_LEFT + usable_w)
+                    sys_end_x = round(local_rect.x + margin_left + usable_w)
                     is_song_end = (sys.index == len(self.systems) - 1)
                     if is_song_end:
                         pygame.draw.line(staff_surf, BAR_LINE_COLOR, (sys_end_x - 4, treble_top), (sys_end_x - 4, bass_bot), 1)
@@ -1732,10 +2002,18 @@ class StaffView:
                                 if id(l) in kept_ids and id(r) in kept_ids]
                     sys_pieces = kept
 
+                    # Which notes print an accidental: the key signature already covers
+                    # the notes it alters, and a sign holds for the rest of its measure.
+                    accidentals = plan_accidentals(
+                        sys_pieces,
+                        [m.start_t for m in sys.measures] + [sys.start_t + sys.duration],
+                        key_fifths)
+
                     notes_info = compute_notes_info(sys_pieces, sys.start_t, sys.duration, usable_w,
-                                                    MARGIN_LEFT, s, get_beat_duration(self.song),
+                                                    margin_left, s, get_beat_duration(self.song),
                                                     [m.start_t for m in sys.measures[1:]]
-                                                    + [sys.start_t + sys.duration])
+                                                    + [sys.start_t + sys.duration],
+                                                    accidentals)
 
                     # Group the pieces into chords, the same way compute_notes_info did
                     sorted_notes = sorted(sys_pieces, key=lambda n: (n.start, n.pitch))
@@ -1967,8 +2245,7 @@ class StaffView:
                         nx = n_info["x"]
                         clef = n_info["clef"]
                         step = n_info["step_draw"]
-                        _, alter = written_step(n)
-                        accidental = alter if alter else None
+                        accidental = accidentals.get(id(n))
                         ny = note_y(step, clef, treble_mid_y, bass_mid_y, s)
 
                         sounding = (id(n) in active_ids) or (n.start <= t < n.end)
@@ -2057,7 +2334,7 @@ class StaffView:
                             # own ending bar line) - the tie to the next system is out of
                             # scope here, so it is simply not drawn
                             continue
-                        limit = MARGIN_LEFT + usable_w
+                        limit = margin_left + usable_w
                         if li["x"] >= limit or ri["x"] > limit:
                             continue
                         # MuseScore ties a single note on the side away from its chord's

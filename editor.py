@@ -320,7 +320,8 @@ class FingeringEditor(Transport):
         self._rebuild_due = None
         old = self.song
         self.song = MidiSong(self.notes, old.tracks, old.duration, old.bar_times,
-                             old.beat_times, old.path, old.raw_controls)
+                             old.beat_times, old.path, old.raw_controls,
+                             key_fifths=old.key_fifths, key_changes=old.key_changes)
         self.notes = self.song.notes            # same order: sorting is stable
         self.index = {id(n): i for i, n in enumerate(self.notes)}
         fing = {id(n): f for n, f in zip(self.notes, self.finger) if f}

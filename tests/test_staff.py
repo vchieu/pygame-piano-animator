@@ -545,6 +545,49 @@ def test_a_note_at_a_measure_start_keeps_off_the_bar_line():
     assert info[id(n_sharp)]["x"] <= margin_left + usable_w
 
 
+def test_a_crowded_measure_is_squeezed_inside_its_bar_lines():
+    # A run of fast notes late in a measure is pushed right so their flags do not touch,
+    # and at a crowded measure that push runs past the bar line: the last notes would be
+    # printed on the next measure's side of the bar, with their beam through it. The
+    # measure is squeezed from its bar line instead, and the notes before the last one
+    # come along, each keeping its minimum gap.
+    s = 7.0
+    margin_left, usable_w, sys_duration = staff.MARGIN_LEFT, 400.0, 5.0
+    starts = [1.875 + 0.125 * i for i in range(5)]
+    notes = [Note(pitch=76, start=t, end=t + 0.125, velocity=80, track=0, hand=RIGHT)
+             for t in starts]
+    info = staff.compute_notes_info(notes, 0.0, sys_duration, usable_w,
+                                    margin_left, s, 0.5, [2.5, 5.0])
+    nw = round(s * 0.75)
+    tail = nw + 0.9 * s                      # a sixteenth's flag reaches past its head
+    gap = staff.NOTE_BAR_DISTANCE_SP * s
+    bar_x = margin_left + 2.5 / sys_duration * usable_w
+
+    xs = [info[id(n)]["x"] for n in notes]
+    assert xs == sorted(xs), "the squeeze moved the notes out of their order"
+    assert xs[-1] + tail <= bar_x - gap + 1e-6, "the last note is printed past its bar line"
+    for left, right in zip(xs, xs[1:]):
+        assert right - left >= tail + (nw + 1.0) - 1e-6, (
+            "the squeeze closed the notes up until their ink touched")
+    # the notes were pulled left of their beats to make the room, never off the paper
+    assert all(x <= staff.MARGIN_LEFT + t / sys_duration * usable_w + 1e-6
+               for x, t in zip(xs, starts))
+    assert xs[0] >= margin_left
+
+
+def test_a_measure_with_room_keeps_its_notes_on_their_beats():
+    # The squeeze only ever answers a bar line that is too close: a measure with room in
+    # it is left exactly on its beats.
+    s = 7.0
+    margin_left, usable_w, sys_duration = staff.MARGIN_LEFT, 1000.0, 10.0
+    notes = [Note(pitch=64, start=1.0, end=1.5, velocity=80, track=0, hand=RIGHT),
+             Note(pitch=67, start=2.0, end=2.5, velocity=80, track=0, hand=RIGHT)]
+    info = staff.compute_notes_info(notes, 0.0, sys_duration, usable_w,
+                                    margin_left, s, 0.5, [3.0, 10.0])
+    for n in notes:
+        assert info[id(n)]["x"] == margin_left + n.start / sys_duration * usable_w
+
+
 def test_a_bar_line_is_drawn_where_its_beat_is(screen):
     # The measure line and the playback cursor are two drawings of one moment: the line is
     # at the beat's x, so the note that starts on it sits a noteBarDistance to its right
@@ -1854,4 +1897,159 @@ def test_written_spelling_and_printed_value_come_from_the_file():
     short = Note(60, 0.0, 0.5, 64, 0, RIGHT, None, False, None, 0, "whole")
     assert staff.printed_value(short, 0.5, 0.5) == "whole"     # the written value, not the length's
     assert staff.printed_value(plain, 0.5, 0.5) == QUARTER     # no <type>: from the duration
+
+
+# --------------------------------------------------------------------------- #
+# The key signature and the accidentals it covers
+# --------------------------------------------------------------------------- #
+class _KeySong(_BracketSong):
+    """A song that declares a key signature."""
+
+    def __init__(self, notes, key_fifths=0, duration=10.0, bar=2.0):
+        super().__init__(notes, duration=duration, bar=bar)
+        self.key_fifths = key_fifths
+        self.key_changes = []
+
+    def key_at(self, t):
+        return self.key_fifths
+
+
+def test_the_key_signature_is_drawn_at_the_head_of_the_staff(screen):
+    # Four sharps (E major) stand between the clef and the time signature, each on the
+    # staff step the tradition gives it: F5 on the treble staff's top line, C5, G5 and D5.
+    song = _KeySong([_note(64, 0.0, RIGHT)], key_fifths=4)
+    rect = pygame.Rect(0, 0, 1200, 140)
+    out = _draw_staff_to(song, rect)
+
+    s = max(4.0, min(12.0, (rect.h - 26) / 14.0))
+    treble_mid_y = rect.centery - round(3.0 * s)
+    bass_mid_y = rect.centery + round(3.0 * s)
+    key_x = staff.key_sig_x(rect.x + 18, s)
+
+    def ink(box):
+        return sum(1 for x in range(box.left, box.right) for y in range(box.top, box.bottom)
+                   if out.get_at((x, y))[:3] != staff.STAFF_BG)
+
+    # the sharps stand on their steps: the treble staff's F5 is its top line, its C5 the
+    # space below the middle one, its G5 the space above the top line, its D5 the line above
+    # the middle one.
+    for i, (step, sign) in enumerate(staff.key_sig_steps(4, CLEF_TREBLE)):
+        x = key_x + i * staff.KEY_SIG_ADVANCE_SP * s
+        mid_y = treble_mid_y - (step - TREBLE_MID_STEP) * (s * 0.5)
+        box = pygame.Rect(round(x), round(mid_y - 1.4 * s), round(1.0 * s), round(2.8 * s))
+        assert ink(box) > 0.05 * box.w * box.h, f"no sharp {i} on step {step}"
+        assert sign == 1
+
+    # the bass staff has the same key a third lower: F3 on its fourth line, and so on
+    for i, (step, _sign) in enumerate(staff.key_sig_steps(4, CLEF_BASS)):
+        x = key_x + i * staff.KEY_SIG_ADVANCE_SP * s
+        mid_y = bass_mid_y - (step - BASS_MID_STEP) * (s * 0.5)
+        box = pygame.Rect(round(x), round(mid_y - 1.4 * s), round(1.0 * s), round(2.8 * s))
+        assert ink(box) > 0.05 * box.w * box.h, f"no sharp {i} on the bass staff"
+
+    # a flat key writes flats instead
+    flat_song = _KeySong([_note(64, 0.0, RIGHT)], key_fifths=-2)
+    flat_out = _draw_staff_to(flat_song, rect)
+    flat_ink = sum(1 for x in range(round(key_x), round(key_x + 2 * s)) for y in range(rect.h)
+                   if flat_out.get_at((x, y))[:3] != staff.STAFF_BG)
+    assert flat_ink > 0
+
+
+def test_the_key_signature_pushes_the_time_signature_and_the_first_note():
+    # The head of the staff holds the clef, the key signature and the time signature, so
+    # a key signature makes it wider: the notes start further right, and the music between
+    # them is a little narrower.
+    s = 10.0
+    left_x = 18.0
+    plain = staff.header_margin(left_x, s, 0)
+    assert plain == MARGIN_LEFT
+
+    key_end = staff.key_sig_x(left_x, s) + staff.key_sig_width_sp(4, s) * s
+    with_key = staff.header_margin(left_x, s, 4)
+    assert with_key > MARGIN_LEFT, "the notes would run into the sharps"
+    # the time signature stands clear of the key signature
+    ts_x = staff.time_sig_x(left_x, s, key_end)
+    assert ts_x - notation.TIME_SIG_HALF_W_SP * s > key_end
+    # and the first note stands clear of the time signature
+    assert with_key > ts_x + notation.TIME_SIG_HALF_W_SP * s
+
+    # the cursor and the notes share the same margin
+    song = _KeySong([_note(64, 0.0, RIGHT)], key_fifths=4)
+    rect = pygame.Rect(0, 0, 1200, 140)
+    sv = StaffView(song)
+    margin_left, usable_w = sv._header(rect, sv.systems[0])
+    assert margin_left == staff.header_margin(left_x, sv._staff_size(rect), 4)
+    assert sv.cursor_x(0.0, rect) == rect.x + margin_left
+
+
+def test_the_key_signature_covers_the_accidentals_it_alters():
+    # E major: F, C, G and D are sharp in every octave, so those notes print no sign.
+    # A# is not in the key, so it prints a sharp.
+    f_sharp = Note(66, 0.0, 0.5, 80, 0, RIGHT, None, False, 3 * 7 + 3, 1, None)
+    a_sharp = Note(70, 0.5, 1.0, 80, 0, RIGHT, None, False, 4 * 7 + 5, 1, None)
+    plan = staff.plan_accidentals([f_sharp, a_sharp], [0.0, 2.0], 4)
+    assert plan[id(f_sharp)] is None, "the key already sharpens the F"
+    assert plan[id(a_sharp)] == 1, "the A is not in the key"
+
+    # the same notes in C major print their sharps
+    plan = staff.plan_accidentals([f_sharp, a_sharp], [0.0, 2.0], 0)
+    assert plan[id(f_sharp)] == 1
+    assert plan[id(a_sharp)] == 1
+
+    # a flat key: Bb is written as a flat and prints no sign
+    b_flat = Note(70, 0.0, 0.5, 80, 0, RIGHT, None, False, 4 * 7 + 6, -1, None)
+    plan = staff.plan_accidentals([b_flat], [0.0, 2.0], -2)
+    assert plan[id(b_flat)] is None
+
+
+def test_an_accidental_holds_for_its_measure():
+    # The sign a note prints holds for the rest of its measure: the notes of that step
+    # and octave after it print no sign, and the next measure prints it again.
+    sharp = lambda t: Note(66, t, t + 0.4, 80, 0, RIGHT, None, False, 3 * 7 + 3, 1, None)
+    first, second, next_measure = sharp(0.0), sharp(0.5), sharp(2.0)
+    plan = staff.plan_accidentals([first, second, next_measure], [0.0, 2.0], 0)
+    assert plan[id(first)] == 1, "the first F# prints the sharp"
+    assert plan[id(second)] is None, "the sign holds for the rest of the measure"
+    assert plan[id(next_measure)] == 1, "the next measure prints it again"
+
+    # a natural after a sharp in the same measure says so again
+    natural = Note(65, 0.8, 1.2, 80, 0, RIGHT, None, False, 3 * 7 + 3, 0, None)
+    plan = staff.plan_accidentals([first, natural], [0.0, 2.0], 0)
+    assert plan[id(natural)] == 0, "the F natural prints a natural"
+
+    # in a key that sharpens the F, the F natural still prints one
+    plan = staff.plan_accidentals([first, natural], [0.0, 2.0], 4)
+    assert plan[id(natural)] == 0
+
+    # and a plain F in a sharp key prints a natural: the key sharpens it
+    plain = Note(65, 0.0, 0.4, 80, 0, RIGHT, None, False, 3 * 7 + 3, 0, None)
+    plan = staff.plan_accidentals([plain], [0.0, 2.0], 4)
+    assert plan[id(plain)] == 0
+    # in C major it prints nothing at all
+    plan = staff.plan_accidentals([plain], [0.0, 2.0], 0)
+    assert plan[id(plain)] is None
+
+
+def test_the_notes_of_a_key_signature_score_print_no_accidental(screen):
+    # The whole point of the key signature: the notes it covers print no sign.
+    song = _KeySong([_note(66, 0.0, RIGHT), _note(61, 0.5, RIGHT), _note(63, 1.0, RIGHT),
+                     _note(68, 1.5, RIGHT), _note(64, 2.0, RIGHT)], key_fifths=4)
+    rect = pygame.Rect(0, 0, 1200, 140)
+    printed = []
+    real = notation.draw_staff_note
+
+    def spy(*args, **kwargs):
+        printed.append(kwargs.get("accidental", args[9] if len(args) > 9 else None))
+        return real(*args, **kwargs)
+
+    notation.draw_staff_note = spy
+    staff.notation.draw_staff_note = spy
+    try:
+        StaffView(song).draw(screen, rect, 0.0)
+    finally:
+        notation.draw_staff_note = real
+        staff.notation.draw_staff_note = real
+
+    assert printed, "the test song should draw its notes"
+    assert all(a is None for a in printed), f"the key should cover them all, got {printed}"
 

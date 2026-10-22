@@ -21,7 +21,7 @@ import os
 import struct
 import sys
 from dataclasses import dataclass, replace
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import pretty_midi
 
@@ -39,6 +39,76 @@ PEDALS = (SUSTAIN, SOSTENUTO, SOFT)
 
 _BLACK_PITCH_CLASSES = {1, 3, 6, 8, 10}
 _NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+# Diatonic step in octave (C=0, D=1, E=2, F=3, G=4, A=5, B=6) and sharp flag (0 or 1)
+# MIDI pitch % 12 -> (diatonic_step_in_octave, is_sharp)
+PITCH_MAP = {
+    0: (0, 0),   # C
+    1: (0, 1),   # C#
+    2: (1, 0),   # D
+    3: (1, 1),   # D#
+    4: (2, 0),   # E
+    5: (3, 0),   # F
+    6: (3, 1),   # F#
+    7: (4, 0),   # G
+    8: (4, 1),   # G#
+    9: (5, 0),   # A
+    10: (5, 1),  # A#
+    11: (6, 0),  # B
+}
+
+# The letters of the scale, in the order a key signature writes them: the sharps go
+# F C G D A E B, the flats B E A D G C F - the circle of fifths. A letter is numbered
+# C=0, D=1, E=2, F=3, G=4, A=5, B=6, the same numbering the diatonic step uses.
+SHARP_ORDER = (3, 0, 4, 1, 5, 2, 6)
+FLAT_ORDER = (6, 2, 5, 1, 4, 0, 3)
+
+
+def key_alterations(fifths: int) -> dict:
+    """
+    The alteration a key signature gives each letter of the scale.
+
+    `fifths` is how many sharps (positive) or flats (negative) the key holds: 4 for
+    E major (F#, C#, G#, D#), -2 for Bb major (Bb, Eb). The result maps the letter
+    (C=0 .. B=6) to the semitones it is raised or lowered by.
+    """
+    out = {}
+    if fifths > 0:
+        for letter in SHARP_ORDER[:min(7, fifths)]:
+            out[letter] = 1
+    elif fifths < 0:
+        for letter in FLAT_ORDER[:min(7, -fifths)]:
+            out[letter] = -1
+    return out
+
+
+def spell_with_key(pitch: int, fifths: int) -> Tuple[int, int]:
+    """
+    How a pitch is written in a key: the (diatonic step, alteration) the staff draws.
+
+    A MIDI file carries no spelling of its own, so a black key is read as a sharp -
+    what this has always drawn - unless the key says otherwise: in Bb major the black
+    keys the key flattens (Bb, Eb) are written as flats, the way the key reads them.
+    """
+    octave, cls = divmod(pitch, 12)
+    step_in_oct, sharp = PITCH_MAP[cls]
+    if not sharp or not fifths:
+        return octave * 7 + step_in_oct, sharp
+    alt = key_alterations(fifths)
+    if alt.get(step_in_oct):
+        return octave * 7 + step_in_oct, sharp      # the key sharpens this letter
+    flat_letter = (step_in_oct + 1) % 7
+    if alt.get(flat_letter) == -1:
+        return octave * 7 + flat_letter, -1         # the key flattens the letter below
+    return octave * 7 + step_in_oct, sharp
+
+
+def _spelled_for_key(note: Note, fifths: int) -> Note:
+    """The note as the key writes it: a black key the key flattens becomes a flat."""
+    step, alter = spell_with_key(note.pitch, fifths)
+    if alter == -1 and note.step is None:
+        return replace(note, step=step, alter=alter)
+    return note
 
 
 def is_black_key(pitch: int) -> bool:
@@ -107,7 +177,8 @@ class MidiSong:
 
     def __init__(self, notes: List[Note], tracks: List[TrackInfo], duration: float,
                  bar_times: List[float], beat_times: List[float], path: Optional[str] = None,
-                 controls: Optional[list] = None):
+                 controls: Optional[list] = None, key_fifths: int = 0,
+                 key_changes: Optional[list] = None):
         self.notes: List[Note] = sorted(notes, key=lambda n: (n.start, n.pitch))
         # pedals: [(time, controller, value)] for sustain (64), sostenuto (66), soft (67).
         # Performance recordings (MAESTRO, Disklavier) send the pedal's exact
@@ -128,6 +199,13 @@ class MidiSong:
         self.path = path
         self.title = os.path.splitext(os.path.basename(path))[0] if path else "Untitled"
         self.cleanup: List[str] = []           # what load_midi's sanitizing changed
+        # The key signature the file declares: how many sharps (positive) or flats
+        # (negative) it holds. The staff draws it at the head of every system and
+        # leaves out the accidentals the key already covers (see staff.py).
+        self.key_fifths = int(key_fifths)
+        # The keys that come later, as (time, fifths) - a score may change its key.
+        self.key_changes: List[Tuple[float, int]] = sorted(
+            (float(t), int(f)) for t, f in (key_changes or []))
 
         self._starts = [n.start for n in self.notes]
         # Longest note lets us bound how far back an overlapping note can start.
@@ -172,6 +250,18 @@ class MidiSong:
             return (LOWEST_PIANO_KEY, HIGHEST_PIANO_KEY)
         pitches = [n.pitch for n in self.notes]
         return (min(pitches), max(pitches))
+
+    def key_at(self, t: float) -> int:
+        """
+        The key signature in force at time `t`: how many sharps (positive) or flats
+        (negative) it holds. A score that changes its key changes it here.
+        """
+        fifths = self.key_fifths
+        for change_t, change_fifths in self.key_changes:
+            if change_t > t:
+                break
+            fifths = change_fifths
+        return fifths
 
 
 # --------------------------------------------------------------------------- #
@@ -342,6 +432,28 @@ def read_markers(path: str) -> dict:
 def read_fingering(path: str) -> dict:
     """{(tick, pitch): finger} for every note-on preceded by a fingering text event."""
     return {k: f for k, (h, f) in read_markers(path).items() if isinstance(f, int)}
+
+
+def read_key_signature(path: str) -> Optional[int]:
+    """
+    The key signature a Standard MIDI File declares, or None when it declares none.
+
+    The `FF 59` meta event carries the key as a signed count of sharps (negative
+    for flats): 4 for E major, -2 for Bb major. pretty_midi keeps the notes and the
+    tempo but not the key, so the file's own events are read here.
+    """
+    try:
+        _, _, tracks = _smf_tracks(path)
+    except Exception:               # an unreadable file: just no key signature
+        return None
+    for events in tracks.values():
+        for _t, kind, p in events:
+            if kind == 'meta' and p[0] == 0x59 and len(p[1]) >= 1:
+                sf = p[1][0]
+                fifths = sf - 256 if sf > 127 else sf
+                if -7 <= fifths <= 7:
+                    return fifths
+    return None
 
 
 def _tempo_map(header, tracks):
@@ -756,6 +868,15 @@ def load_midi(path: str, include_drums: bool = False, split_pitch: int = MIDDLE_
     notes, r = sanitize_notes(notes, min_duration)
     report += r
 
+    # The key the file declares: the staff draws it and leaves out the accidentals
+    # it already covers.
+    key_fifths = read_key_signature(path) or 0
+
+    # How a black key is written: a MIDI file carries no spelling of its own, so it
+    # is read as a sharp - unless the key flattens it, as in Bb major.
+    if key_fifths < 0:
+        notes = [_spelled_for_key(n, key_fifths) for n in notes]
+
     # Work out each note's hand from the music. A hand the track says (by
     # its name or register) is followed unless that hand couldn't keep up
     # (one track holding both hands' notes in a passage); only the hands
@@ -788,7 +909,8 @@ def load_midi(path: str, include_drums: bool = False, split_pitch: int = MIDDLE_
                 controls.append((float(cc.time), int(cc.number), int(cc.value)))
 
     duration = max((n.end for n in notes), default=0.0)
-    song = MidiSong(notes, tracks, duration, bar_times, beat_times, path, controls)
+    song = MidiSong(notes, tracks, duration, bar_times, beat_times, path, controls,
+                    key_fifths=key_fifths)
     song.cleanup = report                      # what sanitizing changed, for the curious
     for line in report:
         print("%s: %s" % (os.path.basename(path), line))

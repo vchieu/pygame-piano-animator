@@ -32,7 +32,7 @@ import os
 import re
 import zipfile
 from dataclasses import replace
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import xml.etree.ElementTree as ET
 
@@ -456,8 +456,20 @@ def _part_hands(parts) -> List[Optional[str]]:
     return out
 
 
+def _key_fifths(attributes) -> Optional[int]:
+    """
+    The key signature an `<attributes>` block declares: how many sharps (positive)
+    or flats (negative) the key holds. `<key><fifths>4</fifths>` is E major.
+    """
+    key = _kid(attributes, "key")
+    if key is None:
+        return None
+    f = _int(key, "fifths")
+    return None if f is None else max(-7, min(7, int(f)))
+
+
 def _read_all_parts(parts, order: List[int], hands: List[Optional[str]],
-                    notes: List[Note], staff_from_file: bool = True) -> float:
+                    notes: List[Note], staff_from_file: bool = True) -> tuple:
     """
     Read every part together, measure by measure, in playing order.
 
@@ -466,13 +478,18 @@ def _read_all_parts(parts, order: List[int], hands: List[Optional[str]],
     them. So the map is shared, advanced once per measure of the order, and each
     part's measure at that index is read into `notes` at that moment. A measure
     played twice (a repeat) is read twice, so the same bar comes out again at its
-    new times. Returns when the music ends, in seconds.
+    new times. Returns when the music ends, in seconds, and the key the score
+    declares: (duration, key_fifths, key_changes).
     """
     part_measures = [[_Measure(m) for m in _kids(p, "measure")] for p in parts]
     ties: List[dict] = [{} for _ in parts]
     tempo = _Tempo()
     at = 0.0            # the running position in seconds
     div = 0             # the running position in divisions
+    key_fifths = 0      # the key the piece starts in
+    current = 0         # the key in force
+    key_seen = False    # whether the score has declared a key yet
+    key_changes: List[Tuple[float, int]] = []
     for idx in order:
         present = [its[idx].elem for its in part_measures if idx < len(its)]
         if not present:
@@ -484,6 +501,16 @@ def _read_all_parts(parts, order: List[int], hands: List[Optional[str]],
                 d = _int(attributes, "divisions")
                 if d:
                     tempo.set_divisions(d, div)
+                # The key signature: a grand staff writes it in both parts, so only
+                # a key that differs from the one in force is a change.
+                fifths = _key_fifths(attributes)
+                if fifths is not None:
+                    if not key_seen:
+                        key_fifths = fifths
+                        key_seen = True
+                    elif fifths != current:
+                        key_changes.append((at, fifths))
+                    current = fifths
         length = 0.0
         for i, its in enumerate(part_measures):
             if idx >= len(its):
@@ -492,7 +519,7 @@ def _read_all_parts(parts, order: List[int], hands: List[Optional[str]],
                                                hands[i], notes, ties[i], staff_from_file))
         div += _measure_span(part_measures, idx, tempo.divisions)
         at += length
-    return at
+    return at, key_fifths, key_changes
 
 
 def _measure_span(part_measures, idx: int, divisions: int) -> int:
@@ -709,7 +736,8 @@ def load_musicxml(path: str, hands_from_file: bool = True, fingering: str = "fil
 
         notes: List[Note] = []
         tracks: List[TrackInfo] = []
-        duration = _read_all_parts(parts, order, part_hand, notes, hands_from_file)
+        duration, key_fifths, key_changes = _read_all_parts(parts, order, part_hand, notes,
+                                                             hands_from_file)
         for i in range(len(parts)):
             hand = part_hand[i] if hands_from_file else None
             tracks.append(TrackInfo(i, (names[i] if i < len(names) else "") or f"Part {i + 1}",
@@ -744,7 +772,8 @@ def load_musicxml(path: str, hands_from_file: bool = True, fingering: str = "fil
             tracks[i] = replace(t, hand=None, note_count=len(mine))
 
     duration = max((n.end for n in notes), default=duration)
-    song = MidiSong(notes, tracks, duration, bar_times, beat_times, path, [])
+    song = MidiSong(notes, tracks, duration, bar_times, beat_times, path, [],
+                    key_fifths=key_fifths, key_changes=key_changes)
     song.cleanup = report
     for line in report:
         print("%s: %s" % (os.path.basename(path), line))

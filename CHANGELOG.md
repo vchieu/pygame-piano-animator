@@ -14,10 +14,15 @@ v20YY.MM.DD.HHMM). Newest first.
   ledger lines.
 - The staff's notes are engraved like MuseScore's: real noteheads, flags, accidentals and dots from a proper
   music font, with stems and ledger lines at the same proportions.
-- Measure bar lines stand where their beat is - the same moment the cursor draws - and a note that starts on
-  the downbeat, or whose flag or dot reaches into the next measure, keeps a staff space and a half off them,
-  so nothing is printed on a bar line any more (a flag or dot still brushes one where the notes either side
-  leave no room to pull it further away).
+- A score's key signature is drawn at the head of every system, and the sharps or flats it already covers are no
+  longer printed on the notes as well: `Khong-mon-dang-ho-doi.mxl` (four sharps) used to carry seventeen sharps in
+  its first system and no signature at all. The key comes from the score's own `<key>`, and from a MIDI file's
+  key-signature record; a flat key is spelled with flats. A note that really differs from the key still prints a
+  sign, that sign holds for the rest of its measure, and a natural is printed where a note comes back to the key.
+- Measure bar lines stand where their beat is - the same moment the cursor draws - and nothing is printed on
+  them: a note that starts on the downbeat keeps a staff space and a half off the line, and a crowded measure is
+  squeezed back between its bar lines instead of letting its last notes and beam spill over the one that ends it
+  (`50-nam-ve-sau`'s fifth note used to be printed through the first bar line).
 - Where the two hands play close together, a note's stem and a run of beamed notes now turn the other way rather
   than be drawn over the other hand's notes, and are never pushed off the staff to get out of the way. Where the
   staff panel is too short for the engraver's stems, they shorten so the beam lands on the edge of the paper

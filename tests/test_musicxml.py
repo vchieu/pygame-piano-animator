@@ -246,6 +246,51 @@ def test_alter_keeps_the_written_spelling(tmp_path):
     assert hi.step == 4 * 7 + "CDEFGAB".index("B")   # octave 4, step B
 
 
+def test_the_key_signature_is_read(tmp_path):
+    # <key><fifths>4</fifths> is E major: the staff draws the four sharps at the head of
+    # every system and leaves out the accidentals the key already covers.
+    attributes = ("<attributes><divisions>4</divisions>"
+                  "<key><fifths>4</fifths><mode>major</mode></key></attributes>")
+    body = (note("F", 4, 4, "quarter", alter=1) + note("C", 4, 4, "quarter", alter=1)
+            + note("D", 4, 4, "quarter", alter=1) + note("A", 4, 4, "quarter"))
+    p = one_part(tmp_path, measure(body, attributes=attributes))
+    song = load_musicxml(p)
+    assert song.key_fifths == 4
+    assert song.key_changes == []          # the first key is not a change
+    assert song.key_at(0.0) == 4
+
+    # a flat key: <fifths>-2</fifths> is Bb major
+    flat = ("<attributes><divisions>4</divisions>"
+            "<key><fifths>-2</fifths><mode>major</mode></key></attributes>")
+    p = one_part(tmp_path, measure(note("B", 4, 4, "quarter", alter=-1), attributes=flat),
+                 name="flat.xml")
+    song = load_musicxml(p)
+    assert song.key_fifths == -2
+
+    # a score without a key signature has none
+    p = one_part(tmp_path, measure(note("C", 4, 4, "quarter")), name="plain.xml")
+    assert load_musicxml(p).key_fifths == 0
+
+
+def test_a_key_change_is_read_as_a_change(tmp_path):
+    # A score that changes its key: the first key is the score's, the second one a change
+    # at the time it happens.
+    first = ("<attributes><divisions>4</divisions>"
+             "<key><fifths>4</fifths><mode>major</mode></key></attributes>")
+    second = ("<attributes><key><fifths>-2</fifths><mode>major</mode></key></attributes>")
+    m1 = measure(note("C", 4, 4, "quarter") * 4, number=1, attributes=first)
+    m2 = measure(note("D", 4, 4, "quarter") * 4, number=2, attributes=second)
+    p = one_part(tmp_path, m1 + m2)
+    song = load_musicxml(p)
+    assert song.key_fifths == 4
+    assert len(song.key_changes) == 1
+    t, fifths = song.key_changes[0]
+    assert fifths == -2
+    assert t == pytest.approx(2.0)        # the second bar starts there (120 bpm)
+    assert song.key_at(0.0) == 4
+    assert song.key_at(t + 0.1) == -2
+
+
 def test_fingering_from_file_is_kept(tmp_path):
     body = (note("C", 4, 4, "quarter", finger=3)
             + note("D", 4, 4, "quarter"))
