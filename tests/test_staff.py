@@ -234,6 +234,49 @@ def test_a_tie_goes_opposite_the_stem(screen, monkeypatch):
     assert {c[3] for c in calls} == {True, False}
 
 
+def test_note_crossing_system_boundary_is_drawn_on_next_system():
+    # A note starting in system 0 and extending into system 1 must be present in
+    # system 1's split pieces so that the continuation note is drawn at the start
+    # of the measure in system 1.
+    song = load_midi(midi_path("50-nam-ve-sau.mid"))
+    sv = StaffView(song)
+    assert len(sv.systems) >= 2
+    sys0, sys1 = sv.systems[0], sv.systems[1]
+    # Find any note crossing the boundary between sys0 and sys1
+    boundary = sys0.end_t
+    crossing = [n for n in song.notes if n.start < boundary - 1e-9 and n.end > boundary + 1e-9]
+    assert crossing, "fixture 50-nam-ve-sau should have notes crossing system boundary"
+
+    pieces0, _ = staff.split_at_bar_lines(sys0.notes, song.bar_times)
+    kept0 = [p for p in pieces0 if sys0.start_t - 1e-9 <= p.start < sys0.end_t - 1e-9]
+
+    pieces1, _ = staff.split_at_bar_lines(sys1.notes, song.bar_times)
+    kept1 = [p for p in pieces1 if sys1.start_t - 1e-9 <= p.start < sys1.end_t - 1e-9]
+
+    for n in crossing:
+        # sys0 has the head piece ending at boundary
+        head = [p for p in kept0 if p.pitch == n.pitch and abs(p.end - boundary) < 1e-4]
+        assert head, f"system 0 should hold head piece for crossing pitch {n.pitch}"
+        # sys1 has the tail piece starting at boundary
+        tail = [p for p in kept1 if p.pitch == n.pitch and abs(p.start - boundary) < 1e-4]
+        assert tail, f"system 1 should hold tail piece for crossing pitch {n.pitch}"
+
+
+def test_tuplet_groups_with_chord_at_start():
+    # If a chord has multiple notes at the same start time with tuplet_type="start",
+    # they belong to the same group rather than splitting into separate groups.
+    notes = [
+        Note(68, 0.0, 0.2, 80, 0, RIGHT, tuplet_num=3, tuplet_type="start"),
+        Note(71, 0.0, 0.2, 80, 0, RIGHT, tuplet_num=3, tuplet_type="start"),
+        Note(73, 0.2, 0.4, 80, 0, RIGHT, tuplet_num=3, tuplet_type="None"),
+        Note(75, 0.4, 0.6, 80, 0, RIGHT, tuplet_num=3, tuplet_type="stop"),
+    ]
+    info = staff.compute_notes_info(notes, 0.0, 1.0, 600.0, staff.MARGIN_LEFT, 10.0)
+    groups = staff.find_tuplet_groups(notes, info)
+    assert len(groups) == 1
+    assert len(groups[0][0]) == 4
+
+
 def test_empty_song_and_synthetic_systems():
     # Empty / None
     assert build_systems(None) == []

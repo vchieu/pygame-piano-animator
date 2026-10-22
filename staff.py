@@ -408,14 +408,13 @@ def build_systems(song, target_dur: float = 10.0) -> List[StaffSystem]:
         chunk = measures[i:i + bars_per_sys]
         systems.append(StaffSystem(len(systems), chunk))
 
-    # Distribute notes into systems
-    sys_starts = [sys.start_t for sys in systems]
+    # Distribute notes into systems (a note spanning across system boundaries is
+    # added to every system it overlaps with, so tied pieces across pages/systems
+    # are rendered on both the system where they start and the system where they continue)
     for n in getattr(song, "notes", []):
-        if not systems:
-            break
-        idx = bisect.bisect_right(sys_starts, n.start) - 1
-        idx = max(0, min(len(systems) - 1, idx))
-        systems[idx].notes.append(n)
+        for sys in systems:
+            if n.start < sys.end_t - 1e-9 and n.end > sys.start_t + 1e-9:
+                sys.notes.append(n)
 
     return systems
 
@@ -1843,9 +1842,12 @@ def find_tuplet_groups(sys_notes: List[Note], notes_info: dict) -> List[Tuple[Li
         key = (n.hand, info["clef"], n.tuplet_num)
         kind = getattr(n, "tuplet_type", None)
         if kind == "start":
-            close(key)                # a group the score never stopped: this one takes over
-            open_groups[key] = [n]
-            order.append(key)
+            if key in open_groups and abs(n.start - open_groups[key][-1].start) < 1e-4:
+                open_groups[key].append(n)
+            else:
+                close(key)                # a group the score never stopped: this one takes over
+                open_groups[key] = [n]
+                order.append(key)
             continue
         if key in open_groups:
             open_groups[key].append(n)
@@ -2103,15 +2105,14 @@ class StaffView:
                     # everything below - layout, beams, brackets, the draw loop - works on the
                     # pieces, never on the raw notes. `sys_ties` pairs the pieces to join.
                     sys_pieces, sys_ties = split_at_bar_lines(sys.notes, self.song.bar_times)
-                    # A note crossing the system's own ending bar line is cut there too, but
-                    # the tail piece opens the *next* system - `build_systems` filed the note
-                    # by its onset, so nothing on this system owns that piece. It is left out
-                    # (as the plan records), which only ever drops a piece drawn past the
-                    # panel edge anyway, and its tie to the next system goes with it.
-                    kept = [p for p in sys_pieces if p.start < sys.end_t - 1e-9]
+                    # Keep only the pieces that belong to this system (starting on or after
+                    # sys.start_t and before sys.end_t). A note crossing system boundaries is
+                    # split at the bar line; the head piece is rendered on the earlier system
+                    # and the tail piece opens the next system at its first bar line.
+                    kept = [p for p in sys_pieces if sys.start_t - 1e-9 <= p.start < sys.end_t - 1e-9]
                     kept_ids = {id(p) for p in kept}
                     sys_ties = [(l, r) for l, r in sys_ties
-                                if id(l) in kept_ids and id(r) in kept_ids]
+                                if id(l) in kept_ids or id(r) in kept_ids]
                     sys_pieces = kept
 
                     # Which notes print an accidental: the key signature already covers
@@ -2447,28 +2448,45 @@ class StaffView:
                     for left, right in sys_ties:
                         li = notes_info.get(id(left))
                         ri = notes_info.get(id(right))
-                        if li is None or ri is None:
-                            # a piece outside this system (the note crossed the system's
-                            # own ending bar line) - the tie to the next system is out of
-                            # scope here, so it is simply not drawn
+                        if li is None and ri is None:
                             continue
                         limit = margin_left + usable_w
-                        if li["x"] >= limit or ri["x"] > limit:
-                            continue
-                        # MuseScore ties a single note on the side away from its chord's
-                        # stem; a beamed piece has the beam's direction instead.
-                        up = not li.get("beam_stem_up", li.get("chord_stem_up", False))
-                        # one y for both ends - the pieces share a pitch, so they sit at the
-                        # same height; the offset lifts the crescent to the notehead's outer
-                        # edge, clear of the head, on the side the tie goes
-                        head = printed_shape(left, left.duration, get_beat_duration(self.song, left.start))[0]
-                        head_half = notation.HEAD_BOX[head][2] * 0.5 * s
+                        if li is not None and ri is not None:
+                            if li["x"] >= limit or ri["x"] > limit:
+                                continue
+                            up = not li.get("beam_stem_up", li.get("chord_stem_up", False))
+                            ref_note, info_ref = left, li
+                            head = printed_shape(left, left.duration, get_beat_duration(self.song, left.start))[0]
+                            head_half = notation.HEAD_BOX[head][2] * 0.5 * s
+                            x0 = li["x"] + head_half * 0.5
+                            x1 = ri["x"] - head_half * 0.5
+                        elif li is not None:
+                            # Tie extending off the right edge of this system
+                            if li["x"] >= limit:
+                                continue
+                            up = not li.get("beam_stem_up", li.get("chord_stem_up", False))
+                            ref_note, info_ref = left, li
+                            head = printed_shape(left, left.duration, get_beat_duration(self.song, left.start))[0]
+                            head_half = notation.HEAD_BOX[head][2] * 0.5 * s
+                            x0 = li["x"] + head_half * 0.5
+                            x1 = min(li["x"] + 2.5 * s, limit)
+                        else:
+                            # Tie entering from the left edge of this system into the continuation note
+                            if ri["x"] > limit:
+                                continue
+                            up = not ri.get("beam_stem_up", ri.get("chord_stem_up", False))
+                            ref_note, info_ref = right, ri
+                            head = printed_shape(right, right.duration, get_beat_duration(self.song, right.start))[0]
+                            head_half = notation.HEAD_BOX[head][2] * 0.5 * s
+                            x1 = ri["x"] - head_half * 0.5
+                            x0 = max(margin_left - 1.2 * s, x1 - 2.0 * s)
+
                         side = -1.0 if up else 1.0
-                        y = note_y(li["step_draw"], li["clef"], treble_mid_y, bass_mid_y, s) \
+                        y = note_y(info_ref["step_draw"], info_ref["clef"], treble_mid_y, bass_mid_y, s) \
                             + side * (head_half + notation.TIE_END_SP * s)
-                        col = HAND_COLORS.get(left.hand, HAND_COLORS[RIGHT])[0]
-                        notation.draw_tie(staff_surf, s, li["x"] + head_half * 0.5,
-                                          ri["x"] - head_half * 0.5, y, up, col)
+                        col = HAND_COLORS.get(ref_note.hand, HAND_COLORS[RIGHT])[0]
+                        if x1 > x0:
+                            notation.draw_tie(staff_surf, s, x0, x1, y, up, col)
 
                     # 8. Playback cursor
                     cx = round(self.cursor_x(t, local_rect))

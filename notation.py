@@ -751,7 +751,7 @@ def draw_tuplet_bracket(surf, s, x0, x1, y, num_str, color, stem_up=True):
     # The number itself, centred in the gap.
     if glyphs is not None:
         gap_px = DIGIT_GAP_SP * s
-        left = cx - (num_w - gap_px) / 2.0
+        left = cx - num_w / 2.0
         for g, w in zip(glyphs, widths):
             g.draw_centred(surf, left + w / 2.0, y)
             left += w + gap_px
