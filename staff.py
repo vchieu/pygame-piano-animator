@@ -2445,45 +2445,57 @@ class StaffView:
                     # The tie joins the two heads' facing edges and arches away from the
                     # stems - MuseScore ties a single note opposite its chord's stem
                     # (SlurTieLayout::computeUp, slurtielayout.cpp:3086: setUp(!chord->up())).
+                    #
+                    # A tie cut by the system's edge is drawn in full on both systems: the
+                    # earlier one carries it out to the closing bar line, the later one opens
+                    # it at the staff's left edge, so the break still reads as a tie instead
+                    # of a pair of stubs.
+                    limit = margin_left + usable_w
                     for left, right in sys_ties:
                         li = notes_info.get(id(left))
                         ri = notes_info.get(id(right))
                         if li is None and ri is None:
                             continue
-                        limit = margin_left + usable_w
                         if li is not None and ri is not None:
                             if li["x"] >= limit or ri["x"] > limit:
                                 continue
-                            up = not li.get("beam_stem_up", li.get("chord_stem_up", False))
+                            left_head = printed_shape(left, left.duration,
+                                                      get_beat_duration(self.song, left.start))[0]
+                            right_head = printed_shape(right, right.duration,
+                                                       get_beat_duration(self.song, right.start))[0]
+                            x0 = li["x"] + notation.HEAD_BOX[left_head][2] * 0.25 * s
+                            x1 = ri["x"] - notation.HEAD_BOX[right_head][2] * 0.25 * s
                             ref_note, info_ref = left, li
-                            head = printed_shape(left, left.duration, get_beat_duration(self.song, left.start))[0]
-                            head_half = notation.HEAD_BOX[head][2] * 0.5 * s
-                            x0 = li["x"] + head_half * 0.5
-                            x1 = ri["x"] - head_half * 0.5
                         elif li is not None:
-                            # Tie extending off the right edge of this system
+                            # The tie leaves this system: run it to the closing bar line.
                             if li["x"] >= limit:
                                 continue
-                            up = not li.get("beam_stem_up", li.get("chord_stem_up", False))
+                            left_head = printed_shape(left, left.duration,
+                                                      get_beat_duration(self.song, left.start))[0]
+                            x0 = li["x"] + notation.HEAD_BOX[left_head][2] * 0.25 * s
+                            x1 = limit
                             ref_note, info_ref = left, li
-                            head = printed_shape(left, left.duration, get_beat_duration(self.song, left.start))[0]
-                            head_half = notation.HEAD_BOX[head][2] * 0.5 * s
-                            x0 = li["x"] + head_half * 0.5
-                            x1 = min(li["x"] + 2.5 * s, limit)
                         else:
-                            # Tie entering from the left edge of this system into the continuation note
+                            # The tie comes in from the break: open it at the staff's left
+                            # edge, before the clef and key, and land it on the first note.
                             if ri["x"] > limit:
                                 continue
-                            up = not ri.get("beam_stem_up", ri.get("chord_stem_up", False))
+                            right_head = printed_shape(right, right.duration,
+                                                       get_beat_duration(self.song, right.start))[0]
+                            x0 = left_x
+                            x1 = ri["x"] - notation.HEAD_BOX[right_head][2] * 0.25 * s
                             ref_note, info_ref = right, ri
-                            head = printed_shape(right, right.duration, get_beat_duration(self.song, right.start))[0]
-                            head_half = notation.HEAD_BOX[head][2] * 0.5 * s
-                            x1 = ri["x"] - head_half * 0.5
-                            x0 = max(margin_left - 1.2 * s, x1 - 2.0 * s)
 
+                        up = not info_ref.get("beam_stem_up", info_ref.get("chord_stem_up", False))
+                        head = printed_shape(ref_note, ref_note.duration,
+                                             get_beat_duration(self.song, ref_note.start))[0]
+                        # The head's half height (HEAD_BOX is (left, top, right, bottom)) keeps
+                        # the crescent clear of the ink it leaves from.
+                        head_half_h = (notation.HEAD_BOX[head][1]
+                                       - notation.HEAD_BOX[head][3]) * 0.5 * s
                         side = -1.0 if up else 1.0
                         y = note_y(info_ref["step_draw"], info_ref["clef"], treble_mid_y, bass_mid_y, s) \
-                            + side * (head_half + notation.TIE_END_SP * s)
+                            + side * (head_half_h + notation.TIE_END_SP * s)
                         col = HAND_COLORS.get(ref_note.hand, HAND_COLORS[RIGHT])[0]
                         if x1 > x0:
                             notation.draw_tie(staff_surf, s, x0, x1, y, up, col)

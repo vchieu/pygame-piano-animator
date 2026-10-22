@@ -234,6 +234,37 @@ def test_a_tie_goes_opposite_the_stem(screen, monkeypatch):
     assert {c[3] for c in calls} == {True, False}
 
 
+def test_a_tie_over_a_system_break_reaches_both_margins(screen, monkeypatch):
+    # A tie cut by a system's edge is drawn in full on both systems: the earlier one
+    # carries it out to the closing bar line, the later one opens it at the staff's
+    # left edge. A short stub on either side would read as a broken tie.
+    song = load_midi(midi_path("50-nam-ve-sau.mid"))
+    sv = StaffView(song)
+    rect = pygame.Rect(0, 0, 1400, 300)
+    assert len(sv.systems) >= 2
+
+    calls = []
+    real = notation.draw_tie
+
+    def record(surf, sp, x0, x1, y, up, color):
+        calls.append((x0, x1))
+        return real(surf, sp, x0, x1, y, up, color)
+
+    monkeypatch.setattr(notation, "draw_tie", record)
+
+    sys0 = sv.systems[0]
+    margin_left, usable_w = sv._header(rect, sys0)
+    limit = margin_left + usable_w
+    sv.draw(pygame.Surface(rect.size), rect, sys0.start_t)
+    assert any(abs(x1 - limit) < 1e-6 for _x0, x1 in calls), \
+        "the tie leaving the system should reach the closing bar line"
+
+    calls.clear()
+    sv.draw(pygame.Surface(rect.size), rect, sv.systems[1].start_t)
+    assert any(abs(x0 - staff.STAFF_LEFT_X) < 1e-6 for x0, _x1 in calls), \
+        "the tie entering the system should start at the staff's left edge"
+
+
 def test_note_crossing_system_boundary_is_drawn_on_next_system():
     # A note starting in system 0 and extending into system 1 must be present in
     # system 1's split pieces so that the continuation note is drawn at the start
