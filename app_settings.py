@@ -41,8 +41,8 @@ from midi_loader import LEFT, RIGHT
 TO_MENU = "menu"
 FPS_CAP_MIN, FPS_CAP_MAX = 24, 240      # (as main.py's: the slider's top step past FPS_CAP_MAX is "uncapped")
 ROW_H = 56                              # each setting's row in the panel (less in a small window...
-ROW_H_MIN = 46                          # ...down to this: the panel kept above the window's centre)
-ROWS = 8
+ROW_H_MIN = 40                          # ...down to this: the panel kept above the window's centre)
+ROWS = 9
 PICK_ROW_H = 34                         # the font list's rows...
 PICK_PREVIEW = 20                       # ...each name drawn in its own face this big
 
@@ -52,6 +52,8 @@ MUSICXML_HANDS = ("file", "auto")
 MUSICXML_HANDS_LABEL = {"file": "From the file", "auto": "Work out"}
 MUSICXML_FINGERING = ("auto", "file", "fill")
 MUSICXML_FINGERING_LABEL = {"auto": "Auto", "file": "From the file", "fill": "Fill in"}
+PEDAL_MODES = ("score", "auto")
+PEDAL_MODE_LABEL = {"score": "From the score", "auto": "Auto by measure"}
 
 
 def _next_choice(choices, current):
@@ -71,8 +73,9 @@ class SettingsScreen:
         self.sf_default = Button("Use default", "sf_default", font="small")
         self.font_choose = Button("Choose…", "font_choose", font="small")
         self.font_default = Button("Use default", "font_default", font="small")
-        self.xml_hands = Button("", "xml_hands", font="small")
-        self.xml_fingering = Button("", "xml_fingering", font="small")
+        self.xml_hands = Button(MUSICXML_HANDS_LABEL[pianists.app_setting("musicxml_hands", "file")], "xml_hands", font="small")
+        self.xml_fingering = Button(MUSICXML_FINGERING_LABEL[pianists.app_setting("musicxml_fingering", "fill")], "xml_fingering", font="small")
+        self.pedal = Button(PEDAL_MODE_LABEL[pianists.app_setting("pedal_mode", "score")], "pedal", font="small")
         self.picker = None               # the font list (FontPicker) while it's open
         cap = app.fps_cap
         self.fps = Slider("", FPS_CAP_MIN, FPS_CAP_MAX + 1, FPS_CAP_MAX + 1 if cap is None else cap,
@@ -103,6 +106,7 @@ class SettingsScreen:
         self.font_choose.rect = pygame.Rect(right - 110 - 8 - 110, y + 5 * rh + 6, 110, 30)
         self.xml_hands.rect = pygame.Rect(right - 150, y + 6 * rh + 6, 150, 30)
         self.xml_fingering.rect = pygame.Rect(right - 150, y + 7 * rh + 6, 150, 30)
+        self.pedal.rect = pygame.Rect(right - 150, y + 8 * rh + 6, 150, 30)
         self._rows = (x, y)
 
     # ----- the soundfont ---------------------------------------------------------
@@ -216,6 +220,12 @@ class SettingsScreen:
                 cur = pianists.app_setting("musicxml_fingering", "fill")
                 pianists.set_app_setting("musicxml_fingering", _next_choice(MUSICXML_FINGERING, cur))
                 return True
+            if self.pedal.hit(event.pos):
+                cur = pianists.app_setting("pedal_mode", "score")
+                pianists.set_app_setting("pedal_mode", _next_choice(PEDAL_MODES, cur))
+                if getattr(self.app, "mode", None) and hasattr(self.app.mode, "song") and self.app.mode.song:
+                    self.app.mode.song.set_pedal_mode(pianists.app_setting("pedal_mode", "score"))
+                return True
             kb_rect, _ = self._kb()
             grab = kb_rect.inflate(0, 2 * FELT_H).move(0, -FELT_H // 2)
             if grab.collidepoint(event.pos):
@@ -276,7 +286,8 @@ class SettingsScreen:
                 ("Font", self.font_text()),
                 ("MusicXML hands", "Follow the score's own layout, or work the hands out from the music."),
                 ("MusicXML fingering", "Auto: plan every finger. From the file: keep the score's printed "
-                                       "fingers. Fill in: keep them, plan what the score leaves blank.")]
+                                       "fingers. Fill in: keep them, plan what the score leaves blank."),
+                ("Pedal", "From the score: keep the file's pedal. Auto by measure: auto pedal.")]
         for i, (title, desc) in enumerate(rows):
             ry = y + i * self.row_h
             if i:
@@ -295,10 +306,11 @@ class SettingsScreen:
         self.font_default.enabled = bool(font_choice() or pianists.app_setting("font"))
         self.xml_hands.label = MUSICXML_HANDS_LABEL[pianists.app_setting("musicxml_hands", "file")]
         self.xml_fingering.label = MUSICXML_FINGERING_LABEL[pianists.app_setting("musicxml_fingering", "fill")]
+        self.pedal.label = PEDAL_MODE_LABEL[pianists.app_setting("pedal_mode", "score")]
         if self.picker is not None:
             mouse = (-1, -1)                         # (no hover under the font list)
         for b in (self.reset, self.keys, self.perf, self.sf_browse, self.sf_default, self.font_choose,
-                  self.font_default, self.xml_hands, self.xml_fingering):
+                  self.font_default, self.xml_hands, self.xml_fingering, self.pedal):
             b.draw(s, f, mouse)
         self.fps.draw(s, f)
 

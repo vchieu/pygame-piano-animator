@@ -581,6 +581,43 @@ def _measure_divisions(measure, divisions: int) -> int:
     return int(hi)
 
 
+def _first_measure_pickup(part_measures, order: List[int]) -> bool:
+    """
+    Whether the first measure played is a pickup (anacrusis).
+
+    MusicXML says so exactly: `implicit="yes"` (MuseScore writes it), measure
+    `number="0"`, or a first measure shorter than its own time signature - the
+    usual way a score spells an anacrusis as a full-numbered measure with fewer
+    beats. `expected` is the measure's time signature converted to divisions;
+    the span is what the measure really holds (`_measure_span`).
+    """
+    if not order:
+        return False
+    idx = order[0]
+    present = [its[idx] for its in part_measures if idx < len(its)]
+    if not present:
+        return False
+    for measure in present:
+        if str(measure.elem.attrib.get("implicit", "")).lower() in ("yes", "true"):
+            return True
+        if (measure.number or "").strip() == "0":
+            return True
+
+    beats, beat_type, divisions = 4, 4, 1
+    for measure in present:
+        for attributes in _kids(measure.elem, "attributes"):
+            d = _int(attributes, "divisions")
+            if d:
+                divisions = d
+            time = _kid(attributes, "time")
+            if time is not None:
+                beats = int(_num(time, "beats", beats) or beats)
+                beat_type = int(_num(time, "beat-type", beat_type) or beat_type)
+    expected = beats * (4.0 / beat_type) * divisions
+    span = _measure_span(part_measures, idx, divisions)
+    return 0 < span < expected
+
+
 def _read_measure(measure, tempo: _Tempo, start_div: int, at: float,
                   part_index: int, hand: Optional[str],
                   notes: List[Note], ties: dict, staff_from_file: bool = True) -> float:
@@ -637,7 +674,7 @@ def _read_measure(measure, tempo: _Tempo, start_div: int, at: float,
         tuplet_num, tuplet_type = _tuplet(c)
         n = Note(pitch, start, end, _velocity(c, DEFAULT_VELOCITY), part_index, note_hand,
                  _fingering(c), False, octave * 7 + "CDEFGAB".index(step_name), alter,
-                 _printed_value(c), tuplet_num, tuplet_type)
+                 _printed_value(c), tuplet_num, tuplet_type, grace=is_grace)
         if is_grace:
             # A grace note has no <duration>: every grace of a measure lands on the
             # same cursor. They are placed once their main note is seen, so a run of
@@ -790,7 +827,7 @@ def load_musicxml(path: str, hands_from_file: bool = True, fingering: str = "fil
         notes = [replace(n, hand=hands.get(id(n), n.hand)) for n in notes]
 
     with progress.stage(0.9, 1.0):
-        bar_times, beat_times = _bar_and_beat_times(part_measures, order)
+        bar_times, beat_times, quarter_times = _bar_and_beat_times(part_measures, order)
         notes = _fingering_stage(notes, fingering, report)
 
     for i, t in enumerate(tracks):
@@ -803,6 +840,9 @@ def load_musicxml(path: str, hands_from_file: bool = True, fingering: str = "fil
     duration = max((n.end for n in notes), default=duration)
     song = MidiSong(notes, tracks, duration, bar_times, beat_times, path, [],
                     key_fifths=key_fifths, key_changes=key_changes)
+    song.quarter_times = quarter_times
+    if _first_measure_pickup(part_measures, order) and len(bar_times) >= 2:
+        song.pickup_end = bar_times[1]
     song.cleanup = report
     for line in report:
         print("%s: %s" % (os.path.basename(path), line))
@@ -831,7 +871,7 @@ def _fingering_stage(notes: List[Note], mode: str, report: List[str]) -> List[No
 
 def _bar_and_beat_times(part_measures, order: List[int]):
     """
-    (bar_times, beat_times) for the played order.
+    (bar_times, beat_times, quarter_times) for the played order.
 
     A bar line is where the measure before it ends, so the times come from the
     same shared tempo map the notes were read with, plus each measure's own time
@@ -840,7 +880,8 @@ def _bar_and_beat_times(part_measures, order: List[int]):
     The beat grid runs without a gap: every measure contributes its own downbeat
     too, not only the beats after it, so a note on a bar line still sits one beat
     from its neighbours (get_beat_duration reads the spacing straight off this
-    list).
+    list). `quarter_times` is (time, seconds per quarter note) from the same
+    tempo map, for the auto pedal's sixteenth-note step.
     """
     bar_times: List[float] = []
     beat_times: List[float] = []
@@ -874,7 +915,13 @@ def _bar_and_beat_times(part_measures, order: List[int]):
         # The closing bar line is a beat of its own: without it the final measure's
         # last beat would be read as stretching to the end of the music.
         beat_times.append(tempo.sec(div))
-    return bar_times, beat_times
+    quarter_times: List[Tuple[float, float]] = []
+    seen = set()
+    for _, sec, bpm in tempo.points:
+        if bpm > 0 and sec not in seen:
+            quarter_times.append((sec, 60.0 / bpm))
+            seen.add(sec)
+    return bar_times, beat_times, quarter_times
 
 
 def _part_names(root) -> List[str]:

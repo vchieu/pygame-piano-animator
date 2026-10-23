@@ -292,6 +292,8 @@ class FingeringEditor(Transport):
         """Edit `song`; `hands`, when already built for it (build_hands with repair=False), saves planning them again."""
         self.midi.silence()
         self.song = song
+        if song:
+            song.set_pedal_mode(pianists.app_setting("pedal_mode", "score"))
         self.notes = list(song.notes)
         # the editor shows the file's fingering as it is, even where it can't be played
         planned = hands if hands is not None else build_hands(song, repair=False)
@@ -322,6 +324,11 @@ class FingeringEditor(Transport):
         self.song = MidiSong(self.notes, old.tracks, old.duration, old.bar_times,
                              old.beat_times, old.path, old.raw_controls,
                              key_fifths=old.key_fifths, key_changes=old.key_changes)
+        if hasattr(old, "quarter_times"):
+            self.song.quarter_times = old.quarter_times
+        if hasattr(old, "pickup_end"):
+            self.song.pickup_end = old.pickup_end
+        self.song.set_pedal_mode(getattr(old, "pedal_mode", "score"))
         self.notes = self.song.notes            # same order: sorting is stable
         self.index = {id(n): i for i, n in enumerate(self.notes)}
         fing = {id(n): f for n, f in zip(self.notes, self.finger) if f}

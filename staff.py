@@ -2002,6 +2002,60 @@ def draw_tuplet_brackets(surf: pygame.Surface, notes_info: dict, sys_notes: List
                                      HAND_COLORS.get(grp[0].hand, HAND_COLORS[RIGHT])[0],
                                      stem_up=up)
 
+def draw_pedal_brackets(surf: pygame.Surface, spans: List[Tuple[float, float]],
+                        sys_start: float, sys_end: float, x_of, y: float, s: float,
+                        color: Tuple[int, int, int] = (60, 60, 75)) -> None:
+    """
+    Draw measure pedal brackets below the bass staff for auto pedal mode.
+
+    Each span (a, b) in seconds is clipped to the system [sys_start, sys_end].
+    Draws a line with pedal change notches (∧) at change points and 'Ped.' label.
+    """
+    if not spans or sys_end <= sys_start:
+        return
+
+    drawn_ped_label = False
+    tick_h = max(3.0, round(0.6 * s))
+    line_w = max(1, round(0.12 * s))
+
+    for idx, (sa, sb) in enumerate(spans):
+        ca = max(sa, sys_start)
+        cb = min(sb, sys_end)
+        if cb <= ca + 1e-6:
+            continue
+
+        x0 = x_of(ca)
+        x1 = x_of(cb)
+        if x1 <= x0 + 1.0:
+            continue
+
+        py = round(y)
+        # Horizontal bracket line
+        pygame.draw.line(surf, color, (round(x0), py), (round(x1), py), line_w)
+
+        # Start tick / mark if this is the start of the entire pedal line or system
+        if ca == spans[0][0] or ca == sys_start:
+            pygame.draw.line(surf, color, (round(x0), py), (round(x0), round(py - tick_h)), line_w)
+
+        # End mark: if this is a pedal change point between measures, draw notch (∧)
+        is_change_point = (idx + 1 < len(spans) and abs(sb - spans[idx + 1][0]) < 1e-6 and sb < sys_end)
+        if is_change_point:
+            # Notch ∧
+            nx = round(x1)
+            pygame.draw.line(surf, color, (nx - 3, py), (nx, round(py - tick_h)), line_w)
+            pygame.draw.line(surf, color, (nx, round(py - tick_h)), (nx + 3, py), line_w)
+        else:
+            # End tick ┘
+            pygame.draw.line(surf, color, (round(x1), py), (round(x1), round(py - tick_h)), line_w)
+
+        if not drawn_ped_label:
+            # Ped. text
+            ped_font = ui_font(max(9, int(round(s * 1.15))), bold=True)
+            ped_surf = ped_font.render("Ped.", True, color)
+            surf.blit(ped_surf, (round(x0 + 2), round(py - ped_surf.get_height() - 1)))
+            drawn_ped_label = True
+
+
 class StaffView:
     """
     Renders a Grand Staff sheet music system with dynamic cursor and paging.
@@ -2639,6 +2693,15 @@ class StaffView:
                         col = HAND_COLORS.get(ref_note.hand, HAND_COLORS[RIGHT])[0]
                         if x1 > x0:
                             notation.draw_tie(staff_surf, s, x0, x1, y, up, col)
+
+                    # 7b. Auto Pedal Brackets
+                    if getattr(self.song, "pedal_mode", "score") == "auto" and getattr(self.song, "pedal_spans", None):
+                        ped_y = min(local_rect.bottom - max(8, round(s * 0.9)),
+                                    max(bass_bot + s * 1.5,
+                                        max((v["y_bot"] for v in notes_info.values()), default=bass_bot) + s * 1.5))
+                        draw_pedal_brackets(staff_surf, self.song.pedal_spans, sys.start_t, sys.end_t,
+                                            lambda st_: local_rect.x + margin_left + (st_ - sys.start_t) / sys.duration * usable_w,
+                                            ped_y, s)
 
                     # 8. Playback cursor
                     cx = round(self.cursor_x(t, local_rect, margin_left, usable_w))

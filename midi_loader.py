@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import bisect
 import os
+import statistics
 import struct
 import sys
 from dataclasses import dataclass, replace
@@ -145,6 +146,9 @@ class Note:
     # None for the notes in between and for notes not in a tuplet at all.
     tuplet_num: Optional[int] = None
     tuplet_type: Optional[str] = None
+    # A grace note is written, not measured: it takes no time of its own, so the
+    # auto pedal never uses it to decide where a measure's first attack is.
+    grace: bool = False
 
     @property
     def duration(self) -> float:
@@ -199,6 +203,16 @@ class MidiSong:
         self.raw_controls = sorted(controls or [], key=lambda c: (c[0], c[1]))
         self.controls = pedal_switches(self.raw_controls)
         self._control_times = [c[0] for c in self.controls]
+        # The pedal mode the player/editor last applied: "score" (the file's own
+        # controllers) or "auto" (one pedal per measure, see auto_pedal.py).
+        self.pedal_mode = "score"
+        # The measures the auto pedal covers, as (start, end) seconds, for the
+        # staff's Ped. brackets (empty in score mode and for a song without bars).
+        self.pedal_spans: List[Tuple[float, float]] = []
+        # The end of the pickup measure (0.0 = the song starts on a full bar).
+        self.pickup_end = 0.0
+        # The tempo map for the auto pedal: (time, seconds per quarter note).
+        self.quarter_times: List[Tuple[float, float]] = []
         self.tracks = tracks
         self.duration = duration
         self.bar_times = list(bar_times)
@@ -251,6 +265,33 @@ class MidiSong:
 
     def sustain_at(self, t: float) -> bool:
         return self.control_state(t).get(SUSTAIN, 0) >= 64
+
+    def quarter_length(self, t: float) -> float:
+        """How many seconds a quarter note lasts at time t (0.5 s when the tempo is unknown)."""
+        i = bisect.bisect_right(self.quarter_times, (float(t), float("inf")))
+        return self.quarter_times[i - 1][1] if i else 0.5
+
+    def set_pedal_mode(self, mode: str) -> None:
+        """
+        Play the pedal from the score (`"score"`, the file's own controllers) or
+        from the measures (`"auto"`, auto_pedal.build). Always rebuilds the control
+        index, so controls_between/control_state see the new list straight away.
+        """
+        if mode == "auto":
+            from auto_pedal import build
+            controls, spans = build(self)
+            if not controls:                     # no bar table: keep what the file sent
+                controls, spans = pedal_switches(self.raw_controls), []
+                self.pedal_mode = "score"
+            else:
+                self.pedal_mode = "auto"
+        else:
+            controls = pedal_switches(self.raw_controls)
+            spans = []
+            self.pedal_mode = "score"
+        self.controls = controls
+        self.pedal_spans = spans
+        self._control_times = [c[0] for c in self.controls]
 
     def pitch_range(self) -> tuple:
         if not self.notes:
@@ -1021,6 +1062,21 @@ def load_midi(path: str, include_drums: bool = False, split_pitch: int = MIDDLE_
     duration = max((n.end for n in notes), default=0.0)
     song = MidiSong(notes, tracks, duration, bar_times, beat_times, path, controls,
                     key_fifths=key_fifths)
+    try:
+        tempo_times, tempi = pm.get_tempo_changes()
+        song.quarter_times = [(float(t), 60.0 / float(bpm))
+                              for t, bpm in zip(tempo_times, tempi) if float(bpm) > 0]
+    except Exception:                      # an odd tempo map: the 120 bpm default will do
+        song.quarter_times = []
+    # A MIDI file has no anacrusis sign, so a first bar much shorter than the rest
+    # is taken for a pickup. pretty_midi counts time 0 as a downbeat, so this can
+    # only catch the files whose pickup really starts before the first downbeat.
+    if len(bar_times) >= 3:
+        first = bar_times[1] - bar_times[0]
+        rest = [bar_times[i + 1] - bar_times[i] for i in range(1, len(bar_times) - 1)]
+        typical = statistics.median(rest) if rest else 0.0
+        if typical > 0 and 0.0 < first < 0.6 * typical:
+            song.pickup_end = bar_times[1]
     song.cleanup = report                      # what sanitizing changed, for the curious
     for line in report:
         try:

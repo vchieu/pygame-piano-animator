@@ -181,6 +181,7 @@ class Visualizer(Transport):
         self.midi.silence()
         self.song = song
         if song:
+            song.set_pedal_mode(pianists.app_setting("pedal_mode", "score"))
             if pianists.has_song_zoom(song):
                 dur, sc = pianists.get_song_zoom(song, default_dur=10.0, default_scale=1.0)
             else:
