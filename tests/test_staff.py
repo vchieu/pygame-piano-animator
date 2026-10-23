@@ -897,7 +897,7 @@ def test_staff_height_dragging_and_clamping(screen):
     vis = app.mode
 
     # Default initial staff_height
-    assert 90 <= vis.staff_height <= 280
+    assert main.STAFF_HEIGHT_MIN <= vis.staff_height <= main.STAFF_HEIGHT_MAX
 
     # Test MOUSEBUTTONDOWN at bottom edge of staff_rect
     bottom_y = vis.staff_rect.bottom
@@ -909,19 +909,122 @@ def test_staff_height_dragging_and_clamping(screen):
     assert vis.staff_height == 200.0
     assert vis.staff_rect.h == 200
 
-    # Test clamping when dragging too large
+    # Test clamping when dragging too large: the raised maximum, still under the felt
     app.handle_event(pygame.event.Event(pygame.MOUSEMOTION, pos=(200, vis.staff_rect.top + 500)))
-    assert vis.staff_height == 280.0
-    assert vis.staff_rect.h == 280
+    assert vis.staff_height == float(main.STAFF_HEIGHT_MAX)
+    assert vis.staff_rect.h == main.STAFF_HEIGHT_MAX
 
     # Test clamping when dragging too small
     app.handle_event(pygame.event.Event(pygame.MOUSEMOTION, pos=(200, vis.staff_rect.top + 30)))
-    assert vis.staff_height == 90.0
-    assert vis.staff_rect.h == 90
+    assert vis.staff_height == float(main.STAFF_HEIGHT_MIN)
+    assert vis.staff_rect.h == main.STAFF_HEIGHT_MIN
 
     # MOUSEBUTTONUP resets dragging state
     app.handle_event(pygame.event.Event(pygame.MOUSEBUTTONUP, button=1, pos=(200, 100)))
     assert vis.dragging_staff_height is False
+
+
+def test_a_crowded_grand_staff_spreads_its_two_staves_apart():
+    # A high left-hand note (A3, in the bass staff) and a low right-hand note (E4, in the
+    # treble one) both reach into the gap. The staves must stand further apart than the
+    # calm system's 6 sp, and the ink bands must keep INNER_CLEARANCE_SP of air between
+    # them - while the system still fits the panel at the user's size.
+    calm = _BracketSong([_note(64, 0.0, RIGHT)])
+    crowded = _BracketSong([_note(64, 0.0, RIGHT), _note(57, 0.0, LEFT)])
+    rect = pygame.Rect(0, 0, 1200, 140)
+
+    calm_view = StaffView(calm)
+    crowded_view = StaffView(crowded)
+    calm_geo = calm_view.staff_geometry(calm_view.systems[0], rect)
+    crowded_geo = crowded_view.staff_geometry(crowded_view.systems[0], rect)
+
+    assert crowded_geo.s == pytest.approx(calm_geo.s), "a spread that fits must not shrink the staff"
+    calm_gap = calm_geo.bass_mid_y - calm_geo.treble_mid_y
+    crowded_gap = crowded_geo.bass_mid_y - crowded_geo.treble_mid_y
+    assert calm_gap == pytest.approx(staff.BASE_MID_GAP_SP * calm_geo.s)
+    assert crowded_gap > calm_gap
+
+    head_half = notation.NOTEHEAD_H_SP * crowded_geo.s / 2.0
+    lowest_treble = note_y(30, CLEF_TREBLE, crowded_geo.treble_mid_y,
+                           crowded_geo.bass_mid_y, crowded_geo.s) + head_half
+    highest_bass = note_y(26, CLEF_BASS, crowded_geo.treble_mid_y,
+                          crowded_geo.bass_mid_y, crowded_geo.s) - head_half
+    assert highest_bass - lowest_treble >= staff.INNER_CLEARANCE_SP * crowded_geo.s - 1e-6
+
+
+def test_a_calm_system_keeps_the_users_size_and_the_baseline_gap():
+    # One treble note, no bass: nothing reaches into the gap, so the staves keep the
+    # baseline 6 sp and the staff keeps the size the user chose. The block sits below the
+    # measure-number band, so the panel's bottom padding still holds.
+    song = _BracketSong([_note(64, 0.0, RIGHT)])
+    rect = pygame.Rect(0, 0, 1200, 140)
+    view = StaffView(song)
+    geo = view.staff_geometry(view.systems[0], rect)
+    base_s = view._staff_size(rect)
+
+    assert geo.s == pytest.approx(base_s)
+    assert geo.bass_mid_y - geo.treble_mid_y == pytest.approx(staff.BASE_MID_GAP_SP * base_s)
+    assert geo.treble_mid_y - 2 * geo.s - staff.MEASURE_NUM_PAD_PX >= 0
+    assert geo.bass_mid_y + 2 * geo.s <= rect.bottom - staff.STAFF_PAD_Y + 0.5
+    # the cursor starts where the geometry says the notes start
+    sys = view.systems[0]
+    assert view.cursor_x(sys.start_t, rect) == pytest.approx(rect.x + geo.margin_left)
+
+
+def test_a_tall_system_shrinks_to_fit_the_staff_panel():
+    # A5 over A1 at scale 1.5 needs more than the 140 px panel holds at the user's size.
+    # That one system shrinks (but never below MIN_FIT_SCALE of it) and its content stays
+    # inside the panel with STAFF_PAD_Y of padding.
+    song = _BracketSong([_note(81, 0.0, RIGHT), _note(33, 0.0, LEFT)])
+    rect = pygame.Rect(0, 0, 1200, 140)
+    view = StaffView(song, scale=1.5)
+    geo = view.staff_geometry(view.systems[0], rect)
+    base_s = view._staff_size(rect)
+
+    assert geo.s < base_s
+    assert geo.s >= staff.MIN_FIT_SCALE * base_s
+
+    head_half = notation.NOTEHEAD_H_SP * geo.s / 2.0
+    top_ink = note_y(40, CLEF_TREBLE, geo.treble_mid_y, geo.bass_mid_y, geo.s) - head_half
+    bottom_ink = note_y(12, CLEF_BASS, geo.treble_mid_y, geo.bass_mid_y, geo.s) + head_half
+    assert top_ink >= rect.top + staff.STAFF_PAD_Y + staff.MEASURE_NUM_PAD_PX - 0.5
+    assert bottom_ink <= rect.bottom - staff.STAFF_PAD_Y + 0.5
+
+
+def test_the_measure_numbers_fit_above_the_fullest_system(screen):
+    # The measure numbers need a band above the treble staff; a tall system must leave
+    # room for it and still keep all its ink inside the panel.
+    song = _BracketSong([_note(81, 0.0, RIGHT), _note(33, 0.0, LEFT)])
+    rect = pygame.Rect(0, 0, 1200, 140)
+    view = StaffView(song, scale=1.5)
+    geo = view.staff_geometry(view.systems[0], rect)
+
+    assert geo.treble_mid_y - 2 * geo.s - staff.MEASURE_NUM_PAD_PX >= 0
+    # The band must hold the real 10 px UI font and its 1 px gap, not just the constant.
+    num_h = staff.ui_font(10).get_height()
+    assert num_h + 1 <= staff.MEASURE_NUM_PAD_PX
+    assert geo.treble_mid_y - 2 * geo.s - num_h - 1 >= 0
+
+    head_half = notation.NOTEHEAD_H_SP * geo.s / 2.0
+    top_ink = note_y(40, CLEF_TREBLE, geo.treble_mid_y, geo.bass_mid_y, geo.s) - head_half
+    bottom_ink = note_y(12, CLEF_BASS, geo.treble_mid_y, geo.bass_mid_y, geo.s) + head_half
+    assert top_ink >= rect.top + staff.STAFF_PAD_Y + staff.MEASURE_NUM_PAD_PX - 0.5
+    assert bottom_ink <= rect.bottom - staff.STAFF_PAD_Y + 0.5
+
+
+def test_an_empty_staff_still_straddles_the_panels_centre(screen):
+    # No song yet (or a score with no systems): the two empty staves must still stand
+    # either side of the panel's centre, not collapse on top of each other.
+    view = staff.StaffView(None)
+    rect = pygame.Rect(0, 0, 1200, 140)
+    geo = view.staff_geometry(None, rect)
+    base_s = view._staff_size(rect)
+
+    assert geo.treble_mid_y == pytest.approx(rect.centery - round(3.0 * base_s))
+    assert geo.bass_mid_y == pytest.approx(rect.centery + round(3.0 * base_s))
+    assert geo.bass_mid_y > geo.treble_mid_y
+
+    _draw_staff_to(None, rect)      # the empty panel draws without raising
 
 
 def _beam_groups_of(song):
@@ -1186,7 +1289,9 @@ def test_a_stem_turns_over_rather_than_run_through_another_note():
 def test_a_beamed_notehead_never_sits_on_the_beam(screen):
     # A beamed note's stem may not be so short that the notehead runs into the bars. The
     # bars are a stack (a run of sixteenths carries two), so a sixteenth run needs a
-    # longer stem than an eighth run. Check it against what is really drawn.
+    # longer stem than an eighth run. A bar the panel forces onto its edge may use the
+    # shorter "tight" stem that layout_beam allows, but never less than
+    # BEAM_MIN_HEAD_GAP_SP of white under the head. Check it against what is really drawn.
     rect = pygame.Rect(0, 0, screen.get_width(), 140)
 
     beams, stems, bars_seen = [], [], set()
@@ -1207,24 +1312,50 @@ def test_a_beamed_notehead_never_sits_on_the_beam(screen):
         # 50-nam-ve-sau has sixteenth runs, so the two-bar case is really exercised
         for name in ("demo_song.mid", "50-nam-ve-sau.mid"):
             song = load_midi(midi_path(name))
+            view = staff.StaffView(song)
             for t in (1.0, 3.0, 6.0, 9.0, 12.0, 15.0):
                 screen.fill((255, 255, 255))
                 beams.clear(); stems.clear()
-                staff.StaffView(song).draw(screen, rect, t, active_notes=song.notes[:5])
+                view.draw(screen, rect, t, active_notes=song.notes[:5])
+                # The real staff space: the beam's rounded thickness only gives it to
+                # within half a pixel, too coarse for the stem-length bound at small sizes.
+                s = view.staff_geometry(view.system_for_time(t), rect).s
                 for x0, x1, y, w in beams:
+                    # A sixteenth run shares one stem with its whole stack of bars, and the
+                    # panel clamps the group, not just the bar the stem first meets.
+                    group = [b for b in beams
+                             if abs(b[0] - x0) <= 1 and abs(b[1] - x1) <= 1]
+                    for b in group:
+                        assert rect.top - 1 <= b[2] - b[3] / 2, (
+                            f"{name}: beam bar at y={b[2]} pokes above the panel")
+                        assert b[2] + b[3] / 2 <= rect.bottom + 1, (
+                            f"{name}: beam bar at y={b[2]} pokes below the panel")
+                    edge_clamped = any(b[2] - b[3] / 2 <= rect.top + 1
+                                       or b[2] + b[3] / 2 >= rect.bottom - 1
+                                       for b in group)
                     mine = [st for st in stems
                             if x0 - 6 <= st[0] <= x1 + 6 and min(st[1], st[2]) <= y <= max(st[1], st[2])]
                     if not mine:
                         continue
                     space = w / staff.BEAM_WIDTH_SPACES      # a bar is half a space thick
                     bars = len({b[2] for b in beams if b[0] <= x1 and b[1] >= x0
-                                and abs(b[2] - y) <= staff.BEAM_STEP_SPACES * space})
+                                and abs(b[2] - y) <= staff.BEAM_STEP_SPACES * space + 1})
                     bars_seen.add(bars)
-                    need = staff.min_stem_spaces(bars) * space
+                    stack = bars * staff.BEAM_STEP_SPACES - 0.25
+                    head_half = notation.NOTEHEAD_H_SP * s / 2.0
+                    tight = head_half + (stack + staff.BEAM_WIDTH_SPACES / 2.0
+                                         + staff.BEAM_MIN_HEAD_GAP_SP) * s
+                    need = staff.min_stem_spaces(bars) * s
+                    allowed = tight if edge_clamped else need
+                    # The spy sees the line from the notehead's stem anchor, which sits
+                    # 0.16-0.17 sp in from the head's centre (STEM_UP_SE/STEM_DOWN_NW),
+                    # while min_stem_spaces/tight_reach are measured from that centre.
+                    # Add the anchor back so both sides share one basis.
+                    anchor = 0.17 * s
                     for x, y0, y1 in mine:
-                        assert y1 - y0 >= need - 1, (
+                        assert y1 - y0 + anchor >= allowed - 1, (
                             f"{name}: stem at x={x} is {y1 - y0:.0f}px, but {bars} beam bar(s) "
-                            f"need {need:.0f}px or the notehead would sit on them")
+                            f"need {allowed:.0f}px or the notehead would sit on them")
     finally:
         pygame.draw.lines, pygame.draw.line = rl, rline
 
@@ -1309,10 +1440,11 @@ def test_the_clefs_and_the_time_signature_are_drawn(screen):
     rect = pygame.Rect(0, 0, 1200, 140)
     out = _draw_staff_to(song, rect)
 
-    s = max(4.0, min(12.0, (rect.h - 26) / 14.0))
-    center_y = rect.centery
-    treble_mid_y = center_y - round(3.0 * s)
-    bass_mid_y = center_y + round(3.0 * s)
+    sv = staff.StaffView(song)
+    geo = sv.staff_geometry(sv.system_for_time(1.0), rect)
+    s = geo.s
+    treble_mid_y = geo.treble_mid_y
+    bass_mid_y = geo.bass_mid_y
     left_x = rect.x + 18
 
     def ink(box):
@@ -1359,19 +1491,20 @@ def test_the_staff_falls_back_to_its_own_clefs_and_digits_without_a_font(no_font
     rect = pygame.Rect(0, 0, 1200, 140)
     out = _draw_staff_to(song, rect)
 
-    s = max(4.0, min(12.0, (rect.h - 26) / 14.0))
-    center_y = rect.centery
+    sv = staff.StaffView(song)
+    geo = sv.staff_geometry(sv.system_for_time(1.0), rect)
+    s = geo.s
     left_x = rect.x + 18
 
     def ink(box):
         return sum(1 for x in range(box.left, box.right) for y in range(box.top, box.bottom)
                    if out.get_at((x, y))[:3] != staff.STAFF_BG)
 
-    for mid_y in (center_y - round(3.0 * s), center_y + round(3.0 * s)):
+    for mid_y in (geo.treble_mid_y, geo.bass_mid_y):
         box = pygame.Rect(round(left_x + 8), round(mid_y - 2.9 * s), round(2.0 * s), round(5.7 * s))
         assert ink(box) > 0.01 * box.w * box.h, "the hand-drawn clef is missing"
     ts_x = staff.time_sig_x(left_x, s)
-    for mid_y in (center_y - round(3.0 * s), center_y + round(3.0 * s)):
+    for mid_y in (geo.treble_mid_y, geo.bass_mid_y):
         box = pygame.Rect(round(ts_x - 1.2 * s), round(mid_y - 2.0 * s),
                           round(2.4 * s), round(4.0 * s))
         assert ink(box) > 0.02 * box.w * box.h, "the UI font's digits are missing"
@@ -1420,14 +1553,14 @@ def test_the_octave_bracket_clears_the_notes_it_covers(screen):
 
     assert len(lines) == 4, f"the test song should draw one bracket per group, got {len(lines)}"
 
-    s = max(4.0, min(12.0, (rect.h - 26) / 14.0))
-    center_y = rect.centery
-    treble_mid_y = center_y - round(3.0 * s)
-    bass_mid_y = center_y + round(3.0 * s)
     sys0 = staff.StaffView(song).systems[0]
+    geo = staff.StaffView(song).staff_geometry(sys0, rect)
+    s = geo.s
+    treble_mid_y = geo.treble_mid_y
+    bass_mid_y = geo.bass_mid_y
     info = staff.compute_notes_info(sys0.notes, sys0.start_t, sys0.duration,
-                                    rect.w - MARGIN_LEFT - MARGIN_RIGHT,
-                                    MARGIN_LEFT, s, staff.get_beat_duration(song))
+                                    geo.usable_w,
+                                    geo.margin_left, s, staff.get_beat_duration(song))
     head_h = notation.NOTEHEAD_H_SP * s / 2.0
     nw = round(s * 0.75)
     checked = 0
@@ -1995,9 +2128,11 @@ def test_the_key_signature_is_drawn_at_the_head_of_the_staff(screen):
     rect = pygame.Rect(0, 0, 1200, 140)
     out = _draw_staff_to(song, rect)
 
-    s = max(4.0, min(12.0, (rect.h - 26) / 14.0))
-    treble_mid_y = rect.centery - round(3.0 * s)
-    bass_mid_y = rect.centery + round(3.0 * s)
+    sv = staff.StaffView(song)
+    geo = sv.staff_geometry(sv.system_for_time(1.0), rect)
+    s = geo.s
+    treble_mid_y = geo.treble_mid_y
+    bass_mid_y = geo.bass_mid_y
     key_x = staff.key_sig_x(rect.x + 18, s)
 
     def ink(box):

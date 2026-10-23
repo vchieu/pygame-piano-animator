@@ -300,9 +300,12 @@ def test_keyboard_placement_limits():
         common.set_keyboard_place(0.0)                           # highest: the top of the keys at the centre
         kb, hand = common.bottom_layout(size)
         assert kb.y == size[1] // 2 and hand.top == kb.bottom and hand.bottom == size[1]
-        common.set_keyboard_place(1.0)                           # lowest: half a keyboard above the bottom
+        common.set_keyboard_place(1.0)                           # lowest: the keys near the bottom edge
         kb, hand = common.bottom_layout(size)
-        assert size[1] - kb.bottom == kb.h // 2 and hand.h == size[1] - kb.bottom
+        assert size[1] - kb.bottom == common.KB_BOTTOM_MARGIN
+        assert common.KB_BOTTOM_MARGIN <= 10, "the keys should be able to sit almost on the bottom"
+        assert kb.bottom > size[1] - 10
+        assert hand.top == kb.bottom and hand.h == common.KB_BOTTOM_MARGIN
         common.set_keyboard_place(None)
         assert common.bottom_layout(size)[0] == default
     finally:

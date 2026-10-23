@@ -277,6 +277,7 @@ def load_fonts():
 KEY_LEN_WW = 5.6            # white key length, in white-key widths (the keys' true proportions)
 HAND_LEN_WW = 7.0           # room below the keys for the hands and forearms, in white-key widths
 BOTTOM_MAX_SHARE = 0.5      # the keys + hand area never take more than this share of the height
+KB_BOTTOM_MARGIN = 8        # the lowest the keys go: their bottom edge this far above the window's
 
 
 _kb_place = None             # where the keyboard sits (Settings): None = the default, else 0 (highest) .. 1 (lowest)
@@ -294,12 +295,12 @@ def set_keyboard_place(place):
 def keyboard_y_range(size, kb_h):
     """
     (highest, lowest) top edge for a keyboard kb_h tall in a window `size`:
-    the top of the keys at the window's centre, or the keys' bottom edge half
-    a keyboard height above the window's bottom.
+    the top of the keys at the window's centre, or the keys' bottom edge
+    KB_BOTTOM_MARGIN pixels above the window's bottom.
     """
     h = size[1]
     hi = h // 2
-    lo = h - kb_h - kb_h // 2
+    lo = h - kb_h - KB_BOTTOM_MARGIN
     return hi, max(hi, lo)
 
 

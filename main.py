@@ -73,6 +73,7 @@ MENU_BUTTON_SMALL_H = 40    # ...and this with just their names (a small window)
 FINGER_PX_MAX = 17          # finger numbers on the notes: this big at most (13 before)...
 FINGER_PX_MIN = 11          # ...but narrower than a black key's notes (Visualizer._finger_size)
 FPS_CAP_MIN, FPS_CAP_MAX = 24, 240     # the frame rate cap's range (Settings; past the top: uncapped)
+STAFF_HEIGHT_MIN, STAFF_HEIGHT_MAX = 90, 360    # the sheet-music panel's draggable height range (px)
 CONTROLS_H = 30            # the player's controls panel under the progress bar...
 PANEL_MARGIN = 8            # ...this far in from the window's right and below the bar (or the waveform)
 PANEL_ALPHA = 170           # ...and its panels' opacity (0-255): translucent over the notes
@@ -153,7 +154,7 @@ class Visualizer(Transport):
         self.show_staff = bool(pianists.app_setting("show_staff", True))
         self.staff_opacity = float(pianists.app_setting("staff_opacity", 1.0))
         self.staff_height = float(pianists.app_setting("staff_height", 140.0))
-        self.staff_height = min(280.0, max(90.0, self.staff_height))
+        self.staff_height = min(STAFF_HEIGHT_MAX, max(STAFF_HEIGHT_MIN, self.staff_height))
         self.dragging_staff_height = False
         # the staff's zoom: seconds of music per system (smaller = zoomed in) and how big
         # the staff is drawn (smaller = more room for notes above and below the staves)
@@ -208,7 +209,7 @@ class Visualizer(Transport):
         wave_h = WAVE_H if self.audio and video is None else 0
         self.wave_rect = pygame.Rect(0, bar_h, w, wave_h)
         top = bar_h + wave_h
-        requested_staff_h = min(280, max(90, int(getattr(self, "staff_height", 140.0))))
+        requested_staff_h = min(STAFF_HEIGHT_MAX, max(STAFF_HEIGHT_MIN, int(getattr(self, "staff_height", 140.0))))
         max_staff_h = max(0, kb_rect.y - FELT_H - top - 30)
         staff_h = (min(requested_staff_h, max_staff_h) if getattr(self, "show_staff", True) and
                    (video is None or video.get("staff")) else 0)
@@ -391,7 +392,7 @@ class Visualizer(Transport):
         elif event.type == pygame.MOUSEMOTION:
             if getattr(self, "dragging_staff_height", False):
                 new_h = event.pos[1] - self.staff_rect.top
-                new_h = min(280.0, max(90.0, float(new_h)))
+                new_h = min(float(STAFF_HEIGHT_MAX), max(float(STAFF_HEIGHT_MIN), float(new_h)))
                 self.staff_height = new_h
                 pianists.set_app_setting("staff_height", new_h)
                 self.layout(self.screen.get_size())

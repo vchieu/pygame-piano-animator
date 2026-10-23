@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import bisect
 import math
+from collections import namedtuple
 from typing import List, Optional, Tuple
 
 import pygame
@@ -78,6 +79,24 @@ MAX_BEAM_CHORDS = 8
 
 # How far a note's ink stays off a bar line: MuseScore's noteBarDistance (styledef.cpp).
 NOTE_BAR_DISTANCE_SP = 1.5
+
+# The grand staff's vertical layout: the two middle lines stand this many spaces apart
+# at least (the old fixed distance), and the hands' ink keeps this much clear air between
+# them. A system that needs more room gets it, and if the spread no longer fits the panel
+# the whole system is drawn smaller - never smaller than MIN_FIT_SCALE of the user's size.
+BASE_MID_GAP_SP = 6.0
+INNER_CLEARANCE_SP = 2.5
+STAFF_PAD_Y = 4.0
+MIN_FIT_SCALE = 0.6
+OCTAVE_BRACKET_SP = 3.0
+# The staff's own outer lines (2 sp from the middle) plus a little air.
+STAFF_EDGE_SP = 2.15
+# The 10 px measure-number font plus its 1 px gap: a band above the content block.
+MEASURE_NUM_PAD_PX = 14.0
+
+# Where a system's ink sits when it is laid out: its size, the two staff middle lines,
+# and the room the head of the staff leaves before the notes.
+StaffGeometry = namedtuple("StaffGeometry", "s treble_mid_y bass_mid_y margin_left usable_w")
 
 # These are the values MuseScore engraves with (src/engraving/style/styledef.cpp:
 # stemLength 3.5, stemWidth 0.10, beamWidth 0.5), all measured in staff spaces -
@@ -1207,6 +1226,93 @@ def find_grace_runs(notes: List[Note], beat_len: float) -> List[Tuple[List[Note]
     return runs
 
 
+def drawn_steps(clusters: List[List[Note]], sys_notes: List[Note]) -> dict:
+    """
+    How high each note is really drawn: {id(note): {"clef", "step_draw", "octave_shift",
+    "label"}} plus whatever octave group `resolve_octave_transpositions` gave it.
+
+    The steps come from `get_octave_transposition`, then a phrase under an 8va/8vb keeps
+    its transposition together. A shifted note that would land on another note of its own
+    chord is put back on its written step: the two heads would otherwise sit on each other.
+    `clusters` are the system's `group_chords` moments; only the vertical layout is worked
+    out here, so the drawing and `StaffView.staff_geometry` agree exactly.
+    """
+    info = {}
+    for cluster in clusters:
+        for n in cluster:
+            clef = clef_for_note(n)
+            step_draw, oct_shift, label = get_octave_transposition(n, clef)
+            info[id(n)] = {
+                "clef": clef,
+                "step_draw": step_draw,
+                "octave_shift": oct_shift,
+                "label": label,
+            }
+
+    # Resolve phrase-level octave transpositions so intermediate notes under 8va/8vb
+    # are transposed together with the phrase
+    resolve_octave_transpositions(sys_notes, info)
+
+    # Revoke an octave transposition if it causes notes in the same chord/clef to collide
+    for cluster in clusters:
+        by_clef = {CLEF_TREBLE: [], CLEF_BASS: []}
+        for n in cluster:
+            by_clef[info[id(n)]["clef"]].append(n)
+
+        for c, c_notes in by_clef.items():
+            if len(c_notes) <= 1:
+                continue
+            for n in c_notes:
+                n_info = info[id(n)]
+                if n_info["octave_shift"] != 0:
+                    other_steps = [info[id(other)]["step_draw"] for other in c_notes if other is not n]
+                    if any(abs(n_info["step_draw"] - ost) <= 1 for ost in other_steps):
+                        step_nat, _ = written_step(n)
+                        n_info["step_draw"] = step_nat
+                        n_info["octave_shift"] = 0
+                        n_info["label"] = ""
+
+    return info
+
+
+def vertical_extents(steps: dict, s: float) -> Tuple[float, float, float, float]:
+    """
+    (top_sp, inner_t_sp, inner_b_sp, bottom_sp): how far a system's ink reaches from its
+    two middle lines, in staff spaces.
+
+    The outer pair is how far the ink stands above the treble middle and below the bass
+    one - the staff's own two lines are always there, so they never come closer than
+    STAFF_EDGE_SP, and an 8va/15ma or 8vb/15mb bracket reaches OCTAVE_BRACKET_SP past its
+    notes. The inner pair is how far the ink reaches into the gap between the staves (0
+    when nothing does); that is what decides how far apart the two staves must stand.
+    Stems and flags point towards their own staff's middle, away from the edges and away
+    from the gap, so only the noteheads are counted.
+    """
+    head_half = notation.NOTEHEAD_H_SP / 2.0
+    top_sp = bottom_sp = STAFF_EDGE_SP
+    inner_t_sp = inner_b_sp = 0.0
+    has_8va = has_8vb = False
+    for i in steps.values():
+        step = i["step_draw"]
+        if i["clef"] == CLEF_TREBLE:
+            above = (step - TREBLE_MID_STEP) * 0.5 + head_half
+            below = (TREBLE_MID_STEP - step) * 0.5 + head_half
+            top_sp = max(top_sp, above)
+            inner_t_sp = max(inner_t_sp, below)
+            has_8va = has_8va or i["octave_shift"] < 0
+        else:
+            above = (step - BASS_MID_STEP) * 0.5 + head_half
+            below = (BASS_MID_STEP - step) * 0.5 + head_half
+            bottom_sp = max(bottom_sp, below)
+            inner_b_sp = max(inner_b_sp, above)
+            has_8vb = has_8vb or i["octave_shift"] > 0
+    if has_8va:
+        top_sp += OCTAVE_BRACKET_SP
+    if has_8vb:
+        bottom_sp += OCTAVE_BRACKET_SP
+    return top_sp, inner_t_sp, inner_b_sp, bottom_sp
+
+
 def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: float, usable_w: float,
                        margin_left: float, s: float, beat_len: float = 0.5,
                        bar_times: Optional[List[float]] = None,
@@ -1252,28 +1358,20 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
     grace_runs = find_grace_runs(sorted_notes, beat_len)
     grace_ids = {id(g) for run, _main in grace_runs for g in run}
 
-    # Pre-calculate base attributes
+    # The vertical steps first: clef, drawn step and octave shift (drawn_steps), then the
+    # x each note stands at and the rest of what the drawing needs.
+    info = drawn_steps(clusters, sys_notes)
     for cluster in clusters:
         chord_t = cluster[0].start
         chord_x = margin_left + (chord_t - sys_start) / sys_duration * usable_w
         for n in cluster:
-            clef = clef_for_note(n)
-            step_draw, oct_shift, label = get_octave_transposition(n, clef)
-            info[id(n)] = {
+            info[id(n)].update({
                 "n": n,
                 "base_x": chord_x,
                 "x": chord_x,
-                "clef": clef,
-                "step_draw": step_draw,
-                "octave_shift": oct_shift,
-                "label": label,
                 "grace": id(n) in grace_ids,
                 "value": printed_value(n, n.duration, beat_len),
-            }
-
-    # Resolve phrase-level octave transpositions so intermediate notes under 8va/8vb
-    # are transposed together with the phrase
-    resolve_octave_transpositions(sys_notes, info)
+            })
 
     # Process each cluster for x-offsets when notes clash in same clef
     for cluster in clusters:
@@ -1285,16 +1383,6 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
         for c, c_notes in by_clef.items():
             if len(c_notes) <= 1:
                 continue
-            # Revoke octave transposition if it causes notes in the same chord/clef to collide
-            for n in c_notes:
-                n_info = info[id(n)]
-                if n_info["octave_shift"] != 0:
-                    other_steps = [info[id(other)]["step_draw"] for other in c_notes if other is not n]
-                    if any(abs(n_info["step_draw"] - ost) <= 1 for ost in other_steps):
-                        step_nat, _ = written_step(n)
-                        n_info["step_draw"] = step_nat
-                        n_info["octave_shift"] = 0
-                        n_info["label"] = ""
 
             # Sort notes in clef by step_draw
             c_notes_sorted = sorted(c_notes, key=lambda n: info[id(n)]["step_draw"])
@@ -1949,10 +2037,15 @@ class StaffView:
         idx = max(0, min(len(self.systems) - 1, idx))
         return self.systems[idx]
 
-    def cursor_x(self, t: float, staff_rect: pygame.Rect) -> float:
+    def cursor_x(self, t: float, staff_rect: pygame.Rect,
+                 margin_left: Optional[float] = None,
+                 usable_w: Optional[float] = None) -> float:
         """Compute the X coordinate of the cursor within staff_rect at song time t."""
         sys = self.system_for_time(t)
-        margin_left, usable_w = self._header(staff_rect, sys)
+        if margin_left is None or usable_w is None:
+            geo = self.staff_geometry(sys, staff_rect)
+            margin_left = geo.margin_left if margin_left is None else margin_left
+            usable_w = geo.usable_w if usable_w is None else usable_w
         if sys is None or usable_w <= 10:
             return float(staff_rect.x + margin_left)
 
@@ -1968,6 +2061,49 @@ class StaffView:
         """How big the staff itself is drawn, in pixels (the user's zoom scales it)."""
         return max(4.0, min(12.0, ((rect.h - 26) / 14.0) * self.scale))
 
+    def staff_geometry(self, sys, rect: pygame.Rect) -> StaffGeometry:
+        """
+        How this system is drawn in `rect`: its size, the two staff middle lines and the
+        room its head leaves before the notes.
+
+        The treble and bass staves stand BASE_MID_GAP_SP apart, and further apart when the
+        two hands' ink would crowd or collide in the gap - the way MuseScore spaces a grand
+        staff. If that spread no longer fits the panel, the whole system is drawn smaller
+        (never below MIN_FIT_SCALE of the user's size) and its content block is centred
+        between the measure-number band at the top and STAFF_PAD_Y at the bottom. A system
+        that needs no extra room keeps the size the user chose.
+        """
+        base_s = self._staff_size(rect)
+        if sys is None:
+            return StaffGeometry(
+                base_s,
+                rect.centery - round(3.0 * base_s),
+                rect.centery + round(3.0 * base_s),
+                *self._header(rect, None, base_s),
+            )
+
+        bar_times = getattr(self.song, "bar_times", [])
+        sys_pieces, _ties = split_at_bar_lines(sys.notes, bar_times)
+        # only the pieces that open in this system are drawn on it (see draw)
+        kept = [p for p in sys_pieces if sys.start_t - 1e-9 <= p.start < sys.end_t - 1e-9]
+        beat_len = get_beat_duration(self.song)
+        clusters = group_chords(sorted(kept, key=lambda n: (n.start, n.pitch)), beat_len)
+        steps = drawn_steps(clusters, kept)
+
+        top_sp, inner_t_sp, inner_b_sp, bottom_sp = vertical_extents(steps, base_s)
+        gap_sp = max(BASE_MID_GAP_SP, inner_t_sp + inner_b_sp + INNER_CLEARANCE_SP)
+        total_sp = gap_sp + top_sp + bottom_sp
+
+        top_pad = STAFF_PAD_Y + MEASURE_NUM_PAD_PX
+        avail = max(1.0, rect.h - top_pad - STAFF_PAD_Y)
+        fit = max(MIN_FIT_SCALE, min(1.0, avail / (total_sp * base_s)))
+        s = base_s * fit
+        block_top = rect.y + top_pad + (avail - total_sp * s) / 2.0
+        treble_mid_y = block_top + top_sp * s
+        bass_mid_y = treble_mid_y + gap_sp * s
+        margin_left, usable_w = self._header(rect, sys, s)
+        return StaffGeometry(s, treble_mid_y, bass_mid_y, margin_left, usable_w)
+
     def _key_fifths(self, sys) -> int:
         """
         The key signature in force at the head of this system: how many sharps
@@ -1981,16 +2117,19 @@ class StaffView:
         key_at = getattr(self.song, "key_at", None)
         return int(key_at(sys.start_t)) if key_at else 0
 
-    def _header(self, rect: pygame.Rect, sys) -> Tuple[float, float]:
+    def _header(self, rect: pygame.Rect, sys,
+                s: Optional[float] = None) -> Tuple[float, float]:
         """
         (margin_left, usable_w): where the system's notes start and how much room
         they have before the right margin.
 
         The head of the system holds the clef, the key signature and the time
         signature, and a key signature makes it wider - so the notes start further
-        right, and the music between them is a little narrower.
+        right, and the music between them is a little narrower. `s` is the size the
+        system is drawn at; when omitted, the user's size is used.
         """
-        s = self._staff_size(rect)
+        if s is None:
+            s = self._staff_size(rect)
         margin_left = header_margin(STAFF_LEFT_X, s, self._key_fifths(sys))
         return margin_left, rect.w - margin_left - MARGIN_RIGHT
 
@@ -2007,11 +2146,13 @@ class StaffView:
 
         local_rect = pygame.Rect(0, 0, staff_rect.w, staff_rect.h)
 
-        # 2. Staff geometry (the user's zoom scales the staff itself)
-        s = self._staff_size(local_rect)
-        center_y = local_rect.centery
-        treble_mid_y = center_y - round(3.0 * s)
-        bass_mid_y = center_y + round(3.0 * s)
+        # 2. Staff geometry: the user's zoom sets the size, the hands' ink decides how far
+        # apart the staves stand, and one system may shrink to fit its own spread.
+        sys = self.system_for_time(t) if (self.song and self.systems) else None
+        geo = self.staff_geometry(sys, local_rect)
+        s = geo.s
+        treble_mid_y = geo.treble_mid_y
+        bass_mid_y = geo.bass_mid_y
 
         line_color = STAFF_LINE
         left_x = local_rect.x + STAFF_LEFT_X
@@ -2019,9 +2160,8 @@ class StaffView:
 
         # The system being drawn: its key signature stands at the head of the staff
         # and decides how much room the head takes before the first note.
-        sys = self.system_for_time(t) if (self.song and self.systems) else None
         key_fifths = self._key_fifths(sys)
-        margin_left, usable_w = self._header(local_rect, sys)
+        margin_left, usable_w = geo.margin_left, geo.usable_w
 
         # 3. Staff lines (5 for Treble, 5 for Bass) - MuseScore's thickness (staffLineThickness)
         line_w = max(1, round(notation.STAFF_LINE_SP * s))
@@ -2501,7 +2641,7 @@ class StaffView:
                             notation.draw_tie(staff_surf, s, x0, x1, y, up, col)
 
                     # 8. Playback cursor
-                    cx = round(self.cursor_x(t, local_rect))
+                    cx = round(self.cursor_x(t, local_rect, margin_left, usable_w))
                     cy_top = round(treble_top - s * 0.8)
                     cy_bot = round(bass_bot + s * 0.8)
                     ch = cy_bot - cy_top

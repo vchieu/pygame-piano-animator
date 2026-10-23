@@ -43,10 +43,10 @@ Detailed design notes, kept up to date as features were added. Start with `CLAUD
   - `Button`, `Dialog`, `bottom_layout`.
 - `app_settings.py` – `SettingsScreen` (main menu > Settings, v26.1.19.SNAPSHOT-02), kept in settings.json:
   - Keyboard position ("keyboard_place"): a live preview; drag the keyboard (or its felt) up or down. Stored as
-    0 (highest: the keys' top at the window's centre) .. 1 (lowest: the keys' bottom half a keyboard height above
-    the window's bottom), `common.keyboard_y_range`; `bottom_layout` places the keys there and gives the hand
-    area what's left below (none = the old default). Reset to default clears it. The pedal clipart shrinks to
-    fit a short hand area (`draw_pianist_badge`).
+    0 (highest: the keys' top at the window's centre) .. 1 (lowest: the keys' bottom edge `KB_BOTTOM_MARGIN`
+    (8 px) above the window's bottom), `common.keyboard_y_range`; `bottom_layout` places the keys there and
+    gives the hand area what's left below (none = the old default). Reset to default clears it. The pedal
+    clipart shrinks to fit a short hand area (`draw_pianist_badge`).
   - Keyboard type ("keys", v26.1.19.SNAPSHOT-03): realistic or equal keys - moved here from the main menu's
     Keys button (`common.set_key_style`).
   - Frame rate cap ("fps_cap", v26.1.19.SNAPSHOT-03): a slider from `FPS_CAP_MIN` 24 to `FPS_CAP_MAX` 240 fps,
@@ -483,6 +483,13 @@ Detailed design notes, kept up to date as features were added. Start with `CLAUD
   where its beat is, the key signature drawn at the head with the time signature and the first
   note moving right of it and the sharps it covers left off the notes, a crowded measure
   squeezed back inside its bar lines without closing its notes up).
+- The grand staff's two staves stand `BASE_MID_GAP_SP` (6 sp) apart, and spread further
+  when the hands' ink would crowd or collide in the gap (`StaffView.staff_geometry`,
+  `vertical_extents`). A spread that no longer fits the panel shrinks that one system
+  (down to `MIN_FIT_SCALE` 0.6 of the user's size) and centres its content block between
+  a `MEASURE_NUM_PAD_PX` (14 px) band for the measure numbers above the treble staff and
+  `STAFF_PAD_Y` at the bottom; a calm system keeps the size the user chose. The
+  staff-panel height itself never changes by itself.
 
 ## Fonts and frame pacing (v26.1.19.SNAPSHOT-14, -15)
 - Every font comes from the bundled typeface: Source Sans Pro, regular and bold (`assets/fonts`, SIL Open Font

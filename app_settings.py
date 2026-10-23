@@ -4,9 +4,10 @@ app_settings.py - The Settings screen (main menu > Settings).
   * Keyboard position: the keys (and the hand area below them) drawn at their
     place in the window; click and hold the keyboard and drag it up or down.
     The highest it goes is the top of the keys at the window's centre, the
-    lowest the keys' bottom half a keyboard height above the window's bottom
-    (common.keyboard_y_range). Kept as a share of that range, so it holds at
-    any window size ("keyboard_place" in settings.json; none = the default).
+    lowest the keys' bottom edge KB_BOTTOM_MARGIN pixels above the window's
+    bottom (common.keyboard_y_range). Kept as a share of that range, so it
+    holds at any window size ("keyboard_place" in settings.json; none = the
+    default).
   * Keyboard type: realistic or equal keys (common.set_key_style; "keys").
   * Frame rate cap: 24 to 240 frames a second, uncapped all the way to the
     right (App.set_fps_cap; "fps_cap", none = uncapped).
