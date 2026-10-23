@@ -38,78 +38,69 @@ def test_two_measure_song_auto_pedal_events():
     # Quarter = 0.5s (120 bpm)
     # Measure 2 anchor at 2.0s with duration 2.0s => d1 = 0.125s => t_rel = 2.125s
     notes = [
-        Note(60, 0.0, 2.0, 80, 0, RIGHT),
-        Note(64, 2.0, 4.0, 80, 0, RIGHT),
+        Note(60, 0.0, 2.0, 80, 0, LEFT),
+        Note(64, 2.0, 4.0, 80, 0, LEFT),
     ]
-    tracks = [TrackInfo(0, "Track 0", 0, 2, RIGHT)]
+    tracks = [TrackInfo(0, "Track 0", 0, 2, LEFT)]
     song = MidiSong(notes, tracks, 4.0, [0.0, 2.0, 4.0], [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0])
     song.quarter_times = [(0.0, 0.5)]
 
-    events, spans = auto_pedal.build(song)
-    assert spans == [(0.0, 2.125), (2.205, 4.0)]
+    events, spans = auto_pedal.build(song, gap_s=0.03)
+    assert spans == [(0.0, 2.125), (2.155, 4.0)]
 
     # Expected sequence:
     # 0.0: DOWN (127) for m1
     # 2.125: UP (0) for m1 release
-    # 2.205: DOWN (127) for m2 press (after 80ms gap)
+    # 2.155: DOWN (127) for m2 press (after 30ms gap)
     # 4.0: UP (0) for m2 release
     assert len(events) == 4
     assert events[0] == (0.0, 64, 127)
     assert events[1] == (2.125, 64, 0)
-    assert events[2] == (2.205, 64, 127)
+    assert events[2] == (2.155, 64, 127)
     assert events[3] == (4.0, 64, 0)
 
 
-def test_pickup_measure_is_skipped():
-    # Pickup measure [0.0, 1.0), full measures [1.0, 3.0) and [3.0, 5.0)
+def test_pickup_and_lead_in_measure_is_skipped():
+    # Measure 1 starts with rests (notes enter at 0.5s), Measure 2 starts at 1.0s with LH note
     notes = [
-        Note(60, 0.5, 1.0, 80, 0, RIGHT),
-        Note(62, 1.0, 3.0, 80, 0, RIGHT),
-        Note(64, 3.0, 5.0, 80, 0, RIGHT),
+        Note(60, 0.5, 1.0, 80, 0, RIGHT),       # Lead-in in Measure 1 (no LH on beat 1)
+        Note(48, 1.0, 3.0, 80, 0, LEFT),        # Measure 2 has LH attack at beat 1 (1.0s)
+        Note(52, 3.0, 5.0, 80, 0, LEFT),        # Measure 3 has LH attack at beat 1 (3.0s)
     ]
-    tracks = [TrackInfo(0, "Track 0", 0, 3, RIGHT)]
+    tracks = [TrackInfo(0, "Track 0", 0, 3, LEFT)]
     song = MidiSong(notes, tracks, 5.0, [0.0, 1.0, 3.0, 5.0], [])
-    song.pickup_end = 1.0
     song.quarter_times = [(0.0, 0.5)]
 
-    events, spans = auto_pedal.build(song)
-    assert spans == [(1.0, 3.125), (3.205, 5.0)]
-    assert events[0][0] == 1.0                  # Starts at 1.0, pickup gets no pedal
+    events, spans = auto_pedal.build(song, gap_s=0.03)
+    assert spans == [(1.0, 3.125), (3.155, 5.0)]
+    assert events[0][0] == 1.0                  # Starts at 1.0, lead-in gets no pedal
     assert not any(e[0] < 1.0 for e in events)
 
 
-def test_empty_next_measure_changes_pedal_at_bar_line():
-    # Measure 1: [0.0, 2.0) with notes, Measure 2: [2.0, 4.0) whole rest (no notes)
-    notes = [Note(60, 0.0, 2.0, 80, 0, RIGHT)]
-    tracks = [TrackInfo(0, "Track 0", 0, 1, RIGHT)]
-    song = MidiSong(notes, tracks, 4.0, [0.0, 2.0, 4.0], [])
-
-    events, spans = auto_pedal.build(song)
-    assert spans == [(0.0, 2.0), (2.08, 4.0)]
-    # M1 release is at next measure start (2.0s) because there is no anchor note in M2
-    rels = [e for e in events if e[2] == 0]
-    assert rels[0][0] == 2.0
-
-
-def test_anchor_after_rest_in_measure():
-    # Measure 1: [0.0, 2.0), Measure 2: [2.0, 4.0) with rest from 2.0 to 2.5, first note at 2.5s (dur 1.0s)
+def test_no_lh_attack_on_next_measure_keeps_pedal_down():
+    # Measure 1 [0.0, 2.0) has LH note at 0.0s
+    # Measure 2 [2.0, 4.0) has NO LH note at beat 2.0s (only RH at 2.5s)
+    # Measure 3 [4.0, 6.0) has LH note at beat 4.0s
     notes = [
-        Note(60, 0.0, 2.0, 80, 0, RIGHT),
-        Note(64, 2.5, 3.5, 80, 0, RIGHT),
+        Note(48, 0.0, 2.0, 80, 0, LEFT),
+        Note(72, 2.5, 3.5, 80, 0, RIGHT),
+        Note(48, 4.0, 6.0, 80, 0, LEFT),
     ]
-    tracks = [TrackInfo(0, "Track 0", 0, 2, RIGHT)]
-    song = MidiSong(notes, tracks, 4.0, [0.0, 2.0, 4.0], [])
+    tracks = [TrackInfo(0, "Track 0", 0, 3, LEFT)]
+    song = MidiSong(notes, tracks, 6.0, [0.0, 2.0, 4.0, 6.0], [])
     song.quarter_times = [(0.0, 0.5)]
 
-    events, spans = auto_pedal.build(song)
-    # dur 1.0s >= 0.5s quarter => d1 = 0.125s => release at 2.5 + 0.125 = 2.625s
-    m1_rel = [e[0] for e in events if e[2] == 0][0]
-    assert pytest.approx(m1_rel) == 2.625
+    events, spans = auto_pedal.build(song, gap_s=0.03)
+    # Span 1 covers Measure 1 AND Measure 2 continuously!
+    # It releases at Measure 3's anchor + d1 = 4.125s
+    assert len(spans) == 2
+    assert spans[0] == (0.0, 4.125)
+    assert spans[1] == (4.155, 6.0)
 
 
 def test_set_pedal_mode_and_raw_controls_preservation():
-    notes = [Note(60, 0.0, 2.0, 80, 0, RIGHT), Note(64, 2.0, 4.0, 80, 0, RIGHT)]
-    tracks = [TrackInfo(0, "Track 0", 0, 2, RIGHT)]
+    notes = [Note(48, 0.0, 2.0, 80, 0, LEFT), Note(48, 2.0, 4.0, 80, 0, LEFT)]
+    tracks = [TrackInfo(0, "Track 0", 0, 2, LEFT)]
     raw = [(0.5, 64, 127), (1.5, 64, 0)]
     song = MidiSong(notes, tracks, 4.0, [0.0, 2.0, 4.0], [], controls=raw)
 
@@ -142,7 +133,7 @@ def test_song_with_no_bar_times_handles_auto_mode():
 def test_draw_pedal_brackets_helper(screen):
     surf = pygame.Surface((400, 100))
     surf.fill((255, 255, 255))
-    spans = [(0.0, 2.0), (2.0, 4.0)]
+    spans = [(0.0, 2.0), (2.03, 4.0)]
     x_of = lambda t: 50.0 + t * 50.0            # 0.0->50, 2.0->150, 4.0->250
     draw_pedal_brackets(surf, spans, 0.0, 4.0, x_of, 80.0, 10.0)
 
@@ -152,8 +143,8 @@ def test_draw_pedal_brackets_helper(screen):
 
 
 def test_staff_view_draw_with_auto_pedal(screen):
-    notes = [Note(60, 0.0, 2.0, 80, 0, RIGHT), Note(64, 2.0, 4.0, 80, 0, RIGHT)]
-    tracks = [TrackInfo(0, "Track 0", 0, 2, RIGHT)]
+    notes = [Note(48, 0.0, 2.0, 80, 0, LEFT), Note(48, 2.0, 4.0, 80, 0, LEFT)]
+    tracks = [TrackInfo(0, "Track 0", 0, 2, LEFT)]
     song = MidiSong(notes, tracks, 4.0, [0.0, 2.0, 4.0], [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0])
     song.set_pedal_mode("auto")
 
