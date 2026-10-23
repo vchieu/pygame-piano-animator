@@ -2034,11 +2034,11 @@ def draw_pedal_brackets(surf: pygame.Surface, spans: List[Tuple[float, float]],
         pygame.draw.line(surf, color, (round(x0), py), (round(x1), py), line_w)
 
         # Start tick / mark if this is the start of the entire pedal line or system
-        if ca == spans[0][0] or ca == sys_start:
+        if abs(ca - spans[0][0]) < 1e-4 or abs(ca - sys_start) < 1e-4:
             pygame.draw.line(surf, color, (round(x0), py), (round(x0), round(py - tick_h)), line_w)
 
         # End mark: if this is a pedal change point between measures, draw notch (∧)
-        is_change_point = (idx + 1 < len(spans) and abs(sb - spans[idx + 1][0]) < 1e-6 and sb < sys_end)
+        is_change_point = (idx + 1 < len(spans) and (spans[idx + 1][0] - sb) < 0.1 and sb < sys_end - 1e-4)
         if is_change_point:
             # Notch ∧
             nx = round(x1)
