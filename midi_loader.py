@@ -275,7 +275,7 @@ class MidiSong:
     def quarter_length(self, t: float) -> float:
         """How many seconds a quarter note lasts at time t (0.5 s when the tempo is unknown)."""
         i = bisect.bisect_right(self.quarter_times, (float(t), float("inf")))
-        return self.quarter_times[i - 1][1] if i else 0.5
+        return self.quarter_times[i - 1][1] if i else (self.quarter_times[0][1] if self.quarter_times else 0.5)
 
     def _pedal_key(self):
         """Key for caching auto pedal calculations across non-pitch/non-timing edits."""

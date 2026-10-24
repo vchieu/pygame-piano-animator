@@ -351,8 +351,8 @@ def test_mid_bar_lh_rests_on_beat_1_then_new_bass_on_beat_2():
 
 
 def test_mid_bar_walking_bass_quarters_does_not_chop():
-    # C D E F in quarter notes (1 beat each): too short to be a chord change
-    notes = [Note(48 + k * 2, 0.5 * k, 0.5 * k + 0.5, 80, 0, LEFT) for k in range(4)]
+    # C D E F in quarter notes (1 beat each): no conflict and no triad on bass
+    notes = [Note(p, 0.5 * k, 0.5 * k + 0.5, 80, 0, LEFT) for k, p in enumerate((48, 50, 52, 53))]
     events, spans = auto_pedal.build(_beat_song(notes, [0.0, 2.0], 2.0))
     assert len(spans) == 1, spans
 
@@ -741,3 +741,126 @@ def test_musicxml_integration_preserves_sostenuto_and_auto_pedal(tmp_path):
     # CC64 (sustain) auto-generated
     assert any(c[1] == 64 for c in song.controls)
     assert len(song.pedal_spans) > 0
+
+
+def test_tempo_first_in_measure(tmp_path):
+    """Loader test: tempo written in measure 1 overrides default 120 bpm at t=0."""
+    from musicxml_loader import load_musicxml
+    xml_content = """<?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 3.1 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">
+    <score-partwise version="3.1">
+      <part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
+      <part id="P1">
+        <measure number="1">
+          <attributes><divisions>1</divisions></attributes>
+          <direction><sound tempo="126"/></direction>
+          <note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration></note>
+        </measure>
+      </part>
+    </score-partwise>"""
+    xml_file = str(tmp_path / "tempo.xml")
+    with open(xml_file, "w", encoding="utf-8") as f:
+        f.write(xml_content)
+    song = load_musicxml(xml_file)
+    q = song.quarter_length(0.0)
+    assert abs(q - 60.0 / 126.0) < 1e-4
+    assert song.quarter_times[0] == (0.0, 60.0 / 126.0)
+
+
+def test_arpeggio_top_note_is_not_an_anchor():
+    """B3 F#4 B4 C#5 D5 in LH: D5 is 15 semitones above B3, so register guard skips it."""
+    # 61 bpm: quarter = 0.984s, bar = 3.934s
+    q = 60.0 / 61.0
+    notes = [
+        Note(59, 0.0 * q, 0.5 * q, 80, 0, LEFT),   # B3
+        Note(66, 0.5 * q, 1.0 * q, 80, 0, LEFT),   # F#4
+        Note(71, 1.0 * q, 1.5 * q, 80, 0, LEFT),   # B4
+        Note(73, 1.5 * q, 2.0 * q, 80, 0, LEFT),   # C#5
+        Note(74, 2.0 * q, 4.0 * q, 80, 0, LEFT),   # D5 (top note, 2 beats)
+    ]
+    s = _beat_song(notes, [0.0, 4.0 * q], 4.0 * q)
+    events, spans = auto_pedal.build(s)
+    assert len(spans) == 1, spans
+
+
+def test_short_bass_two_chords_per_bar():
+    """G3 D4 G4 (beats 1-2) then A3 E4 C#5 (beats 3-4) with RH: change at beat 3."""
+    q = 60.0 / 61.0
+    notes = [
+        # Beat 1-2: G major
+        Note(55, 0.0 * q, 0.5 * q, 80, 0, LEFT),   # G3
+        Note(62, 0.5 * q, 1.0 * q, 80, 0, LEFT),   # D4
+        Note(67, 1.0 * q, 2.0 * q, 80, 0, LEFT),   # G4
+        Note(83, 0.0 * q, 2.0 * q, 80, 0, RIGHT),  # B5
+        # Beat 3-4: A major (conflict / new chord)
+        Note(57, 2.0 * q, 2.5 * q, 80, 0, LEFT),   # A3
+        Note(64, 2.5 * q, 3.0 * q, 80, 0, LEFT),   # E4
+        Note(73, 3.0 * q, 4.0 * q, 80, 0, LEFT),   # C#5 (pitch 73)
+        Note(81, 2.0 * q, 4.0 * q, 80, 0, RIGHT),  # A5
+    ]
+    s = _beat_song(notes, [0.0, 4.0 * q], 4.0 * q)
+    s.beat_times = [k * q for k in range(5)]
+    s.quarter_times = [(0.0, q)]
+    events, spans = auto_pedal.build(s)
+    assert len(spans) == 2, spans
+    assert abs(spans[1][0] - 2.0 * q) < 0.2, spans
+
+
+def test_inversion_holds_pedal():
+    """Em over E3 then Em over G2 at bar line: no change by default (D1=hold)."""
+    q = 0.5
+    notes = [
+        # Bar 1: Em over E3
+        Note(40, 0.0, 2.0, 80, 0, LEFT),           # E3
+        Note(64, 0.0, 2.0, 80, 0, RIGHT),          # E4
+        Note(67, 0.0, 2.0, 80, 0, RIGHT),          # G4
+        Note(71, 0.0, 2.0, 80, 0, RIGHT),          # B4
+        # Bar 2: Em over G2 (inversion)
+        Note(43, 2.0, 4.0, 80, 0, LEFT),           # G2
+        Note(64, 2.0, 4.0, 80, 0, RIGHT),          # E4
+        Note(67, 2.0, 4.0, 80, 0, RIGHT),          # G4
+        Note(71, 2.0, 4.0, 80, 0, RIGHT),          # B4
+    ]
+    s = _beat_song(notes, [0.0, 2.0, 4.0], 4.0)
+    # Default: hold pedal on inversion
+    events1, spans1 = auto_pedal.build(s, bass_move_changes_pedal=False)
+    assert len(spans1) == 1, spans1
+
+    # Opt-in: re-press on inversion
+    events2, spans2 = auto_pedal.build(s, bass_move_changes_pedal=True)
+    assert len(spans2) == 2, spans2
+
+
+def test_short_bass_then_long_bass_changes():
+    """A2 (1 beat) then E3 (3 beats), RH Am to Em: one change on beat 2."""
+    q = 0.5
+    notes = [
+        # Beat 1: Am over A2
+        Note(45, 0.0, 0.5, 80, 0, LEFT),           # A2
+        Note(72, 0.0, 0.5, 80, 0, RIGHT),          # C5
+        # Beat 2-4: Em over E3
+        Note(52, 0.5, 2.0, 80, 0, LEFT),           # E3
+        Note(67, 0.5, 2.0, 80, 0, RIGHT),          # G4
+        Note(64, 0.5, 2.0, 80, 0, RIGHT),          # E4
+        Note(71, 0.5, 2.0, 80, 0, RIGHT),          # B4
+    ]
+    s = _beat_song(notes, [0.0, 2.0], 2.0)
+    s.beat_times = [0.0, 0.5, 1.0, 1.5, 2.0]
+    events, spans = auto_pedal.build(s)
+    assert len(spans) == 2, spans
+    assert abs(spans[1][0] - 0.5) < 0.1, spans
+
+
+def test_arpeggio_same_chord_no_split():
+    """G2 E3 B3 arpeggio in LH with Em melody in RH: no mid-bar split."""
+    q = 0.5
+    notes = [
+        Note(43, 0.0, 0.5, 80, 0, LEFT),           # G2
+        Note(52, 0.5, 1.0, 80, 0, LEFT),           # E3
+        Note(59, 1.0, 2.0, 80, 0, LEFT),           # B3
+        Note(71, 0.0, 2.0, 80, 0, RIGHT),          # B4
+        Note(67, 1.0, 2.0, 80, 0, RIGHT),          # G4
+    ]
+    s = _beat_song(notes, [0.0, 2.0], 2.0)
+    events, spans = auto_pedal.build(s)
+    assert len(spans) == 1, spans

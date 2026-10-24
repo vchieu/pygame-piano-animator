@@ -32,7 +32,7 @@ import os
 import re
 import zipfile
 from dataclasses import replace
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import xml.etree.ElementTree as ET
 
@@ -316,17 +316,21 @@ class _Tempo:
 
     def restart_here(self, div: float):
         """Continue the map from `div` with the current tempo and divisions."""
-        self.points.append((div, self.sec(div), self.bpm))
+        s = self.sec(div)
+        if self.points and self.points[-1][0] == div:
+            self.points[-1] = (div, s, self.bpm)
+        else:
+            self.points.append((div, s, self.bpm))
 
     def set_tempo(self, bpm: float, div: float):
         if bpm and bpm > 0 and abs(bpm - self.bpm) > 1e-9:
-            self.restart_here(div)
             self.bpm = float(bpm)
+            self.restart_here(div)
 
     def set_divisions(self, divisions: int, div: float):
         if divisions and divisions > 0 and divisions != self.divisions:
-            self.restart_here(div)
             self.divisions = int(divisions)
+            self.restart_here(div)
 
 
 def _apply_tempo(measure, at_div: float, tempo: _Tempo):
@@ -491,47 +495,9 @@ def _key_fifths(attributes) -> Optional[int]:
     return None if f is None else max(-7, min(7, int(f)))
 
 
-def _pedal_value(text: str) -> int:
-    """A MusicXML pedal value ("yes"/"no", "on"/"off", or a 0-100 position) as a switch value."""
-    v = text.strip().lower()
-    try:
-        return 127 if float(v) >= 50 else 0
-    except ValueError:
-        return 127 if v in ("yes", "true", "on") else 0
-
-
-def _pedal_events(direction, t: float) -> List[Tuple[float, int, int]]:
-    """Parse <pedal type="...">, <sound damper-pedal="...">, and <words>Ped.</words>."""
-    out = []
-    for dt in _kids(direction, "direction-type"):
-        for ped in _kids(dt, "pedal"):
-            ptype = (ped.attrib.get("type") or "").lower()
-            if ptype in ("start", "continue", "resume"):
-                out.append((t, 64, 127))
-            elif ptype in ("stop", "discontinue"):
-                out.append((t, 64, 0))
-            elif ptype == "change":
-                out.append((t, 64, 0))
-                out.append((t + 0.001, 64, 127))
-        for w in _kids(dt, "words"):
-            txt = (w.text or "").strip().lower()
-            if txt in ("ped.", "ped", "pedal", "pedal on", "pedal down"):
-                out.append((t, 64, 127))
-            elif txt in ("*", "pedal off", "pedal up", "stop pedal"):
-                out.append((t, 64, 0))
-
-    sound = _kid(direction, "sound")
-    if sound is not None:
-        # damper-pedal="40" means half down: the switch reads down from 50 up.
-        for attr, cc in (("damper-pedal", 64), ("sostenuto-pedal", 66), ("soft-pedal", 67)):
-            if attr in sound.attrib:
-                out.append((t, cc, _pedal_value(sound.attrib[attr])))
-    return out
-
-
 def _read_all_parts(parts, order: List[int], hands: List[Optional[str]],
                     notes: List[Note], staff_from_file: bool = True,
-                    controls: Optional[list] = None) -> tuple:
+                    controls: Optional[List[Tuple[float, int, int]]] = None) -> tuple:
     """
     Read every part together, measure by measure, in playing order.
 
@@ -541,8 +507,10 @@ def _read_all_parts(parts, order: List[int], hands: List[Optional[str]],
     part's measure at that index is read into `notes` at that moment. A measure
     played twice (a repeat) is read twice, so the same bar comes out again at its
     new times. Returns when the music ends, in seconds, and the key the score
-    declares: (duration, key_fifths, key_changes).
+    declares: (duration, key_fifths, key_changes, controls).
     """
+    if controls is None:
+        controls = []
     part_measures = [[_Measure(m) for m in _kids(p, "measure")] for p in parts]
     ties: List[dict] = [{} for _ in parts]
     tempo = _Tempo()
@@ -552,6 +520,7 @@ def _read_all_parts(parts, order: List[int], hands: List[Optional[str]],
     current = 0         # the key in force
     key_seen = False    # whether the score has declared a key yet
     key_changes: List[Tuple[float, int]] = []
+    controls: List[Tuple[float, int, int]] = []
     for idx in order:
         present = [its[idx].elem for its in part_measures if idx < len(its)]
         if not present:
@@ -582,7 +551,7 @@ def _read_all_parts(parts, order: List[int], hands: List[Optional[str]],
                                                controls=controls))
         div += _measure_span(part_measures, idx, tempo.divisions)
         at += length
-    return at, key_fifths, key_changes
+    return at, key_fifths, key_changes, controls
 
 
 def _measure_span(part_measures, idx: int, divisions: int) -> int:
@@ -658,10 +627,54 @@ def _first_measure_pickup(part_measures, order: List[int]) -> bool:
     return 0 < span < expected
 
 
+def _pedal_value(text: str) -> int:
+    """A MusicXML pedal value ("yes"/"no", "on"/"off", or a 0-100 position) as a switch value."""
+    v = text.strip().lower()
+    try:
+        return 127 if float(v) >= 50 else 0
+    except ValueError:
+        return 127 if v in ("yes", "true", "on") else 0
+
+
+def _pedal_events(direction, t: float) -> List[Tuple[float, int, int]]:
+    """Parse <pedal type="...">, <sound damper-pedal="...">, and <words>Ped.</words>."""
+    out = []
+
+    def add_event(time: float, cc: int, val: int):
+        ev = (time, cc, val)
+        if ev not in out:
+            out.append(ev)
+
+    for dt in _kids(direction, "direction-type"):
+        for ped in _kids(dt, "pedal"):
+            ptype = (ped.attrib.get("type") or "").lower()
+            if ptype in ("start", "continue", "resume"):
+                add_event(t, 64, 127)
+            elif ptype in ("stop", "discontinue"):
+                add_event(t, 64, 0)
+            elif ptype == "change":
+                add_event(t, 64, 0)
+                add_event(t + 0.03, 64, 127)
+        for w in _kids(dt, "words"):
+            txt = (w.text or "").strip().lower()
+            if txt in ("ped.", "ped", "pedal", "pedal on", "pedal down"):
+                add_event(t, 64, 127)
+            elif txt in ("*", "pedal off", "pedal up", "stop pedal"):
+                add_event(t, 64, 0)
+
+    sound = _kid(direction, "sound")
+    if sound is not None:
+        # damper-pedal="40" means half down: the switch reads down from 50 up.
+        for attr, cc in (("damper-pedal", 64), ("sostenuto-pedal", 66), ("soft-pedal", 67)):
+            if attr in sound.attrib:
+                add_event(t, cc, _pedal_value(sound.attrib[attr]))
+    return out
+
+
 def _read_measure(measure, tempo: _Tempo, start_div: int, at: float,
                   part_index: int, hand: Optional[str],
                   notes: List[Note], ties: dict, staff_from_file: bool = True,
-                  controls: Optional[list] = None) -> float:
+                  controls: Optional[List[Tuple[float, int, int]]] = None) -> float:
     """
     Read one measure's notes into `notes`; returns its length in seconds.
 
@@ -683,7 +696,8 @@ def _read_measure(measure, tempo: _Tempo, start_div: int, at: float,
             continue
         if tag == "direction":
             if controls is not None:
-                t = at + (tempo.sec(start_div + cursor) - origin)
+                off = _num(c, "offset") or 0
+                t = at + tempo.sec(start_div + max(0, cursor + off)) - origin
                 controls.extend(_pedal_events(c, t))
             continue
         if tag != "note":
@@ -847,10 +861,10 @@ def load_musicxml(path: str, hands_from_file: bool = True, fingering: str = "fil
         part_hand = _part_hands(parts) if hands_from_file else [None] * len(parts)
 
         notes: List[Note] = []
-        controls: List[Tuple[float, int, int]] = []
         tracks: List[TrackInfo] = []
-        duration, key_fifths, key_changes = _read_all_parts(parts, order, part_hand, notes,
-                                                            hands_from_file, controls=controls)
+        controls: List[Tuple[float, int, int]] = []
+        duration, key_fifths, key_changes, controls = _read_all_parts(parts, order, part_hand, notes,
+                                                                      hands_from_file, controls)
         for i in range(len(parts)):
             hand = part_hand[i] if hands_from_file else None
             tracks.append(TrackInfo(i, (names[i] if i < len(names) else "") or f"Part {i + 1}",
@@ -963,13 +977,14 @@ def _bar_and_beat_times(part_measures, order: List[int]):
         # last beat would be read as stretching to the end of the music.
         beat_times.append(tempo.sec(div))
     quarter_times: List[Tuple[float, float]] = []
-    seen = set()
+    # Build quarter_times with the LAST point at a given time winning
+    # (the first point at a time is often the stale default 120 bpm)
+    by_time: Dict[float, float] = {}
     for _, sec, bpm in tempo.points:
-        if bpm > 0 and sec not in seen:
-            quarter_times.append((sec, 60.0 / bpm))
-            seen.add(sec)
+        if bpm > 0:
+            by_time[sec] = 60.0 / bpm  # later point overwrites earlier one
+    quarter_times = sorted(by_time.items())
     return bar_times, beat_times, quarter_times
-
 
 def _part_names(root) -> List[str]:
     out = []

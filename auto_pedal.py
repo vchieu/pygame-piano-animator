@@ -37,6 +37,127 @@ RELEASE_DELAY_MAX = 0.08      # ... and at most this long, however slow the temp
 FINAL_TAIL_S = 0.3            # the last chord rings this long after the last note ends
 FINAL_TAIL_LIMIT_S = 0.45     # ... but never later than this after song.duration (Transport stops at +0.5 s)
 
+# Harmony detection constants (section 11.1 of pedal fix plan)
+W_MIN = 0.07                  # weight threshold: pitch class must hold 7% of window to count
+REGISTER_GUARD = 7            # max semitones above lowest LH since press to be a bass candidate
+MID_MIN_BEATS_DEFAULT = 2.0   # window must be at least 2 beats long
+MID_MIN_GAP_BEATS = 1.0       # at least 1 beat after previous bass attack
+MID_BEAT_EPS = 0.02           # float tolerance for gap guard
+
+
+# --------------------------------------------------------------------------- #
+# Harmony detection functions (section 11.1 of pedal fix plan)
+# --------------------------------------------------------------------------- #
+
+def pcs_of(notes, t0: float, t1: float,
+           struck_from: Optional[float] = None) -> Tuple[Set[int], Set[int]]:
+    """
+    Compute (core_pcs, all_pcs) for notes sounding in [t0, t1).
+    core_pcs: pitch classes holding at least W_MIN (7%) of the total overlap time.
+    all_pcs: all pitch classes present in the window.
+    """
+    w: Dict[int, float] = {}
+    for n in notes:
+        if getattr(n, "grace", False) or n.duration <= 0:
+            continue
+        if struck_from is not None and n.start < struck_from:
+            continue
+        a, b = max(n.start, t0), min(n.end, t1)
+        if b > a:
+            pc = n.pitch % 12
+            w[pc] = w.get(pc, 0.0) + (b - a)
+
+    tot = sum(w.values()) or 1.0
+    core = {pc for pc, v in w.items() if v / tot >= W_MIN}
+    return core, set(w.keys())
+
+
+def harmony_conflict(old_bass_pc: int, union_pcs: Set[int]) -> bool:
+    """
+    Test (a) from section 11.1: does the union contain a conflict relative to old_bass_pc?
+    A conflict is: minor second (1), tritone (6), or both minor and major third (3 and 4).
+    """
+    rel = {(pc - old_bass_pc) % 12 for pc in union_pcs}
+    return (1 in rel) or (6 in rel) or (3 in rel and 4 in rel)
+
+
+def triad_on_bass(bass_pc: int, pcs: Set[int], strict: bool = True) -> Optional[Tuple[int, int, int]]:
+    """
+    Test whether pcs contains a major or minor triad rooted on bass_pc.
+    strict=True: all three tones must be in pcs.
+    strict=False: bass plus at least one other tone of the triad in pcs.
+    """
+    for intervals in ((0, 4, 7), (0, 3, 7)):
+        triad = {(bass_pc + i) % 12 for i in intervals}
+        if strict:
+            if triad <= pcs:
+                return intervals
+        else:
+            if bass_pc in pcs and len((triad - {bass_pc}) & pcs) >= 1:
+                return intervals
+    return None
+
+
+def new_chord_on_bass(new_bass_pc: int, new_core: Set[int], old_all: Set[int],
+                      strict: bool = False) -> bool:
+    """
+    Test (b) from section 11.1: is there a new chord on the new bass?
+    strict=True (mid-bar): complete major or minor triad rooted on new_bass_pc in new_core.
+    strict=False (bar line): root + at least one other tone of a triad in new_core.
+    In both cases, the triad must bring at least one tone absent from old_all.
+    """
+    for intervals in ((0, 4, 7), (0, 3, 7)):
+        triad = {(new_bass_pc + i) % 12 for i in intervals}
+        if strict:
+            ok = triad <= new_core
+        else:
+            ok = new_bass_pc in new_core and len((triad - {new_bass_pc}) & new_core) >= 1
+        if ok and bool((triad & new_core) - old_all):
+            return True
+    return False
+
+
+def is_bass_candidate(candidate: Note, lowest_lh_pitch: int, lh_in_window: List[Note], measure_end: float) -> bool:
+    """
+    Guards 1 and 2 from section 11.1:
+    1. Register: candidate.pitch <= lowest LH pitch since press + 7 (a fifth)
+    2. It's the bass of its window: no lower LH note struck later in (candidate.start + 0.04, measure_end)
+    """
+    if candidate.pitch > lowest_lh_pitch + REGISTER_GUARD:
+        return False
+    for n in lh_in_window:
+        if candidate.start + 0.04 < n.start < measure_end and n.pitch < candidate.pitch:
+            return False
+    return True
+
+
+def harmony_verdict(old_bass_pc: int, old_core: Set[int], old_all: Set[int],
+                    new_bass_pc: int, new_core: Set[int],
+                    strict: bool = False) -> Tuple[bool, str]:
+    """
+    Decide whether the harmony changes between the old pedal window and the new window.
+    Returns (changed: bool, reason: str).
+    """
+    # (c) bass-only texture: new has no pitch class besides the new bass
+    bass_only = len(new_core - {new_bass_pc}) == 0
+    if bass_only:
+        return new_bass_pc != old_bass_pc, "c:bass-only"
+    if harmony_conflict(old_bass_pc, old_core | new_core):
+        return True, "a:conflict"
+    if new_chord_on_bass(new_bass_pc, new_core, old_all, strict=strict):
+        return True, "b:new-chord-on-bass"
+    return False, "same"
+
+
+def same_harmony(old_bass_pc: int, old_core: Set[int], old_all: Set[int],
+                 new_bass_pc: int, new_core: Set[int],
+                 strict: bool = False) -> bool:
+    """
+    Returns True if the harmony is the same (no pedal change needed).
+    """
+    changed, _ = harmony_verdict(old_bass_pc, old_core, old_all, new_bass_pc, new_core, strict=strict)
+    return not changed
+
 
 @dataclass(frozen=True)
 class PedalMeasure:
@@ -323,7 +444,8 @@ def lh_sounding(lh, t0: float, t1: float) -> bool:
 
 def build(song, gap_s: float = DEFAULT_PEDAL_GAP, max_hold_bars: int = 4,
           mid_bar: bool = True, mid_min_beats: float = 2.0,
-          mid_min_gap_beats: float = 1.5) -> Tuple[List[Tuple[float, int, int]], List[Tuple[float, float]]]:
+          mid_min_gap_beats: float = MID_MIN_GAP_BEATS,
+          bass_move_changes_pedal: bool = False) -> Tuple[List[Tuple[float, int, int]], List[Tuple[float, float]]]:
     """
     Build (controls, pedal_spans) for auto pedal mode.
     controls: [(time, 64, 0 | 127)]
@@ -340,9 +462,14 @@ def build(song, gap_s: float = DEFAULT_PEDAL_GAP, max_hold_bars: int = 4,
 
     mid_bar: also re-press inside a measure, at a left-hand bass note that
       * lies on a beat (when the song has beat_times),
-      * lasts at least `mid_min_beats` beats (so passing notes / Alberti never count),
-      * comes at least `mid_min_gap_beats` beats after the last press, and
-      * changes the chord colour (pcs_changed) against the chord pedalled so far.
+      * the window from the candidate to the bar end is at least mid_min_beats beats,
+      * comes at least mid_min_gap_beats (1.0) beats after the previous bass attack,
+      * passes the register guard (no more than 7 semitones above lowest LH since press),
+      * and the harmony changes (both hands, per section 11.1 of the fix plan).
+
+    bass_move_changes_pedal: if True, re-press whenever bass pitch class changes even
+    within the same chord (for backward compatibility). Default False keeps pedal down
+    on inversions (D1 = hold).
     """
     measures = measure_table(song)
     ms = [m for m in measures if not m.pickup]
@@ -351,7 +478,10 @@ def build(song, gap_s: float = DEFAULT_PEDAL_GAP, max_hold_bars: int = 4,
 
     notes = getattr(song, "notes", [])
     lh = lh_notes(notes)
-    idx = _Index(lh)
+    # Index for all notes (both hands) for harmony detection
+    all_notes = [n for n in notes if not getattr(n, "grace", False) and n.duration > 0.0]
+    all_idx = _Index(all_notes)
+    lh_idx = _Index(lh)
     qlen = song.quarter_length if hasattr(song, "quarter_length") else (lambda t: 0.5)
     beats = sorted(getattr(song, "beat_times", []) or [])
     spans: List[Tuple[float, float]] = []
@@ -375,9 +505,11 @@ def build(song, gap_s: float = DEFAULT_PEDAL_GAP, max_hold_bars: int = 4,
         if mid_bar and a.duration >= mid_min_beats * q:
             win = max(min(win, a.duration), q)
         tol = max(0.02, min(0.1, 0.15 * q))
-        return harmony_signature(idx, a.start, win=win, tol=tol, bass=a, filtered=True)
+        return harmony_signature(lh_idx, a.start, win=win, tol=tol, bass=a, filtered=True)
 
-    st = {"t_down": None, "sig": None, "t0": 0.0, "held": 0}
+    # State: t_down (pedal press time), bass (current bass pitch), 
+    # low (lowest LH pitch since press), t0 (bass attack time), held (bars count)
+    st = {"t_down": None, "bass": None, "low": None, "t0": 0.0, "held": 0}
 
     def press_change(a: Note, bound_end: float):
         """Release the pedal just after bass note `a` sounds, press it again exactly gap_s later."""
@@ -391,7 +523,11 @@ def build(song, gap_s: float = DEFAULT_PEDAL_GAP, max_hold_bars: int = 4,
         spans.append((td, t_rel))
         events.append((td, SUSTAIN, 127))
         events.append((t_rel, SUSTAIN, 0))
+        # Update state with new bass
         st["t_down"] = t_rel + max(0.0, gap_s)
+        st["bass"] = a.pitch
+        st["low"] = min(st.get("low") if st.get("low") is not None else a.pitch, a.pitch)
+        st["t0"] = a.start
 
     def let_go(t: float):
         """Lift the pedal at time t and leave it up until the left hand attacks again."""
@@ -400,38 +536,62 @@ def build(song, gap_s: float = DEFAULT_PEDAL_GAP, max_hold_bars: int = 4,
         spans.append((td, t))
         events.append((td, SUSTAIN, 127))
         events.append((t, SUSTAIN, 0))
-        st.update(t_down=None, sig=None, held=0)
+        st.update(t_down=None, bass=None, low=None, held=0)
 
     for i, m in enumerate(ms):
         q = qlen(m.start)
         if st["t_down"] is None:
-            cl = attack_cluster(idx, m, q)
+            cl = attack_cluster(lh_idx, m, q)
             if cl:
                 a0 = _lowest(cl)
-                st.update(t_down=m.start, sig=sig_at(a0, m, q), t0=a0.start, held=1)
+                st.update(t_down=m.start, bass=a0.pitch, low=a0.pitch, t0=a0.start, held=1)
             else:
-                anchors = mid_anchors(idx, m, q)
+                anchors = mid_anchors(lh_idx, m, q)
                 if not anchors:
                     continue                      # lead-in measure / no left hand yet
                 a0 = anchors[0]
-                st.update(t_down=a0.start, sig=sig_at(a0, m, q), t0=a0.start, held=1)
+                st.update(t_down=a0.start, bass=a0.pitch, low=a0.pitch, t0=a0.start, held=1)
 
-        # ---- inside the measure: a new chord on a later beat -------------------------
+        # ---- inside the measure: a new chord on a later beat (section 11.1) ----------
         if mid_bar:
-            for a in mid_anchors(idx, m, q):
+            for a in mid_anchors(lh_idx, m, q):
                 aq = qlen(a.start)
-                if a.duration < mid_min_beats * aq or not on_beat(a.start, aq):
+                if not on_beat(a.start, aq):
                     continue
-                if a.start - st["t_down"] < mid_min_gap_beats * aq:
+                # Guard 1: Register guard
+                if st.get("low") is not None and a.pitch > st["low"] + REGISTER_GUARD:
                     continue
-                c0 = max(st["t0"], a.start - (m.end - m.start))
-                cur = harmony_signature(idx, c0, win=max(a.start - c0 - 0.01, 0.05), tol=0.05, filtered=True)
-                tol = max(0.02, min(0.05, 0.15 * aq))
-                new = harmony_signature(idx, a.start, win=max(min(a.duration, m.end - a.start), aq), tol=tol, bass=a, filtered=True)
-                if not pcs_changed(cur, new):
+                # Guard 3: Window guard (from candidate to bar end is at least mid_min_beats beats)
+                if m.end - a.start < mid_min_beats * aq - 0.02:
+                    continue
+                # Guard 4: Gap guard (at least mid_min_gap_beats beats after press / previous bass attack)
+                if st.get("t0") is not None and a.start - st["t0"] < mid_min_gap_beats * aq - MID_BEAT_EPS:
+                    continue
+                # Guard 2: It is the bass of its own window (no lower LH note struck later in window)
+                if any(n.pitch < a.pitch for n in lh_idx.sounding(a.start + 0.04, m.end)
+                       if a.start + 0.04 < n.start < m.end):
+                    continue
+                # Compute old harmony from st["t0"] to a.start
+                t0_start = st.get("t0", m.start)
+                old_core, old_all = pcs_of(all_idx.sounding(t0_start, a.start), t0_start, a.start,
+                                           struck_from=t0_start - 0.05)
+                # Compute new harmony from a.start to m.end
+                new_core, _ = pcs_of(all_idx.sounding(a.start - 0.04, m.end), a.start - 0.04, m.end,
+                                     struck_from=a.start - 0.05)
+                old_bass_pc = st["bass"] % 12
+                new_bass_pc = a.pitch % 12
+                changed, why = harmony_verdict(old_bass_pc, old_core, old_all, new_bass_pc, new_core, strict=True)
+                if not changed:
                     continue
                 press_change(a, m.end)
-                st.update(sig=new, t0=a.start, held=1)
+                st["held"] = 1
+                st["low"] = min(st.get("low") if st.get("low") is not None else a.pitch, a.pitch)
+
+        if st["t_down"] is not None and st.get("low") is not None:
+            lh_in_bar = [n.pitch for n in lh_idx.sounding(st["t0"], m.end)
+                         if st["t0"] - 0.05 <= n.start < m.end]
+            if lh_in_bar:
+                st["low"] = min(st["low"], min(lh_in_bar))
 
         nxt = ms[i + 1] if i + 1 < len(ms) else None
         if nxt is None:
@@ -450,34 +610,44 @@ def build(song, gap_s: float = DEFAULT_PEDAL_GAP, max_hold_bars: int = 4,
 
         # ---- bar line: only a new left-hand attack with a changed harmony ------------
         nq = qlen(nxt.start)
-        cl = attack_cluster(idx, nxt, nq)
+        cl = attack_cluster(lh_idx, nxt, nq)
         if not cl:                            # no new left-hand attack: keep holding ...
             if st["held"] >= max_hold_bars:   # ... but not forever
-                anchors = mid_anchors(idx, nxt, nq)
+                anchors = mid_anchors(lh_idx, nxt, nq)
                 if anchors:                   # refresh at the measure's first left-hand onset
                     a = anchors[0]
                     press_change(a, nxt.end)
-                    sig = sig_at(a, nxt, nq)
-                    if sig is not None:
-                        st["sig"] = sig
                     st.update(t0=a.start, held=1)
                     continue
-                if not lh_sounding(idx, nxt.start, nxt.end):
+                if not lh_sounding(lh_idx, nxt.start, nxt.end):
                     let_go(nxt.start)         # left hand silent all measure: lift at the bar line
                     continue
             st["held"] += 1
             continue
 
         a = _lowest(cl)
-        new_sig = sig_at(a, nxt, nq)
-        if not (harmony_changed(st["sig"], new_sig) or st["held"] >= max_hold_bars):
-            st["held"] += 1                   # same chord again: keep holding
+        new_bass_pc = a.pitch % 12
+        old_bass_pc = st["bass"] % 12
+        t0_start = st.get("t0", m.start)
+        old_core, old_all = pcs_of(all_idx.sounding(t0_start, nxt.start), t0_start, nxt.start,
+                                   struck_from=t0_start - 0.05)
+        new_core, _ = pcs_of(all_idx.sounding(nxt.start - 0.04, nxt.end), nxt.start - 0.04, nxt.end,
+                             struck_from=nxt.start - 0.05)
+        changed, why = harmony_verdict(old_bass_pc, old_core, old_all, new_bass_pc, new_core, strict=False)
+
+        if not changed and st["held"] >= max_hold_bars:
+            changed = True
+        if not changed and bass_move_changes_pedal and new_bass_pc != old_bass_pc:
+            changed = True
+
+        if not changed:
+            st["held"] += 1
+            st["low"] = min(st.get("low") if st.get("low") is not None else a.pitch, a.pitch)
             continue
 
         press_change(a, nxt.end)
-        if new_sig is not None:
-            st["sig"] = new_sig
         st.update(t0=a.start, held=1)
+        st["low"] = min(st.get("low") if st.get("low") is not None else a.pitch, a.pitch)
 
     # Sort events by timestamp; for identical timestamp, UP (0) must precede DOWN (127)
     events.sort(key=lambda e: (e[0], e[2] != 0))

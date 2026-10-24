@@ -1766,8 +1766,8 @@ text. `common.save_file_dialog(musicxml=True)` offers the MusicXML formats and
   - Staff: `staff.draw_pedal_brackets` draws a "Ped." bracket under the bass staff for each span, clipped per system;
     two spans less than 0.1 s apart are a change and get the notch (∧) instead of the end tick. It works in seconds, so
     mid-measure changes need nothing extra.
-  - Limits: only the LH is read; an LH chord change on short notes (Alberti on a new chord at beat 3) waits for the next
-    bar line; the thresholds (Jaccard 0.5, `mid_min_beats` 2) were set by reasoning, not tuned on a corpus.
+  - Limits: harmony reads both hands (resolved former LH-only limit); mid-bar changes trigger on beat on chord changes (`harmony_verdict` with conflict/new-chord/bass-only tests).
+  - Fixes (2026-10-25): tempo map in `musicxml_loader` now keeps the last tempo point at each timestamp (fixing 0.5s quarter length bug); pedal code reads both hands for harmony and correctly parses `<sound>` pedal attributes (sostenuto/soft) alongside `<pedal>` direction-types.
 - **Sequential fingering mode** (editor, 2026-09-27): right-click a single note → "Sequential fingering from here".
   - Steps through only that note's hand: onset groups within `CHORD_TOL`, each chord from its highest note to its lowest.
   - Keys:
