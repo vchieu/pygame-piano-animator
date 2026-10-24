@@ -8,11 +8,35 @@ Detailed design notes, kept up to date as features were added. Start with `CLAUD
     - `notes`: each Note has pitch, start and end (seconds), velocity, track, hand and **finger**.
     - `notes_between(t0, t1)` and `active_notes(t)`.
     - `bar_times` and `duration`.
+    - `beat_times`, `quarter_times` (time, seconds per quarter note; `quarter_length(t)`) and `pickup_end` (the end of
+      a pickup measure, 0.0 = the song starts on a full bar): the bar table the auto pedal needs.
+    - `controls` / `raw_controls` / `pedal_mode` / `pedal_spans` and `set_pedal_mode("score"|"auto")`: see
+      `auto_pedal.py` below.
   - `read_fingering(path)` reads the fingering embedded in the file.
   - Hands, in order of precedence:
     1. Track names.
     2. Two tracks with mean pitches ≥ 7 semitones apart: the higher one is the RH.
     3. Otherwise `hand_split.split_hands()`.
+- `auto_pedal.py` – the automatic sustain pedal (2026-10-24; design notes: `docs/AUTO_PEDAL_SPEC.md`). Pure functions,
+  no UI or audio; imports only `LEFT`, `RIGHT`, `Note` from `midi_loader`.
+  - `build(song, gap_s=0.03, max_hold_bars=4, mid_bar=True, mid_min_beats=2.0, mid_min_gap_beats=1.5)` returns
+    `(controls, spans)`: `controls` = `[(t, 64, 127|0)]` (UP before DOWN at one time, same values merged), `spans` =
+    `[(t_down, t_release)]` for the staff's Ped. brackets (two spans of a change are `gap_s` apart).
+  - The pedal changes with the **left hand's harmony**, not at every bar line. It goes down at the first full measure
+    where the LH (`lh_notes`: LEFT hand or pitch < 60) attacks on beat 1; the pickup gets none. At a bar line it is
+    re-pressed only if the LH attacks there and `harmony_changed` (bass pitch class differs, or the same bass with a
+    different pitch-class set, Jaccard <= 0.5) - repeated chords and Alberti bass hold it across the bar line - or after
+    `max_hold_bars`. The last measure releases at `min(its end, duration + 0.3)`.
+  - Change point: released `d1` after the new bass note's attack (`split_lengths`: `d1` = a quarter of a beat if the
+    note lasts a beat or more, else half the note; clamped so the pedal is down again before the note ends), pressed
+    again `gap_s` later, so the new bass note is caught by the new pedal. The notes are **not** split:
+    `SoundfontOut` keeps a held key sounding when the pedal lifts.
+  - `mid_bar`: also inside a measure, at an LH bass note that is on a beat, lasts >= `mid_min_beats`, is >=
+    `mid_min_gap_beats` after the last press, and changes the chord colour (`pcs_changed`: pitch-class sets only,
+    so root -> fifth of one chord does not count). Short bass notes (Alberti, walking bass) never trigger it.
+  - The bar-line attack window scales with the beat (`attack_window`: 0.2 before, 0.3 after), so an LH note played a
+    little early still counts; the anchor is the lowest LH note of that cluster (`attack_cluster`, `pick_anchor`).
+  - Times are seconds; the beat length comes from `song.quarter_length(t)`. Without `bar_times` there is no auto pedal.
 - `hand_split.py` – works out which hand plays each note in unlabeled MIDI.
 - `figures.py` – recognises standard figures and gives them their standard fingering (see below).
 - `fingering.py` – fingering planner.
@@ -53,6 +77,9 @@ Detailed design notes, kept up to date as features were added. Start with `CLAUD
     its one step further right "uncapped" (kept as null); default 60 (`common.FPS`, as before). `App.run` ticks
     the clock at the cap (0: no limit); the hands' work ahead in a frame's spare time (`idle`) is budgeted to the
     cap, or to `UNCAPPED_IDLE_HZ` 240 uncapped. `main.fps_cap_value` clamps what's read.
+  - Pedal ("pedal_mode", 2026-10-24): "score" keeps the file's own pedal (default), "auto" uses `auto_pedal.build`
+    (button labels "From the score" / "Auto by measure"). Clicking it calls `song.set_pedal_mode(...)` on the
+    open song, so the change applies at once; `raw_controls` is kept, going back to "score" restores the file's pedal.
   - Soundfont ("soundfont", v26.1.19.SNAPSHOT-04): Browse… for a .sf2 / .sf3, or Use default (the system's MIDI
     synth, `common.MidiOut`). `sf_synth.make_synth(sound, path)` gives `SoundfontOut` - MidiOut's interface
     (note_on / note_off by hand: RH channel 0, LH 1; control_change; set_volume as CC 7; pedals_up; silence;
@@ -1017,7 +1044,7 @@ text. `common.save_file_dialog(musicxml=True)` offers the MusicXML formats and
   - Finger early lifts shorten notes.
   - Keys are let go early, or struck late, to keep to the pianist's top travel speed (see below).
   - Notes a hand drops (a 6th note) aren't played.
-  - `common.Performance` feeds `Transport`, which sends note on/off events in time order along with the pedal CCs (64/66/67 from `MidiSong.controls`).
+  - `common.Performance` feeds `Transport`, which sends note on/off events in time order along with the pedal CCs (64/66/67 from `MidiSong.controls`) (in "auto" pedal mode `controls` is replaced by the CC64 events `auto_pedal.build` made, so the file's own sostenuto/soft events 66/67 are not played; `raw_controls` keeps them).
   - The keyboard shows the performed keys.
 - The Studio has four pages: browser (search, size chips, sort), overview (RGB sliders, stretched/natural view, Save that stays disabled for a new pianist until Anatomy and Behavior have both been visited), anatomy (clickable bones and table, group sliders, span-over-keys view with the thumb on C4) and behavior.
 - Overview finger curling (v26.1.20): pointing at a finger or the thumb highlights it (`_finger_at`, distance to its
@@ -1352,6 +1379,20 @@ text. `common.save_file_dialog(musicxml=True)` offers the MusicXML formats and
   - Leaving a performance (player or editor: back to the menu, another file, sequential mode, mute, quitting) calls
     `MidiOut.silence()`: pedals up, all notes off (CC123), all sound off (CC120). "All notes off" alone left the
     synth's sustained notes ringing when the sustain pedal was down (2026-10-02).
+- **Auto pedal** (2026-10-24; auto_pedal.py, `docs/AUTO_PEDAL_SPEC.md`): the MIDI/MusicXML scores usually carry no pedal, so
+  a setting ("pedal_mode": "score" / "auto") can play one that follows the left hand's chords.
+  - First design: one pedal per measure with the first note of the next measure split in two. Dropped for the
+    harmony rule: the pedal is re-pressed only when the LH chord changes, just after the new bass note is struck.
+    No note splitting is needed (the synth keeps held keys sounding).
+  - Reviewing it caught three bugs worth knowing: a harmony check that was written but never called by `build` (every
+    bar re-pressed, even on Alberti bass); a test whose notes had `end < start` so it passed for the wrong reason; and
+    an LH note played a little before the bar line that the attack test accepted but the anchor search missed
+    (an `UnboundLocalError`, or the pedal released on a later note).
+  - Staff: `staff.draw_pedal_brackets` draws a "Ped." bracket under the bass staff for each span, clipped per system;
+    two spans less than 0.1 s apart are a change and get the notch (∧) instead of the end tick. It works in seconds, so
+    mid-measure changes need nothing extra.
+  - Limits: only the LH is read; an LH chord change on short notes (Alberti on a new chord at beat 3) waits for the next
+    bar line; the thresholds (Jaccard 0.5, `mid_min_beats` 2) were set by reasoning, not tuned on a corpus.
 - **Sequential fingering mode** (editor, 2026-09-27): right-click a single note → "Sequential fingering from here".
   - Steps through only that note's hand: onset groups within `CHORD_TOL`, each chord from its highest note to its lowest.
   - Keys:
@@ -1715,6 +1756,11 @@ text. `common.save_file_dialog(musicxml=True)` offers the MusicXML formats and
 - `tests/conftest.py` makes pygame headless (SDL dummy video/audio drivers) and points `pianist.FOLDER` at a temporary folder, so tests never touch your saved pianists.
 - `tests/test_core.py` covers loading, pedal switches, scale fingering, thumb/pinky pairs, given fingers, hand poses, crossings, bounce and tremolo detection.
 - `tests/test_ui.py` drives the menu, player, studio and the editor's sequential fingering mode with scripted key events.
+- `tests/test_auto_pedal.py` covers the auto pedal: `split_lengths`, the LH/harmony helpers, `build` (two measures, lead-in,
+  held pedal over a measure without an LH attack, Alberti and repeated chords, `max_hold_bars`, same bass with a new chord
+  colour, an early LH attack, the bass rather than the melody as anchor, a staccato bass, the last measure), `mid_bar`
+  (beat 3, off, LH entering on beat 2, walking bass, oom-pah on one chord and C -> G7, an off-beat bass),
+  `set_pedal_mode` keeping `raw_controls`, `draw_pedal_brackets`, `StaffView` and the Settings button.
 - Only the three small MIDIs in `MIDIs/` are tracked; the rest of your MIDI collection, the PIG dataset, score PDFs and skin reference images stay local (see `.gitignore`).
 - Benchmarks that need local data:
   - `python pig_eval.py <FingeringFiles folder>` - match rates against the PIG annotators.
