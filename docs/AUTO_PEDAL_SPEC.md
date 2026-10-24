@@ -1,186 +1,146 @@
-# AUTO PEDAL THEO Ô NHỊP — SPEC THIẾT KẾ
+# AUTO PEDAL — SPEC (khớp với cài đặt hiện tại)
 
-Tài liệu này dành cho model/dev đọc source Python (import MusicXML/MIDI rồi play theo bản nhạc) và triển khai tính năng tự động thêm pedal. Spec độc lập với source: chỉ nói cần làm gì, dữ liệu nào, và cần tìm gì trong code.
+Cập nhật theo `auto_pedal.py` hiện tại (đổi pedal theo **hợp âm tay trái**, có `mid_bar`). Bản spec đầu tiên mô tả "pedal theo từng ô nhịp, cắt đôi note anchor"; hướng đó đã được thay thế, xem mục 10.
 
 ---
 
-## 0. Cách hiểu thuật toán
+## 1. Hành vi tóm tắt
 
-- Pedal của ô nhịp N **nhấn** tại `t_down`. Ô nhịp đầu tiên đủ nhịp có `t_down` = đầu ô nhịp. Các ô sau có `t_down` = `t_release` của ô trước.
-- Pedal của ô nhịp N **nhả** tại `t_release` = onset của note đầu tiên (anchor) ở ô nhịp N+1 cộng `d1`.
-- Tại `t_release` pedal nhả rồi nhấn lại ngay: đây là điểm chuyển pedal. Note anchor bị cắt đôi: phần 1 dài `d1`, phần 2 bắt đầu đúng `t_release`. Pedal ô sau bắt đầu từ phần 2.
-- Công thức cắt: nếu `dur/4 >= 1/16 note` thì `d1 = 1/16 note`, ngược lại `d1 = dur/2`. Sau đó `d2 = dur - d1`.
-  - Tính theo quarterLength (QL), `1/16 note = 0.25 QL`. Điều kiện `dur/4 >= 0.25` tương đương `dur >= 1.0 QL` (từ nốt đen trở lên).
-  - Ví dụ: nốt tròn 4.0 cho `0.25 + 3.75`. Nốt đen 1.0 cho `0.25 + 0.75`. Móc đơn 0.5 cho `0.25 + 0.25`. Móc kép 0.25 cho `0.125 + 0.125`.
-- **Hai lớp dữ liệu, không trộn:**
-  - Lớp **hiển thị** (khuôn nhạc): giữ note gốc, không có note bị cắt. Pedal vẽ từ đầu đến hết ô nhịp.
-  - Lớp **trình diễn** (audio, animation, scheduler): dùng note đã cắt và pedal event thật.
-- Ô nhịp thiếu (pickup/anacrusis) ở đầu bài **không** nhấn pedal.
+- Pedal sustain được tự động sinh từ **chuyển động hợp âm của tay trái (LH/bass)**, không phải mỗi ô một lần.
+- Pedal **nhấn** ở đầu ô nhịp đầu tiên (không phải pickup) mà LH có attack ở phách 1.
+- Pedal chỉ **đổi** (nhả rồi đạp lại) khi hợp âm LH thật sự đổi:
+  - **Ở vạch nhịp:** ô sau có attack LH mới ở phách 1 **và** hợp âm khác ô trước. Hợp âm lặp, Alberti cùng hợp âm: giữ pedal liên tục qua vạch nhịp. Ô sau không có attack LH (LH nghỉ hoặc giữ nốt): giữ pedal.
+  - **Giữa ô (`mid_bar`, mặc định bật):** tại một nốt bass LH dài, nằm đúng phách, làm đổi màu hợp âm.
+- Điểm đổi: nhả pedal ngay **sau** attack của nốt bass mới (`d1` sau onset), đạp lại sau `gap_s` = 30 ms. Nhờ đó nốt bass mới được pedal mới bắt lấy.
+- Pickup đầu bài không có pedal. Ô cuối nhả ở `min(hết ô, duration + 0.3 s)`.
+- Không giữ cùng một hợp âm quá `max_hold_bars` (mặc định 4) ô: tới hạn thì làm mới ở vạch nhịp có attack LH.
 
-## 1. Kiến trúc
+## 2. Các file và vai trò
 
-Tạo module thuần hàm, ví dụ `auto_pedal.py`, không phụ thuộc UI hay audio:
-
-```
-build_performance(notes, measures, settings) -> PerformancePlan
-PerformancePlan:
-    perf_notes:          list[NoteSegment]       # cho scheduler/audio
-    pedal_events:        list[PedalEvent]        # DOWN/UP đã sort
-    pedal_spans_perf:    list[(t_down, t_release, measure_no)]
-    pedal_spans_display: list[(measure_start, measure_end, measure_no)]
-```
-
-- **Không mutate** stream gốc. Nếu dùng music21 thì không sửa `Part/Measure` đang dùng để render notation. Chỉ đọc rồi sinh list mới.
-- Cache plan theo `(file_id, pedal_mode, pickup_override)`. Rebuild khi đổi file hoặc đổi setting.
-- Mọi phép tính ở **miền beat/QL**, dùng `fractions.Fraction` để tránh sai số float (music21 vốn trả Fraction). Với MIDI thì dùng ticks (số nguyên). Chỉ đổi sang giây ở bước cuối qua tempo map. Nhờ đó đổi tempo hoặc speed không làm lệch pedal.
-
-## 2. Data model
-
-```python
-@dataclass
-class Measure:
-    start; end; number; is_pickup: bool; time_sig
-
-@dataclass
-class NoteSegment:
-    note_id; pitch; onset; dur; velocity; staff   # staff/hand
-    tie_group: int | None      # cùng note gốc
-    is_continuation: bool      # phần 2: KHÔNG retrigger attack
-
-@dataclass
-class PedalEvent:
-    t; kind: Literal["DOWN", "UP"]; measure_no
-```
-
-## 3. Bước 1: bảng ô nhịp (`Measure` table)
-
-- **MusicXML:** lấy từ measure có sẵn. Ô nhịp đầu là pickup nếu `number == 0`, hoặc `implicit="yes"`, hoặc `highestTime < barDuration`. Chỉ xét ô nhịp **đầu tiên**.
-- **MIDI:** không có khái niệm measure, nên dựng từ Time Signature meta và `ticks_per_beat`: `bar_len = num * 4/den * tpb`. Phải xử lý đổi nhịp giữa bài.
-  - Pickup trong MIDI không phát hiện chắc chắn được. Thêm heuristic (ví dụ đo độ lệch của tổng độ dài so với lưới bar) kèm **override thủ công** `pickup_beats` ở setting.
-- **Lặp (repeat/volta/D.C.):** pedal phải tính trên timeline **đã unroll** theo thứ tự chơi (music21: `expandRepeats()`). Với khuôn nhạc thì mỗi ô nhịp chỉ vẽ một lần. Model cần xem source hiện xử lý repeat ở tầng nào rồi chọn đúng tầng để chèn.
-- Hợp nhất mọi part/hand thành **một** dòng note, vì chỉ có một pedal.
-
-## 4. Bước 2: tìm anchor của ô nhịp N+1
-
-```python
-def pick_anchor(notes, m):
-    cand = [n for n in notes
-            if m.start <= n.onset < m.end
-            and n.dur > 0                    # bỏ grace note
-            and not n.is_tie_continuation]   # nốt nối từ ô trước không phải attack mới
-    if not cand:
-        return None
-    t0 = min(n.onset for n in cand)
-    cluster = [n for n in cand if n.onset == t0]
-    return sorted(cluster, key=lambda n: (n.staff, -n.pitch))[0]   # deterministic
-```
-
-Hợp âm có nhiều note cùng onset thì chọn một anchor ổn định (để thành hàm riêng, dễ đổi). Mặc định chỉ cắt anchor. Có thể thêm option cắt cả cluster.
-
-## 5. Bước 3 và 4: cắt note và sinh pedal
-
-```python
-SIXTEENTH = Fraction(1, 4)
-
-def split_lengths(dur):
-    d1 = SIXTEENTH if dur / 4 >= SIXTEENTH else dur / 2
-    return d1, dur - d1
-
-def build_auto_pedal(measures, notes):
-    ms = [m for m in measures if not m.is_pickup]
-    spans, splits = [], {}
-    t_down = ms[0].start
-    for i, m in enumerate(ms):
-        if i + 1 < len(ms):
-            nxt = ms[i + 1]
-            a = pick_anchor(notes, nxt)
-            if a:
-                d1, d2 = split_lengths(a.dur)
-                t_rel = min(a.onset + d1, nxt.end)    # clamp
-                splits[a.note_id] = (t_rel, d1, d2)
-            else:
-                t_rel = nxt.start                     # ô nhịp toàn nghỉ: đổi pedal tại vạch
-        else:
-            t_rel = m.end                             # ô nhịp cuối: nhả ở cuối
-        spans.append((t_down, t_rel, m.number))
-        t_down = t_rel
-    events = [e for (a, b, n) in spans
-              for e in (Ev(a, "DOWN", n), Ev(b, "UP", n))]
-    events.sort(key=lambda e: (e.t, e.kind != "UP"))  # cùng t thì UP trước DOWN
-    return spans, splits, events
-```
-
-Display spans đơn giản là `(m.start, m.end)` của từng ô nhịp không phải pickup.
-
-Invariant nên `assert`:
-- `d1 + d2 == dur`
-- `t_rel` tăng nghiêm ngặt
-- mỗi `DOWN` đều có `UP`
-
-## 6. Tích hợp audio và scheduler
-
-- **Ngữ nghĩa sustain:** pedal đang DOWN thì note-off bị hoãn tới khi pedal UP. Khi UP, nhả mọi note không còn được ngón giữ. Note đang được giữ theo score vẫn kêu bình thường.
-- **Phần 2 của note bị cắt** (`is_continuation=True`) **không** phát attack mới và **không** gửi note-off giữa hai phần. Gộp chúng lại: note-on ở phần 1, note-off ở cuối phần 2. Âm thanh vẫn y hệt note gốc, phần cắt chỉ làm mốc cho pedal. Animation phím và tay cũng coi đó là một lần nhấn liên tục.
-- Cùng timestamp thì xử lý **UP trước DOWN**, nếu không DOWN sẽ bị huỷ. Có thể thêm setting `pedal_gap_ms` (mặc định 0) nếu muốn khoảng nhả nghe rõ hơn.
-- **Seek, loop, đổi tempo:** trạng thái pedal tại thời điểm `t` là event cuối cùng có `t_event <= t`. Khi seek giữa bài phải khôi phục đúng trạng thái này.
-
-## 7. Hiển thị khuôn nhạc
-
-- Dùng `pedal_spans_display` để vẽ dưới khuôn nhạc dưới. Mỗi ô nhịp một bracket: `Ped.` ở ô đầu, đường kẻ từ đầu ô nhịp đến hết ô nhịp, có nét nhỏ ở hai đầu. Vẽ ở mode `AUTO_MEASURE`.
-- Không vẽ note bị cắt. Vị trí x của bracket lấy từ chỗ renderer đã tính x của vạch nhịp.
-- Mode `SCORE` thì vẽ theo pedal có trong file (nếu có).
-
-## 8. Setting
-
-```python
-class PedalMode(Enum):
-    SCORE          # theo bản nhạc
-    AUTO_MEASURE   # tự động theo ô nhịp (thuật toán trên)
-    # OFF          # tuỳ chọn
-```
-
-- Màn hình Setting thêm lựa chọn Pedal: "Theo bản nhạc" / "Tự động theo ô nhịp". Có thể thêm ô tuỳ chọn `pickup_beats` cho MIDI.
-- Lưu vào file settings hiện có. Đổi mode thì rebuild plan, áp dụng ở lần play/stop kế tiếp.
-- Khi `AUTO_MEASURE` bật, **bỏ qua** pedal có sẵn trong file (CC64 trong MIDI, `<pedal>` trong MusicXML) để tránh chồng pedal.
-
-## 9. Edge cases và quyết định mặc định
-
-| Tình huống | Xử lý mặc định |
+| File | Vai trò |
 |---|---|
-| Ô nhịp pickup đầu | Không pedal. Pedal bắt đầu ở đầu ô nhịp 1, không cắt note |
-| Ô nhịp cuối | Nhấn ở đầu, nhả ở cuối ô nhịp, không cắt note |
-| Ô nhịp toàn nghỉ (không có anchor) | Đổi pedal tại vạch nhịp, không cắt |
-| Anchor là nốt nối (tie) từ ô trước | Bỏ qua, lấy attack mới đầu tiên |
-| Grace note (dur = 0) | Không làm anchor |
-| Anchor ngắn, `t0 + d1` vượt hết ô nhịp | Clamp `t_rel <= nxt.end` |
-| Đổi nhịp (time sig change) | Mỗi ô nhịp dùng độ dài riêng |
-| Hợp âm nhiều staff | Anchor chọn theo `(staff, -pitch)`, chỉ cắt anchor |
-| Có repeat | Tính trên timeline đã unroll |
+| `auto_pedal.py` | Module thuần hàm, `build(song, ...) -> (controls, spans)`. Không phụ thuộc UI/audio, chỉ import `LEFT, RIGHT, Note` từ `midi_loader` |
+| `midi_loader.py` | `MidiSong`: `bar_times`, `beat_times`, `quarter_times`, `pickup_end`, `raw_controls`, `controls`, `pedal_mode`, `pedal_spans`; `set_pedal_mode("score"\|"auto")` |
+| `musicxml_loader.py` | Điền `bar_times`, `beat_times`, `quarter_times`, `pickup_end` theo thứ tự chơi (đã tính repeat) |
+| `sf_synth.py` | Xử lý sustain: nhả pedal không làm tắt phím LH còn đang giữ nên **không cần cắt note** |
+| `staff.py` | `draw_pedal_brackets` vẽ bracket "Ped." dưới khuôn nhạc dưới |
+| `app_settings.py` | Nút Pedal: "From the score" / "Auto by measure" (lưu `pedal_mode`) |
 
-## 10. Test case
+`set_pedal_mode("auto")` gọi `auto_pedal.build(self)`; nếu không có bảng ô nhịp (`bar_times` rỗng) thì tự lùi về `"score"`. `raw_controls` (pedal gốc của file) luôn được giữ nguyên; quay lại `"score"` thì khôi phục từ đó.
 
-Dùng nhịp 4/4, ô 1 và ô 2 đều đủ nhịp:
+## 3. Đơn vị thời gian và dữ liệu vào
 
-1. Ô 2 bắt đầu bằng nốt tròn 4.0 QL: `d1=0.25`, `d2=3.75`, `t_rel = start_m2 + 0.25`. Pedal ô 1 là `[start_m1, start_m2+0.25]`, pedal ô 2 bắt đầu từ `start_m2+0.25`.
-2. Ô 2 bắt đầu bằng móc kép 0.25: `d1=0.125`, `d2=0.125`.
-3. Có pickup: ô pickup không có pedal, pedal đầu tiên bắt đầu ở đầu ô nhịp 1.
-4. Ô nhịp bắt đầu bằng dấu lặng 1 phách rồi mới có nốt: anchor là nốt đó, `t_rel = onset + d1` (nằm trong ô nhịp, không phải đầu ô).
-5. Ô nhịp toàn nghỉ: `t_rel` đúng tại vạch nhịp.
-6. Tổng trường âm (`d1 + d2`) bằng đúng note gốc, với cả tuplet (dùng Fraction để kiểm).
-7. Render audio hai lần (có cắt và không cắt, pedal tắt): âm thanh note anchor không bị retrigger.
+- Mọi thời điểm tính bằng **giây**. Độ dài một phách tại thời điểm `t` lấy từ `song.quarter_length(t)` (từ `quarter_times`, mặc định 0.5 s).
+- Bảng ô nhịp (`measure_table`): dựng từ `bar_times`; thêm 0.0 ở đầu nếu thiếu, thêm mốc cuối bằng `song.duration`. Ô đầu là **pickup** nếu `pickup_end > 0` và hết ô ≤ `pickup_end`.
+- Không có `bar_times` thì không sinh pedal tự động.
 
-## 11. Checklist để model tìm trong source
+## 4. Định nghĩa dùng chung
 
-1. **Importer:** nơi parse MusicXML/MIDI và cấu trúc dữ liệu note, measure (có lưu measure number, tie, staff không).
-2. **Đơn vị thời gian:** đang dùng giây, tick hay QL. Cần một chỗ đổi từ beat sang giây.
-3. **Scheduler/player:** nơi sinh note-on/off, và nơi (nếu có) đã xử lý CC64 hay sustain.
-4. **Audio engine:** cách xử lý note-off, release envelope, voice.
-5. **Animation phím/tay:** có đọc từ cùng list note không. Phải đảm bảo chúng nhận `perf_notes` đã gộp, không giật phím giữa hai phần cắt.
-6. **Notation renderer:** nơi tính x của vạch nhịp, nơi vẽ dưới khuôn nhạc.
-7. **Settings:** cấu trúc lưu và đọc settings, màn hình setting.
-8. **Xử lý repeat và seek/loop:** để chèn plan đúng tầng.
+- **LH / bass** (`lh_notes`): nốt `hand == LEFT` hoặc `pitch < 60`, bỏ grace và nốt dài ≤ 0. Nếu bài không có nốt nào như vậy thì dùng mọi nốt.
+- **Cửa sổ attack ở vạch nhịp** (`attack_window(q)`): từ `0.2q` **trước** đến `0.3q` **sau** vạch (120 bpm: 0.1 s / 0.15 s). Nhận cả nốt đánh sớm hơn vạch.
+- **Cụm attack** (`attack_cluster`): onset sớm nhất trong cửa sổ, cộng các nốt LH lệch ≤ 40 ms so với nó. Rỗng nghĩa là LH không attack ở phách 1.
+- **Anchor** (`pick_anchor`): nốt LH **thấp nhất** trong cụm attack (ưu tiên `hand == LEFT`). Nếu LH không attack thì lấy onset đầu tiên của ô (hàm dự phòng).
+- **Chữ ký hợp âm** (`harmony_signature(notes, t0, win, tol)`): `(bass_pc, pcs)`. `bass_pc` là pitch class của nốt LH thấp nhất vang trong `[t0 - tol, t0 + win)`. `pcs` gồm các pitch class chiếm ≥ 12% tổng độ dài vang, cộng `bass_pc`.
+- **Đổi hợp âm ở vạch nhịp** (`harmony_changed`): `bass_pc` khác, hoặc cùng bass nhưng Jaccard của hai `pcs` ≤ 0.5 (ví dụ C trưởng sang C thứ).
+- **Đổi màu hợp âm giữa ô** (`pcs_changed`): chỉ so hai tập `pcs`, Jaccard ≤ 0.5. Không xét bass riêng, nên bass nhảy gốc sang quãng năm trong cùng hợp âm (oom-pah) không tính là đổi.
 
-## 12. Điểm cần xác nhận
+## 5. Điểm đổi pedal: `d1`, clamp và gap
 
-- **Hợp âm ở đầu ô nhịp:** chỉ cắt một anchor (mặc định) hay cắt mọi note crossing `t_rel`?
-- **Pickup của MIDI:** chấp nhận heuristic kèm override thủ công, hay luôn bắt người dùng nhập?
+```python
+d1 = q/4 if dur >= q else dur/2          # split_lengths(dur, q); d2 chỉ để tham khảo
+d1 = min(d1, max(0.005, dur - gap_s - 0.005))   # đạp lại trước khi nốt bass hết
+t_rel  = min(onset + d1, hết_ô_chứa_điểm_đổi)
+t_down_mới = t_rel + gap_s
+```
+
+- `dur` là độ dài nốt anchor, `q` là độ dài một phách (giây). `d1` bằng một móc kép nếu nốt từ nốt đen trở lên, ngược lại bằng nửa nốt.
+- Spec ban đầu cắt đôi nốt anchor. Hiện **không cắt**: `d1` chỉ để tính `t_rel`, nốt giữ nguyên.
+- Event cùng thời điểm: UP (0) đứng trước DOWN (127). Event liên tiếp cùng giá trị được gộp.
+
+## 6. Thuật toán `build`
+
+```
+build(song, gap_s=0.03, max_hold_bars=4, mid_bar=True,
+      mid_min_beats=2.0, mid_min_gap_beats=1.5) -> (controls, spans)
+```
+
+Duyệt các ô không phải pickup theo thứ tự:
+
+1. **Khởi động:** chưa nhấn pedal thì tìm cụm attack LH ở đầu ô; không có thì sang ô sau. Có thì `t_down = đầu ô`, lưu chữ ký hợp âm của ô.
+2. **Giữa ô (nếu `mid_bar`):** xét từng nốt bass (thấp nhất của mỗi cụm onset) nằm giữa ô. Đổi pedal tại nốt đó khi thoả **cả bốn**:
+   - nằm đúng một phách (lệch ≤ 0.25 phách so với `beat_times`; nếu không có `beat_times` thì bỏ qua điều kiện này);
+   - dài ≥ `mid_min_beats` phách (loại Alberti và walking bass);
+   - cách lần đạp trước ≥ `mid_min_gap_beats` phách;
+   - `pcs_changed(hợp âm đang đạp, hợp âm từ nốt này)`. Hợp âm mới tính trên đoạn `[onset, min(độ dài nốt, hết ô)]`.
+3. **Ô cuối:** nhả pedal tại `min(hết ô, duration + 0.3)` rồi kết thúc.
+4. **Vạch nhịp sang ô sau:**
+   - Không có cụm attack LH ở ô sau: giữ pedal.
+   - Có: tính chữ ký hợp âm của ô sau. Pedal đổi nếu `harmony_changed(...)` hoặc đã giữ ≥ `max_hold_bars` ô; ngược lại giữ.
+   - Khi một nốt bass dài (≥ `mid_min_beats` phách) mở ô, cửa sổ chữ ký giới hạn trong độ dài nốt đó, để hợp âm kế tiếp của cùng ô không lẫn vào.
+
+Đầu ra:
+- `controls`: `[(t, 64, 127 | 0), ...]`, đã sort và gộp.
+- `spans`: `[(t_down, t_rel), ...]` cho khuôn nhạc. Hai span liên tiếp cách nhau đúng `gap_s`.
+
+## 7. Audio và scheduler
+
+- `MidiSong.controls` chính là danh sách CC64 mà player phát; mode `"auto"` thay nó bằng kết quả `build`. Pedal gốc của file nằm ở `raw_controls`, không bị mất.
+- `sf_synth` giữ phím đang bấm khi pedal nhả, nên nốt bass mới không bị cắt và không cần ghép/cắt nốt.
+- Seek, loop: trạng thái pedal tại `t` là event cuối cùng có `t_event <= t` (đã có sẵn qua `control_state`).
+
+## 8. Hiển thị khuôn nhạc
+
+- `draw_pedal_brackets(surf, spans, sys_start, sys_end, x_of, y, s)` vẽ hoàn toàn theo thời gian, không giả định span khớp ô nhịp. Mỗi span được cắt theo từng system.
+- Hai span cách nhau < 0.1 s được coi là một điểm đổi và vẽ dấu ∧. Nếu đổi `gap_s` lớn hơn 0.1 thì phải nâng ngưỡng này.
+- Nhãn "Ped." chỉ vẽ một lần cho mỗi lời gọi.
+- Bracket không còn bằng đúng một ô nhịp: nó dài tới điểm đổi hợp âm thật (có thể nhiều ô, hoặc ngắn hơn một ô khi có `mid_bar`).
+
+## 9. Setting
+
+- `pedal_mode` trong settings app: `"score"` (mặc định, giữ pedal của file) hoặc `"auto"`.
+- Đổi trong màn hình Settings thì gọi `song.set_pedal_mode(...)` ngay trên bài đang mở.
+- Các tham số của `build` (`gap_s`, `max_hold_bars`, `mid_bar`, `mid_min_beats`, `mid_min_gap_beats`) hiện **chưa** đưa lên Setting. Muốn thêm thì truyền từ nơi gọi `build` trong `set_pedal_mode`.
+
+## 10. Khác biệt so với spec cũ
+
+| Spec cũ | Hiện tại |
+|---|---|
+| Đổi pedal ở **mọi** vạch nhịp | Chỉ đổi khi hợp âm LH đổi (và mid-bar) |
+| Anchor là nốt đầu ô bất kỳ | Anchor là nốt LH thấp nhất trong cụm attack ở phách 1 |
+| Cắt đôi nốt anchor (`NoteSegment`, `perf_notes`) | Không cắt nốt, synth đã xử lý |
+| Tính theo QL / Fraction / ticks | Tính theo giây, tempo qua `quarter_length(t)` |
+| `PerformancePlan`, `PedalMode` enum, `pedal_spans_display` riêng | `build` trả `(controls, spans)`; mode là chuỗi `"score"/"auto"` |
+| Bracket vẽ đúng một ô nhịp | Bracket theo span thật |
+| Cửa sổ attack cố định | Co giãn theo tempo, nhận cả nốt đánh sớm hơn vạch |
+| Ô cuối nhả ở hết ô | Nhả ở `min(hết ô, duration + 0.3)` |
+
+## 11. Edge cases
+
+| Tình huống | Xử lý |
+|---|---|
+| Pickup đầu bài | Không pedal; pedal bắt đầu ở ô đầy đủ đầu tiên có attack LH |
+| Ô mở đầu bằng dấu lặng LH | Không có cụm attack, giữ pedal (hoặc chưa nhấn nếu chưa bắt đầu) |
+| LH đánh sớm hơn vạch (MIDI biểu diễn) | Vẫn nhận là attack của ô sau, anchor là chính nốt đó |
+| LH vào muộn ở phách 2 với bass mới dài | Đổi pedal ở nốt đó khi `mid_bar` bật |
+| Nốt bass staccato rất ngắn | `d1` clamp để đạp lại trước khi nốt hết |
+| Alberti, walking bass, oom-pah cùng hợp âm | Một span liên tục |
+| Oom-pah đổi hợp âm giữa ô (C sang G7) | Đổi ở nốt bass mới (`mid_bar`) |
+| Cùng hợp âm kéo dài nhiều ô | Làm mới sau `max_hold_bars` ô |
+| Bài không có nốt LH nào | Mọi nốt được coi là LH |
+| Không có `bar_times` | Tự lùi về `"score"` |
+| Đổi nhịp, repeat | Theo `bar_times` do loader sinh ra (đã theo thứ tự chơi) |
+
+## 12. Test
+
+`tests/test_auto_pedal.py` (chạy bằng pytest) gồm:
+- `split_lengths`, `lh_notes`, `harmony_signature`, `harmony_changed`, `has_lh_attack`, `pick_anchor`.
+- `build`: hai ô, pickup/lead-in, ô không có attack LH, Alberti cùng hợp âm, hợp âm lặp, `max_hold_bars`, cùng bass đổi màu, LH đánh sớm, anchor là bass chứ không phải giai điệu RH, nốt bass staccato, ô cuối.
+- `mid_bar`: đổi ở phách 3, tắt `mid_bar`, LH vào phách 2, walking bass không bị chặt, oom-pah cùng hợp âm, oom-pah C sang G7, bass lệch phách.
+- `set_pedal_mode` và việc giữ `raw_controls`; vẽ `draw_pedal_brackets`; `StaffView`; nút Settings (cần pygame).
+
+## 13. Hạn chế đã biết
+
+- Hợp âm đổi giữa ô bằng nốt bass ngắn (ví dụ Alberti đổi hợp âm ở phách 3) bị coi là nốt qua, chỉ bắt được ở vạch nhịp sau. Cải tiến: kiểm tra theo cửa sổ hợp âm thay vì theo từng nốt bass.
+- Chỉ xét LH. Giai điệu RH không ảnh hưởng điểm đổi pedal.
+- Với MIDI biểu diễn, vạch nhịp suy từ tempo map có thể lệch bản chơi thật; pickup MIDI dựa trên heuristic của loader (`pickup_end`).
+- Các ngưỡng (Jaccard 0.5, 12%, `mid_min_beats`...) chọn theo lẽ thường, cần chỉnh bằng cách nghe thử bài thật.

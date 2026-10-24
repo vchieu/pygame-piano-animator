@@ -17,8 +17,13 @@ Follows docs/AUTO_PEDAL_SPEC.md with musical chord change rules:
     different pitch-class set over the same bass), judged by harmony_signature/
     harmony_changed over the whole measure - repeated chords and Alberti patterns
     keep the pedal down; a new bass note or chord colour re-presses it.
+  * mid_bar (default on): the pedal can also change INSIDE a measure, on a beat where the
+    left hand plays a new long bass note (>= mid_min_beats) and the harmony really changes
+    (pitch-class sets of the chord before and after differ). Short bass notes (Alberti,
+    walking bass) never trigger it.
   * Provides helper functions for harmony detection and pedal analysis.
 """
+import bisect
 from dataclasses import dataclass
 from typing import FrozenSet, List, Optional, Tuple
 
@@ -203,12 +208,46 @@ def harmony_changed(cur_sig: Optional[Tuple[int, FrozenSet[int]]], new_sig: Opti
     return (inter / union) <= 0.5
 
 
+def pcs_changed(cur_sig, new_sig, threshold: float = 0.5) -> bool:
+    """
+    Mid-bar test: did the chord colour change? Compares only the pitch-class SETS
+    (the bass alone moving root -> fifth inside one chord is not a change).
+    Jaccard similarity <= threshold means changed.
+    """
+    if cur_sig is None or new_sig is None:
+        return False
+    union = len(cur_sig[1] | new_sig[1])
+    if union == 0:
+        return False
+    return len(cur_sig[1] & new_sig[1]) / union <= threshold
+
+
+def mid_anchors(lh: List[Note], measure: PedalMeasure, q: float = 0.5) -> List[Note]:
+    """
+    Lowest left-hand note of every onset cluster strictly inside the measure (after the
+    bar-line attack window and before the next bar line's early window), in time order.
+    """
+    early, late = attack_window(q)
+    lo, hi = measure.start + late, measure.end - early
+    cand = sorted((n for n in lh if lo <= n.start < hi), key=lambda n: n.start)
+    out: List[Note] = []
+    i = 0
+    while i < len(cand):
+        t0 = cand[i].start
+        cl = [n for n in cand[i:] if n.start - t0 <= 0.04]
+        i += len(cl)
+        out.append(min(cl, key=lambda n: (n.hand != LEFT, n.pitch)))
+    return out
+
+
 def has_lh_attack(notes: List[Note], measure: PedalMeasure, q: float = 0.5) -> bool:
     """True if the left hand (or bass area) attacks near the measure's first beat."""
     return bool(attack_cluster(lh_notes(notes), measure, q))
 
 
-def build(song, gap_s: float = DEFAULT_PEDAL_GAP, max_hold_bars: int = 4) -> Tuple[List[Tuple[float, int, int]], List[Tuple[float, float]]]:
+def build(song, gap_s: float = DEFAULT_PEDAL_GAP, max_hold_bars: int = 4,
+          mid_bar: bool = True, mid_min_beats: float = 2.0,
+          mid_min_gap_beats: float = 1.5) -> Tuple[List[Tuple[float, int, int]], List[Tuple[float, float]]]:
     """
     Build (controls, pedal_spans) for auto pedal mode.
     controls: [(time, 64, 0 | 127)]
@@ -218,6 +257,12 @@ def build(song, gap_s: float = DEFAULT_PEDAL_GAP, max_hold_bars: int = 4) -> Tup
     later bar line it is re-pressed only if the left hand attacks there AND the harmony
     changed (or the pedal has been held `max_hold_bars` bars): released just after the
     bass note's attack (d1 later), pressed again `gap_s` after that.
+
+    mid_bar: also re-press inside a measure, at a left-hand bass note that
+      * lies on a beat (when the song has beat_times),
+      * lasts at least `mid_min_beats` beats (so passing notes / Alberti never count),
+      * comes at least `mid_min_gap_beats` beats after the last press, and
+      * changes the chord colour (pcs_changed) against the chord pedalled so far.
     """
     measures = measure_table(song)
     ms = [m for m in measures if not m.pickup]
@@ -227,63 +272,97 @@ def build(song, gap_s: float = DEFAULT_PEDAL_GAP, max_hold_bars: int = 4) -> Tup
     notes = getattr(song, "notes", [])
     lh = lh_notes(notes)
     qlen = song.quarter_length if hasattr(song, "quarter_length") else (lambda t: 0.5)
+    beats = sorted(getattr(song, "beat_times", []) or [])
     spans: List[Tuple[float, float]] = []
     events: List[Tuple[float, int, int]] = []
 
-    def sig_at(a: Note, m: PedalMeasure):
-        # the harmony of the measure that starts with attack `a`
-        return harmony_signature(lh, a.start, win=max(m.end - a.start, 0.25), tol=0.1)
+    def on_beat(t: float, q: float) -> bool:
+        if not beats:
+            return True
+        i = bisect.bisect_left(beats, t)
+        near = [beats[j] for j in (i - 1, i) if 0 <= j < len(beats)]
+        return any(abs(b - t) <= 0.25 * q for b in near)
 
-    t_down: Optional[float] = None
-    cur_sig = None
-    bars_held = 0
+    def sig_at(a: Note, m: PedalMeasure, q: float):
+        # harmony of the measure that starts with attack `a`; a long bass note (mid_bar on)
+        # limits the window to that note so the next chord of the bar is not mixed in
+        win = max(m.end - a.start, 0.25)
+        if mid_bar and a.duration >= mid_min_beats * q:
+            win = max(min(win, a.duration), q)
+        return harmony_signature(lh, a.start, win=win, tol=0.1)
+
+    st = {"t_down": None, "sig": None, "t0": 0.0, "held": 0}
+
+    def press_change(a: Note, bound_end: float):
+        """Release the pedal just after bass note `a` sounds, press it again gap_s later."""
+        td = st["t_down"]
+        d1, _ = split_lengths(a.duration, qlen(a.start))
+        d1 = min(d1, max(0.005, a.duration - gap_s - 0.005))   # re-press before the note ends
+        t_rel = min(a.start + d1, bound_end)
+        if t_rel <= td:
+            t_rel = max(a.start, td + 1e-4)
+        spans.append((td, t_rel))
+        events.append((td, SUSTAIN, 127))
+        events.append((t_rel, SUSTAIN, 0))
+        nd = min(t_rel + max(0.0, gap_s), bound_end - 0.01)
+        if nd <= t_rel:
+            nd = t_rel + 1e-4
+        st["t_down"] = nd
 
     for i, m in enumerate(ms):
-        if t_down is None:
-            cl = attack_cluster(lh, m, qlen(m.start))
+        q = qlen(m.start)
+        if st["t_down"] is None:
+            cl = attack_cluster(lh, m, q)
             if not cl:
                 continue                      # lead-in measure / no left hand yet
-            t_down = m.start
-            cur_sig = sig_at(min(cl, key=lambda n: n.pitch), m)
-            bars_held = 1
+            a0 = min(cl, key=lambda n: (n.hand != LEFT, n.pitch))
+            st.update(t_down=m.start, sig=sig_at(a0, m, q), t0=a0.start, held=1)
+
+        # ---- inside the measure: a new chord on a later beat -------------------------
+        if mid_bar:
+            for a in mid_anchors(lh, m, q):
+                aq = qlen(a.start)
+                if a.duration < mid_min_beats * aq or not on_beat(a.start, aq):
+                    continue
+                if a.start - st["t_down"] < mid_min_gap_beats * aq:
+                    continue
+                c0 = max(st["t0"], a.start - (m.end - m.start))
+                cur = harmony_signature(lh, c0, win=max(a.start - c0 - 0.01, 0.05), tol=0.05)
+                new = harmony_signature(lh, a.start, win=max(min(a.duration, m.end - a.start), aq), tol=0.05)
+                if not pcs_changed(cur, new):
+                    continue
+                press_change(a, m.end)
+                st.update(sig=new, t0=a.start, held=1)
 
         nxt = ms[i + 1] if i + 1 < len(ms) else None
         if nxt is None:
             song_dur = getattr(song, "duration", m.end)
             t_rel = min(m.end, song_dur + 0.3)
-            if t_rel <= t_down:
-                t_rel = t_down + 1e-4
-            spans.append((t_down, t_rel))
-            events.append((t_down, SUSTAIN, 127))
+            td = st["t_down"]
+            if t_rel <= td:
+                t_rel = td + 1e-4
+            spans.append((td, t_rel))
+            events.append((td, SUSTAIN, 127))
             events.append((t_rel, SUSTAIN, 0))
             break
 
-        cl = attack_cluster(lh, nxt, qlen(nxt.start))
+        # ---- bar line: only a new left-hand attack with a changed harmony ------------
+        nq = qlen(nxt.start)
+        cl = attack_cluster(lh, nxt, nq)
         if not cl:                            # no new left-hand attack: keep holding
-            bars_held += 1
+            st["held"] += 1
             continue
 
         a = min(cl, key=lambda n: (n.hand != LEFT, n.pitch))
-        new_sig = sig_at(a, nxt)
-        if not (harmony_changed(cur_sig, new_sig) or bars_held >= max_hold_bars):
-            bars_held += 1                    # same chord again: keep holding
+        new_sig = sig_at(a, nxt, nq)
+        if not (harmony_changed(st["sig"], new_sig) or st["held"] >= max_hold_bars):
+            st["held"] += 1                   # same chord again: keep holding
             continue
 
-        d1, _ = split_lengths(a.duration, qlen(a.start))
-        d1 = min(d1, max(0.005, a.duration - gap_s - 0.005))   # re-press before the note ends
-        t_rel = min(a.start + d1, nxt.end)
-        if t_rel <= t_down:
-            t_rel = max(nxt.start, t_down + 1e-4)
-
-        spans.append((t_down, t_rel))
-        events.append((t_down, SUSTAIN, 127))
-        events.append((t_rel, SUSTAIN, 0))
-
-        t_down = min(t_rel + max(0.0, gap_s), nxt.end - 0.01)
-        if t_down <= t_rel:
-            t_down = t_rel + 1e-4
-        cur_sig = new_sig if new_sig is not None else cur_sig
-        bars_held = 1
+        press_change(a, nxt.end)
+        if new_sig is not None:
+            st["sig"] = new_sig
+        st.update(t0=a.start, held=1)
 
     # Sort events by timestamp; for identical timestamp, UP (0) must precede DOWN (127)
     events.sort(key=lambda e: (e[0], e[2] != 0))

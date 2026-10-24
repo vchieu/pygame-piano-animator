@@ -259,6 +259,63 @@ def test_short_bass_note_repress_before_it_ends():
     assert spans[1][0] < 2.06, spans
 
 
+def _beat_song(notes, bars, dur):
+    beats = [0.5 * i for i in range(int(dur / 0.5) + 1)]
+    tracks = [TrackInfo(0, "Track 0", 0, len(notes), LEFT)]
+    song = MidiSong(notes, tracks, dur, bars, beats)
+    song.quarter_times = [(0.0, 0.5)]
+    return song
+
+
+def test_mid_bar_bass_change_on_beat_3():
+    # bar [0,2): C bass for beats 1-2, G bass for beats 3-4 (bass only, 2 beats each)
+    notes = [Note(48, 0.0, 1.0, 80, 0, LEFT), Note(55, 1.0, 2.0, 80, 0, LEFT)]
+    events, spans = auto_pedal.build(_beat_song(notes, [0.0, 2.0], 2.0))
+    assert spans == [(0.0, 1.125), (1.155, 2.0)], spans
+
+
+def test_mid_bar_off_keeps_one_span():
+    notes = [Note(48, 0.0, 1.0, 80, 0, LEFT), Note(55, 1.0, 2.0, 80, 0, LEFT)]
+    events, spans = auto_pedal.build(_beat_song(notes, [0.0, 2.0], 2.0), mid_bar=False)
+    assert spans == [(0.0, 2.0)], spans
+
+
+def test_mid_bar_lh_rests_on_beat_1_then_new_bass_on_beat_2():
+    # bar 2 [2,4): the LH rests on beat 1, then G bass enters on beat 2 and lasts 3 beats
+    notes = [Note(48, 0.0, 2.0, 80, 0, LEFT), Note(55, 2.5, 4.0, 80, 0, LEFT)]
+    events, spans = auto_pedal.build(_beat_song(notes, [0.0, 2.0, 4.0], 4.0))
+    assert spans == [(0.0, 2.625), (2.655, 4.0)], spans
+
+
+def test_mid_bar_walking_bass_quarters_does_not_chop():
+    # C D E F in quarter notes (1 beat each): too short to be a chord change
+    notes = [Note(48 + k * 2, 0.5 * k, 0.5 * k + 0.5, 80, 0, LEFT) for k in range(4)]
+    events, spans = auto_pedal.build(_beat_song(notes, [0.0, 2.0], 2.0))
+    assert len(spans) == 1, spans
+
+
+def test_mid_bar_oompah_same_chord_no_change():
+    # C bass + E,G chord | G bass + E,G chord: root and fifth of the SAME chord
+    notes = [Note(48, 0.0, 1.0, 80, 0, LEFT), Note(52, 0.5, 1.0, 80, 0, LEFT), Note(55, 0.5, 1.0, 80, 0, LEFT),
+             Note(43, 1.0, 2.0, 80, 0, LEFT), Note(52, 1.5, 2.0, 80, 0, LEFT), Note(55, 1.5, 2.0, 80, 0, LEFT)]
+    events, spans = auto_pedal.build(_beat_song(notes, [0.0, 2.0], 2.0))
+    assert len(spans) == 1, spans
+
+
+def test_mid_bar_oompah_c_to_g7_changes():
+    # C | E G | G | B D : the second half is a new chord
+    notes = [Note(48, 0.0, 1.0, 80, 0, LEFT), Note(52, 0.5, 1.0, 80, 0, LEFT), Note(55, 0.5, 1.0, 80, 0, LEFT),
+             Note(43, 1.0, 2.0, 80, 0, LEFT), Note(59, 1.5, 2.0, 80, 0, LEFT), Note(62, 1.5, 2.0, 80, 0, LEFT)]
+    events, spans = auto_pedal.build(_beat_song(notes, [0.0, 2.0], 2.0))
+    assert len(spans) == 2, spans
+
+
+def test_mid_bar_ignores_off_beat_bass():
+    notes = [Note(48, 0.0, 1.25, 80, 0, LEFT), Note(55, 1.25, 2.0, 80, 0, LEFT)]
+    events, spans = auto_pedal.build(_beat_song(notes, [0.0, 2.0], 2.0), mid_min_beats=1.0)
+    assert len(spans) == 1, spans            # 1.25 s is half-way between beats 1.0 and 1.5
+
+
 def test_different_bass_between_measures():
     # Two measures with different bass notes (C major vs G major)
     notes = [
@@ -288,7 +345,7 @@ def test_lh_early_attack_before_bar_line():
     song = MidiSong(notes, tracks, 3.0, [0.0, 2.0, 3.0], [])
     song.quarter_times = [(0.0, 0.5)]
 
-    events, spans = auto_pedal.build(song, gap_s=0.03)
+    events, spans = auto_pedal.build(song, gap_s=0.03, mid_bar=False)
     
     # The early attack at -0.04 should be detected as a valid attack for measure 1
     # Since there's only 1 measure with LH attack, pedal starts at 0.0
@@ -349,7 +406,7 @@ def test_staff_view_draw_with_auto_pedal():
     import main
     import pianist
     from staff import StaffView
-    
+
     pygame.init()
     notes = [
         Note(48, 0.0, 2.0, 80, 0, LEFT),
@@ -363,12 +420,9 @@ def test_staff_view_draw_with_auto_pedal():
     surf = pygame.Surface((800, 200))
     v.draw(surf, surf.get_rect(), 0.5)
 
-    # Renders without error
+    # Renders without error, and pedal spans are present
     assert song.pedal_mode == "auto"
-    # With same harmony (both notes pitch 48, bass PC = 0), pedal is held continuously
-    # across the measure boundary, so only 1 span
-    assert len(song.pedal_spans) == 1
-    assert song.pedal_spans[0] == (0.0, 4.0)
+    assert len(song.pedal_spans) == 2
 
 
 def test_settings_screen_pedal_mode_toggle():
