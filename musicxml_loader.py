@@ -491,8 +491,47 @@ def _key_fifths(attributes) -> Optional[int]:
     return None if f is None else max(-7, min(7, int(f)))
 
 
+def _pedal_value(text: str) -> int:
+    """A MusicXML pedal value ("yes"/"no", "on"/"off", or a 0-100 position) as a switch value."""
+    v = text.strip().lower()
+    try:
+        return 127 if float(v) >= 50 else 0
+    except ValueError:
+        return 127 if v in ("yes", "true", "on") else 0
+
+
+def _pedal_events(direction, t: float) -> List[Tuple[float, int, int]]:
+    """Parse <pedal type="...">, <sound damper-pedal="...">, and <words>Ped.</words>."""
+    out = []
+    for dt in _kids(direction, "direction-type"):
+        for ped in _kids(dt, "pedal"):
+            ptype = (ped.attrib.get("type") or "").lower()
+            if ptype in ("start", "continue", "resume"):
+                out.append((t, 64, 127))
+            elif ptype in ("stop", "discontinue"):
+                out.append((t, 64, 0))
+            elif ptype == "change":
+                out.append((t, 64, 0))
+                out.append((t + 0.001, 64, 127))
+        for w in _kids(dt, "words"):
+            txt = (w.text or "").strip().lower()
+            if txt in ("ped.", "ped", "pedal", "pedal on", "pedal down"):
+                out.append((t, 64, 127))
+            elif txt in ("*", "pedal off", "pedal up", "stop pedal"):
+                out.append((t, 64, 0))
+
+    sound = _kid(direction, "sound")
+    if sound is not None:
+        # damper-pedal="40" means half down: the switch reads down from 50 up.
+        for attr, cc in (("damper-pedal", 64), ("sostenuto-pedal", 66), ("soft-pedal", 67)):
+            if attr in sound.attrib:
+                out.append((t, cc, _pedal_value(sound.attrib[attr])))
+    return out
+
+
 def _read_all_parts(parts, order: List[int], hands: List[Optional[str]],
-                    notes: List[Note], staff_from_file: bool = True) -> tuple:
+                    notes: List[Note], staff_from_file: bool = True,
+                    controls: Optional[list] = None) -> tuple:
     """
     Read every part together, measure by measure, in playing order.
 
@@ -539,7 +578,8 @@ def _read_all_parts(parts, order: List[int], hands: List[Optional[str]],
             if idx >= len(its):
                 continue
             length = max(length, _read_measure(its[idx].elem, tempo, div, at, i,
-                                               hands[i], notes, ties[i], staff_from_file))
+                                               hands[i], notes, ties[i], staff_from_file,
+                                               controls=controls))
         div += _measure_span(part_measures, idx, tempo.divisions)
         at += length
     return at, key_fifths, key_changes
@@ -620,7 +660,8 @@ def _first_measure_pickup(part_measures, order: List[int]) -> bool:
 
 def _read_measure(measure, tempo: _Tempo, start_div: int, at: float,
                   part_index: int, hand: Optional[str],
-                  notes: List[Note], ties: dict, staff_from_file: bool = True) -> float:
+                  notes: List[Note], ties: dict, staff_from_file: bool = True,
+                  controls: Optional[list] = None) -> float:
     """
     Read one measure's notes into `notes`; returns its length in seconds.
 
@@ -639,6 +680,11 @@ def _read_measure(measure, tempo: _Tempo, start_div: int, at: float,
             n = _num(c, "duration") or 0
             cursor += -n if tag == "backup" else n
             cursor = max(0, cursor)
+            continue
+        if tag == "direction":
+            if controls is not None:
+                t = at + (tempo.sec(start_div + cursor) - origin)
+                controls.extend(_pedal_events(c, t))
             continue
         if tag != "note":
             continue
@@ -801,9 +847,10 @@ def load_musicxml(path: str, hands_from_file: bool = True, fingering: str = "fil
         part_hand = _part_hands(parts) if hands_from_file else [None] * len(parts)
 
         notes: List[Note] = []
+        controls: List[Tuple[float, int, int]] = []
         tracks: List[TrackInfo] = []
         duration, key_fifths, key_changes = _read_all_parts(parts, order, part_hand, notes,
-                                                             hands_from_file)
+                                                            hands_from_file, controls=controls)
         for i in range(len(parts)):
             hand = part_hand[i] if hands_from_file else None
             tracks.append(TrackInfo(i, (names[i] if i < len(names) else "") or f"Part {i + 1}",
@@ -838,7 +885,7 @@ def load_musicxml(path: str, hands_from_file: bool = True, fingering: str = "fil
             tracks[i] = replace(t, hand=None, note_count=len(mine))
 
     duration = max((n.end for n in notes), default=duration)
-    song = MidiSong(notes, tracks, duration, bar_times, beat_times, path, [],
+    song = MidiSong(notes, tracks, duration, bar_times, beat_times, path, controls,
                     key_fifths=key_fifths, key_changes=key_changes)
     song.quarter_times = quarter_times
     if _first_measure_pickup(part_measures, order) and len(bar_times) >= 2:

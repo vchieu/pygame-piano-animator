@@ -206,13 +206,6 @@ class MidiSong:
         # The pedal mode the player/editor last applied: "score" (the file's own
         # controllers) or "auto" (one pedal per measure, see auto_pedal.py).
         self.pedal_mode = "score"
-        # The measures the auto pedal covers, as (start, end) seconds, for the
-        # staff's Ped. brackets (empty in score mode and for a song without bars).
-        self.pedal_spans: List[Tuple[float, float]] = []
-        # The end of the pickup measure (0.0 = the song starts on a full bar).
-        self.pickup_end = 0.0
-        # The tempo map for the auto pedal: (time, seconds per quarter note).
-        self.quarter_times: List[Tuple[float, float]] = []
         self.tracks = tracks
         self.duration = duration
         self.bar_times = list(bar_times)
@@ -227,6 +220,19 @@ class MidiSong:
         # The keys that come later, as (time, fifths) - a score may change its key.
         self.key_changes: List[Tuple[float, int]] = sorted(
             (float(t), int(f)) for t, f in (key_changes or []))
+
+        # The measures the pedal covers, as (start, end) seconds, for the
+        # staff's Ped. brackets.
+        try:
+            from auto_pedal import spans_from_controls
+            self.pedal_spans = spans_from_controls(self.controls, self.duration)
+        except ImportError:
+            self.pedal_spans = []
+        self._pedal_memo = None
+        # The end of the pickup measure (0.0 = the song starts on a full bar).
+        self.pickup_end = 0.0
+        # The tempo map for the auto pedal: (time, seconds per quarter note).
+        self.quarter_times: List[Tuple[float, float]] = []
 
         self._starts = [n.start for n in self.notes]
         # Longest note lets us bound how far back an overlapping note can start.
@@ -271,24 +277,46 @@ class MidiSong:
         i = bisect.bisect_right(self.quarter_times, (float(t), float("inf")))
         return self.quarter_times[i - 1][1] if i else 0.5
 
+    def _pedal_key(self):
+        """Key for caching auto pedal calculations across non-pitch/non-timing edits."""
+        return (
+            tuple((n.start, n.end, n.pitch, n.hand) for n in self.notes),
+            tuple(self.bar_times),
+            tuple(self.beat_times),
+            self.pickup_end,
+            self.duration,
+        )
+
     def set_pedal_mode(self, mode: str) -> None:
         """
         Play the pedal from the score (`"score"`, the file's own controllers) or
-        from the measures (`"auto"`, auto_pedal.build). Always rebuilds the control
-        index, so controls_between/control_state see the new list straight away.
+        from the measures (`"auto"`, auto_pedal.build). Preserves CC66 (sostenuto)
+        and CC67 (soft) when switching to auto. Always rebuilds the control index,
+        so controls_between/control_state see the new list straight away.
         """
+        from auto_pedal import spans_from_controls
         if mode == "auto":
-            from auto_pedal import build
-            controls, spans = build(self)
-            if not controls:                     # no bar table: keep what the file sent
-                controls = pedal_switches(self.raw_controls)
-                spans = []
-                self.pedal_mode = "score"
+            key = self._pedal_key()
+            if getattr(self, "_pedal_memo", None) and self._pedal_memo.get("key") == key:
+                sustain_ctrls, spans = self._pedal_memo["result"]
             else:
+                from auto_pedal import build
+                sustain_ctrls, spans = build(self)
+                self._pedal_memo = {"key": key, "result": (sustain_ctrls, spans)}
+
+            if not sustain_ctrls:                # no bar table: keep what the file sent
+                controls = pedal_switches(self.raw_controls)
+                spans = spans_from_controls(controls, self.duration)
+                self.pedal_mode = "score"
+                self.cleanup.append("Auto pedal found no measures; kept score pedal")
+            else:
+                others = [c for c in pedal_switches(self.raw_controls) if c[1] != SUSTAIN]
+                # Order by time, with releases (value == 0) preceding presses (value != 0)
+                controls = sorted(others + sustain_ctrls, key=lambda c: (c[0], c[2] != 0))
                 self.pedal_mode = "auto"
         else:
             controls = pedal_switches(self.raw_controls)
-            spans = []
+            spans = spans_from_controls(controls, self.duration)
             self.pedal_mode = "score"
         self.controls = controls
         self.pedal_spans = spans

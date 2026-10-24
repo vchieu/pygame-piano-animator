@@ -2014,7 +2014,6 @@ def draw_pedal_brackets(surf: pygame.Surface, spans: List[Tuple[float, float]],
     if not spans or sys_end <= sys_start:
         return
 
-    drawn_ped_label = False
     tick_h = max(3.0, round(0.6 * s))
     line_w = max(1, round(0.12 * s))
 
@@ -2033,27 +2032,32 @@ def draw_pedal_brackets(surf: pygame.Surface, spans: List[Tuple[float, float]],
         # Horizontal bracket line
         pygame.draw.line(surf, color, (round(x0), py), (round(x1), py), line_w)
 
-        # Start tick / mark if this is the start of the entire pedal line or system
-        if abs(ca - spans[0][0]) < 1e-4 or abs(ca - sys_start) < 1e-4:
+        # Is this span a new press (first span or preceded by a silent gap)?
+        is_new_press = (idx == 0 or (sa - spans[idx - 1][1]) > 0.05)
+        # Did the span start within this system?
+        started_in_system = (sa >= sys_start - 1e-4)
+
+        # Start tick: only drawn when the span actually starts in this system (not continuing across system break)
+        if started_in_system:
             pygame.draw.line(surf, color, (round(x0), py), (round(x0), round(py - tick_h)), line_w)
+            if is_new_press:
+                # Ped. text
+                ped_font = ui_font(max(9, int(round(s * 1.15))), bold=True)
+                ped_surf = ped_font.render("Ped.", True, color)
+                surf.blit(ped_surf, (round(x0 + 2), round(py - ped_surf.get_height() - 1)))
 
-        # End mark: if this is a pedal change point between measures, draw notch (∧)
-        is_change_point = (idx + 1 < len(spans) and (spans[idx + 1][0] - sb) < 0.1 and sb < sys_end - 1e-4)
-        if is_change_point:
-            # Notch ∧
-            nx = round(x1)
-            pygame.draw.line(surf, color, (nx - 3, py), (nx, round(py - tick_h)), line_w)
-            pygame.draw.line(surf, color, (nx, round(py - tick_h)), (nx + 3, py), line_w)
-        else:
-            # End tick ┘
-            pygame.draw.line(surf, color, (round(x1), py), (round(x1), round(py - tick_h)), line_w)
-
-        if not drawn_ped_label:
-            # Ped. text
-            ped_font = ui_font(max(9, int(round(s * 1.15))), bold=True)
-            ped_surf = ped_font.render("Ped.", True, color)
-            surf.blit(ped_surf, (round(x0 + 2), round(py - ped_surf.get_height() - 1)))
-            drawn_ped_label = True
+        # End mark: if the span ends within this system
+        ended_in_system = (sb <= sys_end + 1e-4)
+        if ended_in_system:
+            # If followed immediately by next span in the same system, draw notch ∧
+            is_change_point = (idx + 1 < len(spans) and (spans[idx + 1][0] - sb) < 0.1 and spans[idx + 1][0] < sys_end - 1e-4)
+            if is_change_point:
+                nx = round(x1)
+                pygame.draw.line(surf, color, (nx - 3, py), (nx, round(py - tick_h)), line_w)
+                pygame.draw.line(surf, color, (nx, round(py - tick_h)), (nx + 3, py), line_w)
+            else:
+                # End tick ┘
+                pygame.draw.line(surf, color, (round(x1), py), (round(x1), round(py - tick_h)), line_w)
 
 
 class StaffView:
@@ -2694,14 +2698,16 @@ class StaffView:
                         if x1 > x0:
                             notation.draw_tie(staff_surf, s, x0, x1, y, up, col)
 
-                    # 7b. Auto Pedal Brackets
-                    if getattr(self.song, "pedal_mode", "score") == "auto" and getattr(self.song, "pedal_spans", None):
-                        ped_y = min(local_rect.bottom - max(8, round(s * 0.9)),
-                                    max(bass_bot + s * 1.5,
-                                        max((v["y_bot"] for v in notes_info.values()), default=bass_bot) + s * 1.5))
-                        draw_pedal_brackets(staff_surf, self.song.pedal_spans, sys.start_t, sys.end_t,
-                                            lambda st_: local_rect.x + margin_left + (st_ - sys.start_t) / sys.duration * usable_w,
-                                            ped_y, s)
+                    # 7b. Pedal Brackets
+                    if getattr(self.song, "pedal_spans", None):
+                        sys_spans = [sp for sp in self.song.pedal_spans if sp[1] > sys.start_t and sp[0] < sys.end_t]
+                        if len(sys_spans) <= 12:
+                            ped_y = min(local_rect.bottom - max(8, round(s * 0.9)),
+                                        max(bass_bot + s * 1.5,
+                                            max((v["y_bot"] for v in notes_info.values()), default=bass_bot) + s * 1.5))
+                            draw_pedal_brackets(staff_surf, self.song.pedal_spans, sys.start_t, sys.end_t,
+                                                lambda st_: local_rect.x + margin_left + (st_ - sys.start_t) / sys.duration * usable_w,
+                                                ped_y, s)
 
                     # 8. Playback cursor
                     cx = round(self.cursor_x(t, local_rect, margin_left, usable_w))

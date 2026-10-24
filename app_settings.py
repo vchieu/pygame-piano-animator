@@ -25,6 +25,8 @@ app_settings.py - The Settings screen (main menu > Settings).
   * MusicXML fingering: Auto plans every finger, File keeps the score's
     printed fingers exactly, Fill in keeps them and plans what the score
     leaves blank ("musicxml_fingering").
+  * Pedal: From the score keeps the file's own sustain pedal, Auto by harmony
+    follows the left hand's chords and harmony changes ("pedal_mode").
 """
 import os
 

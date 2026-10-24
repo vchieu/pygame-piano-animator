@@ -331,6 +331,8 @@ class FingeringEditor(Transport):
             self.song.quarter_times = old.quarter_times
         if hasattr(old, "pickup_end"):
             self.song.pickup_end = old.pickup_end
+        if hasattr(old, "_pedal_memo") and old._pedal_memo is not None:
+            self.song._pedal_memo = old._pedal_memo
         self.song.set_pedal_mode(getattr(old, "pedal_mode", "score"))
         self.notes = self.song.notes            # same order: sorting is stable
         self.index = {id(n): i for i, n in enumerate(self.notes)}

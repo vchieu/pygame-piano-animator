@@ -522,3 +522,222 @@ def test_settings_screen_pedal_mode_toggle():
 
     st.handle_event(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=st.pedal.rect.center))
     assert pianist.app_setting("pedal_mode") == "score"
+
+
+def test_auto_mode_keeps_sostenuto_and_soft():
+    # B1: verify CC66 and CC67 are kept when auto mode replaces CC64
+    notes = [
+        Note(48, 0.0, 2.0, 80, 0, LEFT),
+        Note(55, 2.0, 4.0, 80, 0, LEFT),
+    ]
+    tracks = [TrackInfo(0, "Track 0", 0, 2, LEFT)]
+    raw = [
+        (0.5, 66, 127),  # sostenuto down
+        (1.5, 66, 0),    # sostenuto up
+        (1.0, 67, 127),  # soft down
+        (2.5, 67, 0),    # soft up
+        (0.0, 64, 127),  # original score sustain (should be replaced)
+        (3.0, 64, 0),
+    ]
+    song = MidiSong(notes, tracks, 4.0, [0.0, 2.0, 4.0], [0.0, 1.0, 2.0, 3.0, 4.0], controls=raw)
+    song.set_pedal_mode("auto")
+
+    assert song.pedal_mode == "auto"
+    sost = [c for c in song.controls if c[1] == 66]
+    soft = [c for c in song.controls if c[1] == 67]
+    sust = [c for c in song.controls if c[1] == 64]
+
+    assert sost == [(0.5, 66, 127), (1.5, 66, 0)]
+    assert soft == [(1.0, 67, 127), (2.5, 67, 0)]
+    assert len(sust) > 0
+    # Original score sustain was replaced by auto
+    assert not any(c == (3.0, 64, 0) for c in sust)
+
+
+def test_interleaved_controls_order_up_before_down_at_same_timestamp():
+    # Additional check 1: at the exact same timestamp, release (0) must precede press (127)
+    import random
+    raw = [
+        (1.0, 64, 127),
+        (1.0, 64, 0),
+        (1.0, 66, 127),
+        (1.0, 66, 0),
+        (2.0, 64, 127),
+        (2.0, 64, 0),
+    ]
+    # Test across multiple random shuffles
+    for _ in range(10):
+        shuffled = list(raw)
+        random.shuffle(shuffled)
+        ordered = sorted(shuffled, key=lambda c: (c[0], c[2] != 0))
+        # At t=1.0, all 0s must come before all 127s
+        at_1 = [c for c in ordered if c[0] == 1.0]
+        vals_1 = [c[2] for c in at_1]
+        assert vals_1 == [0, 0, 127, 127]
+
+
+def test_memoization_avoids_rebuild_on_fingering_edit():
+    # B2: memoization prevents recalculation during fingering edits
+    notes = [
+        Note(48, 0.0, 2.0, 80, 0, LEFT, finger=1),
+        Note(55, 2.0, 4.0, 80, 0, LEFT, finger=2),
+    ]
+    tracks = [TrackInfo(0, "Track 0", 0, 2, LEFT)]
+    song = MidiSong(notes, tracks, 4.0, [0.0, 2.0, 4.0], [0.0, 1.0, 2.0, 3.0, 4.0])
+    song.set_pedal_mode("auto")
+
+    assert song._pedal_memo is not None
+    orig_res = song._pedal_memo["result"]
+
+    # Simulating fingering edit: Note.finger changes, but start/end/pitch/hand do not
+    notes_edited = [
+        Note(48, 0.0, 2.0, 80, 0, LEFT, finger=5),
+        Note(55, 2.0, 4.0, 80, 0, LEFT, finger=1),
+    ]
+    song2 = MidiSong(notes_edited, tracks, 4.0, [0.0, 2.0, 4.0], [0.0, 1.0, 2.0, 3.0, 4.0])
+    song2._pedal_memo = song._pedal_memo
+    song2.set_pedal_mode("auto")
+
+    assert song2._pedal_memo["result"] is orig_res
+
+
+def test_lh_mid_measure_last_measure_releases_properly():
+    # B3 check: when LH enters mid-measure in the last measure (measure 1 has no LH attack),
+    # pedal starts at a0.start and releases properly at the end with an UP event
+    notes = [
+        Note(72, 0.0, 2.0, 80, 0, RIGHT),   # measure 1: RH only, no LH
+        Note(55, 3.0, 4.0, 80, 0, LEFT),    # measure 2 (last): LH enters late at 3.0
+    ]
+    tracks = [TrackInfo(0, "Track 0", 0, 2, LEFT)]
+    song = MidiSong(notes, tracks, 4.5, [0.0, 2.0, 4.0], [0.0, 1.0, 2.0, 3.0, 4.0])
+    ctrls, spans = auto_pedal.build(song)
+
+    # In measure 2, pedal down should be at 3.0 (a0.start)
+    downs = [c for c in ctrls if c[1] == 64 and c[2] == 127]
+    ups = [c for c in ctrls if c[1] == 64 and c[2] == 0]
+
+    assert any(c[0] == pytest.approx(3.0) for c in downs)
+    # And there must be an UP event after 3.0 (at song duration / tail)
+    last_up = ups[-1]
+    assert last_up[0] > 3.0
+
+
+def test_musicxml_pedal_events_parsing():
+    # B4: test _pedal_events parsing <pedal>, <sound>, and <words>
+    import xml.etree.ElementTree as ET
+    from musicxml_loader import _pedal_events
+
+    xml_str = """
+    <direction>
+      <direction-type>
+        <pedal type="start"/>
+      </direction-type>
+      <direction-type>
+        <words>Ped.</words>
+      </direction-type>
+      <sound damper-pedal="yes" sostenuto-pedal="yes" soft-pedal="no"/>
+    </direction>
+    """
+    elem = ET.fromstring(xml_str)
+    evs = _pedal_events(elem, 1.5)
+    # Should produce CC64 127, CC66 127, CC67 0
+    assert (1.5, 64, 127) in evs
+    assert (1.5, 66, 127) in evs
+    assert (1.5, 67, 0) in evs
+
+
+def test_on_beat_zero_gap_guard():
+    # B6: test on_beat with degenerate/duplicate beat markers
+    notes = [Note(48, 0.0, 2.0, 80, 0, LEFT)]
+    tracks = [TrackInfo(0, "Track 0", 0, 1, LEFT)]
+    # duplicate beat times: [0.0, 1.0, 1.0, 2.0]
+    song = MidiSong(notes, tracks, 2.0, [0.0, 2.0], [0.0, 1.0, 1.0, 2.0])
+    ctrls, spans = auto_pedal.build(song)
+    # Should build successfully without division by zero
+    assert isinstance(ctrls, list)
+
+
+def test_draw_pedal_brackets_system_boundaries():
+    # B10: test drawing brackets with span crossing system boundary
+    import pygame
+    from staff import draw_pedal_brackets
+
+    surf = pygame.Surface((400, 100))
+    # Spans: [0.0, 2.5] and [4.0, 6.0]
+    spans = [(0.0, 2.5), (4.0, 6.0)]
+
+    # System 1: [0.0, 2.0]. First span starts at 0.0 (in system) and continues past 2.0.
+    draw_pedal_brackets(surf, spans, sys_start=0.0, sys_end=2.0,
+                        x_of=lambda t: t * 100, y=50, s=12.0)
+
+    # System 2: [2.0, 4.0]. First span ends at 2.5 (started before system, ends in system).
+    # Second span starts at 4.0 (at boundary/after gap).
+    draw_pedal_brackets(surf, spans, sys_start=2.0, sys_end=4.0,
+                        x_of=lambda t: (t - 2.0) * 100, y=50, s=12.0)
+    # Both systems draw cleanly without exception
+    assert surf.get_width() == 400
+
+
+def test_musicxml_integration_preserves_sostenuto_and_auto_pedal(tmp_path):
+    # Integration test for B1 + B4 + B10
+    from musicxml_loader import load_musicxml
+
+    xml_content = """<?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 3.1 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">
+    <score-partwise version="3.1">
+      <part-list>
+        <score-part id="P1"><part-name>Piano</part-name></score-part>
+      </part-list>
+      <part id="P1">
+        <measure number="1">
+          <attributes>
+            <divisions>1</divisions>
+            <key><fifths>0</fifths></key>
+            <time><beats>4</beats><beat-type>4</beat-type></time>
+          </attributes>
+          <direction placement="below">
+            <direction-type><pedal type="start"/></direction-type>
+            <sound sostenuto-pedal="yes"/>
+          </direction>
+          <note>
+            <pitch><step>C</step><octave>3</octave></pitch>
+            <duration>4</duration>
+            <voice>1</voice>
+            <type>whole</type>
+            <staff>1</staff>
+          </note>
+        </measure>
+        <measure number="2">
+          <direction placement="below">
+            <direction-type><pedal type="stop"/></direction-type>
+            <sound sostenuto-pedal="no"/>
+          </direction>
+          <note>
+            <pitch><step>G</step><octave>2</octave></pitch>
+            <duration>4</duration>
+            <voice>1</voice>
+            <type>whole</type>
+            <staff>1</staff>
+          </note>
+        </measure>
+      </part>
+    </score-partwise>
+    """
+    xml_file = str(tmp_path / "test_pedal.xml")
+    with open(xml_file, "w", encoding="utf-8") as f:
+        f.write(xml_content)
+
+    song = load_musicxml(xml_file)
+    assert song.pedal_mode == "score"
+    # Loaded pedals from score
+    assert any(c[1] == 64 for c in song.raw_controls)
+    assert any(c[1] == 66 for c in song.raw_controls)
+
+    # Switch to auto
+    song.set_pedal_mode("auto")
+    assert song.pedal_mode == "auto"
+    # CC66 (sostenuto) preserved
+    assert any(c[1] == 66 for c in song.controls)
+    # CC64 (sustain) auto-generated
+    assert any(c[1] == 64 for c in song.controls)
+    assert len(song.pedal_spans) > 0

@@ -42,3 +42,4 @@ Thumbs.db
 
 # Claude Code: personal settings stay local (shared project settings are .claude/settings.json)
 .claude/settings.local.json
+.tmp_pytest/
