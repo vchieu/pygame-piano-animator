@@ -799,6 +799,8 @@ class Transport:
         if not self.song:
             return
         self.t = max(-LEAD_IN, min(t, self.song.duration))
+        if hasattr(self.midi, "pedals_up"):
+            self.midi.pedals_up()
         self.midi.all_off()
         self._send_pedals()
         # Treat notes already in progress as "already played" so they don't retrigger.
@@ -832,7 +834,8 @@ class Transport:
         if t1 >= self.end_time():
             self.t = self.end_time() - END_PAD_T
             self.paused = True
-            self.midi.pedals_up()
+            if hasattr(self.midi, "pedals_up"):
+                self.midi.pedals_up()
             self.midi.all_off()
             self.sounding = {}
             return
@@ -848,7 +851,7 @@ class Transport:
         events.sort(key=lambda e: (e[0], e[1]))
         for _, kind, x in events:
             if kind == 0:
-                if id(x) in self.sounding or not any(m.pitch == x.pitch for _, m in self.sounding.values()):
+                if id(x) in self.sounding or not any(m.pitch == x.pitch and getattr(m, "hand", None) == getattr(x, "hand", None) for _, m in self.sounding.values()):
                     self.sounding.pop(id(x), None)
                     self.midi.note_off(x)
             elif kind == 1:
@@ -857,7 +860,7 @@ class Transport:
                 r, n = x
                 # a key struck again while still down: the old note ends here
                 for k, (_, m) in list(self.sounding.items()):
-                    if m.pitch == n.pitch:
+                    if m.pitch == n.pitch and getattr(m, "hand", None) == getattr(n, "hand", None):
                         del self.sounding[k]
                         self.midi.note_off(m)
                 if r > t1:

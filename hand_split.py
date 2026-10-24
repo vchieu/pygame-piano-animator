@@ -80,7 +80,7 @@ CROWD = 1.5              # ... per semitone short of that
 REPEAT_T = 0.5           # a chord repeated within this ...
 REPEAT_SPLIT = 4.0       # ... and split differently from the last time costs this
 TRACK_PRIOR = 200.0      # per note played by the other hand than its track says ...
-TRACK_PRIOR_SOFT = 1.0   # ... near where that hand couldn't keep up with its track:
+TRACK_PRIOR_SOFT = 10.0  # ... near where that hand couldn't keep up with its track:
 TRACK_FREE_T = 0.5       # within this of a move needing more than
 TOO_FAST_TRACK = 0.5     # 50% over the top speed
 WIDE_T = 0.15            # ... or groups this close together spanning more than SPAN_MAX ...
@@ -272,6 +272,10 @@ def _track_weights(groups, prefer):
     for t, ns in groups:
         i = bisect.bisect_left(bad, t - TRACK_FREE_T)
         near = i < len(bad) and bad[i] <= t + TRACK_FREE_T
+        for side in (RIGHT, LEFT):
+            mine = [n for n in ns if prefer.get(id(n)) == side]
+            if len(mine) > 5:
+                near = True
         for n in ns:
             out[id(n)] = TRACK_PRIOR_SOFT if near else TRACK_PRIOR
     return out

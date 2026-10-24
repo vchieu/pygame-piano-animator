@@ -281,7 +281,8 @@ class MidiSong:
             from auto_pedal import build
             controls, spans = build(self)
             if not controls:                     # no bar table: keep what the file sent
-                controls, spans = pedal_switches(self.raw_controls), []
+                controls = pedal_switches(self.raw_controls)
+                spans = []
                 self.pedal_mode = "score"
             else:
                 self.pedal_mode = "auto"

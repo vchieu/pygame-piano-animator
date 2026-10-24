@@ -996,7 +996,8 @@ class HandAnimator:
         self.slip_of = find_slips(notes, self.vp, given)
         slips = [n for n in notes if id(n) in self.slip_of]
         notes = [n for n in notes if id(n) not in self.slip_of]
-        self.groups = group_notes(notes, vpitch=self.vp)
+        self.orphans = []
+        self.groups = group_notes(notes, vpitch=self.vp, dropped=self.orphans)
         # `fingering` ({id(note): finger}) skips the planner, e.g. when the
         # fingering editor already knows every finger
         # a chord the file fingers impossibly (an octave with 4-5) is played
@@ -1032,7 +1033,8 @@ class HandAnimator:
                 self.fingering[id(n)] = f
         # notes without a finger (a sixth note in one hand's chord) aren't animated - logged, with their times
         self.unplaced = sorted([n for _, ns in self.groups for n in ns if id(n) not in self.fingering] +
-                               [n for n in slips if id(n) not in self.fingering], key=lambda n: n.start)
+                               [n for n in slips if id(n) not in self.fingering] +
+                               list(getattr(self, "orphans", [])), key=lambda n: n.start)
         if self.unplaced:
             log_unplaced(song, hand, self.unplaced)
         self.groups = [(t, [n for n in ns if id(n) in self.fingering]) for t, ns in self.groups]
@@ -2378,6 +2380,7 @@ class HandAnimator:
                 if id(n) in self.cluster_key:
                     e = max(s0 + 1e-3, min(e, s0 + (n.end - n.start)))
                 out.append((s0, e, n))
+        out += [(n.start, n.end, n) for n in getattr(self, "orphans", [])]
         return out
 
     def _release_unheld(self):

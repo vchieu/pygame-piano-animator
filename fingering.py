@@ -840,9 +840,11 @@ def _next_in_run(group, n):
     return n.start - prev.start >= RUN_SPLIT_T and 1 <= abs(n.pitch - prev.pitch) <= 2
 
 
-def group_notes(notes, vpitch=None, tolerance=CHORD_TOL):
+def group_notes(notes, vpitch=None, tolerance=CHORD_TOL, dropped=None):
     """Chords: [(start, [notes])], each ordered by vpitch (finger numbers rise along it)."""
     vp = vpitch or (lambda p: p)
+    if dropped is None:
+        dropped = []
 
     def smudge_of(group, n):
         """A neighbouring key caught with a note of the group a little apart from it (SMUDGE_TOL): it joins."""
@@ -864,7 +866,8 @@ def group_notes(notes, vpitch=None, tolerance=CHORD_TOL):
         # one hand, five fingers (some may take two or three neighbouring keys,
         # min_fingers): drop inner notes
         while len(ns) > 5 and min_fingers([vp(n.pitch) for n in ns]) > 5:
-            ns.pop(len(ns) // 2)
+            idx = len(ns) // 2
+            dropped.append(ns.pop(idx))
         out.append((start, ns))
     return out
 

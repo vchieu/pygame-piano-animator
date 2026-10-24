@@ -339,6 +339,11 @@ def build(song, gap_s: float = DEFAULT_PEDAL_GAP, max_hold_bars: int = 4,
         if st["t_down"] is None:
             cl = attack_cluster(lh, m, q)
             if not cl:
+                anchors = mid_anchors(lh, m, q)
+                if anchors:
+                    a0 = anchors[0]
+                    st.update(t_down=m.start, sig=sig_at(a0, m, q), t0=a0.start, held=1)
+                    continue
                 continue                      # lead-in measure / no left hand yet
             a0 = _lowest(cl)
             st.update(t_down=m.start, sig=sig_at(a0, m, q), t0=a0.start, held=1)
