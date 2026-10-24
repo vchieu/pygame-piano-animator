@@ -329,8 +329,8 @@ class _Tempo:
 
     def set_divisions(self, divisions: int, div: float):
         if divisions and divisions > 0 and divisions != self.divisions:
+            self.restart_here(div)          # calculate using OLD divisions
             self.divisions = int(divisions)
-            self.restart_here(div)
 
 
 def _apply_tempo(measure, at_div: float, tempo: _Tempo):

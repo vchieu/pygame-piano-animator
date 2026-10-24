@@ -25,7 +25,7 @@ Follows docs/AUTO_PEDAL_SPEC.md:
 """
 import bisect
 from dataclasses import dataclass
-from typing import FrozenSet, List, Optional, Tuple
+from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
 from midi_loader import LEFT, RIGHT, Note
 
@@ -526,7 +526,7 @@ def build(song, gap_s: float = DEFAULT_PEDAL_GAP, max_hold_bars: int = 4,
         # Update state with new bass
         st["t_down"] = t_rel + max(0.0, gap_s)
         st["bass"] = a.pitch
-        st["low"] = min(st.get("low") if st.get("low") is not None else a.pitch, a.pitch)
+        st["low"] = a.pitch  # lowest since new press
         st["t0"] = a.start
 
     def let_go(t: float):
@@ -551,6 +551,7 @@ def build(song, gap_s: float = DEFAULT_PEDAL_GAP, max_hold_bars: int = 4,
                     continue                      # lead-in measure / no left hand yet
                 a0 = anchors[0]
                 st.update(t_down=a0.start, bass=a0.pitch, low=a0.pitch, t0=a0.start, held=1)
+                # don't continue - process mid_bar/end of song/bar line from here
 
         # ---- inside the measure: a new chord on a later beat (section 11.1) ----------
         if mid_bar:
