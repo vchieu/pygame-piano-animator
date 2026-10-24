@@ -1,0 +1,26 @@
+﻿M  CLAUDE.md
+M  README.md
+A  anim_check.py
+ M app_settings.py
+ M auto_pedal.py
+M  docs/ARCHITECTURE.md
+ M docs/AUTO_PEDAL_SPEC.md
+M  editor.py
+M  fingering.py
+ M hands.py
+ M main.py
+M  pig_eval.py
+ M skins.py
+M  tests/test_audio_sync.py
+ M tests/test_auto_pedal.py
+M  tests/test_core.py
+M  tests/test_ui.py
+A  tools/maestro_check.py
+A  tools/maestro_diff.py
+A  tools/perf_check.py
+A  tools/regress.py
+?? conftest_head.txt
+?? fork-v26.1.20-v26.1.21.diff.txt
+?? status.txt
+?? testout.txt
+?? testpedal.txt

@@ -53,7 +53,7 @@ MUSICXML_HANDS_LABEL = {"file": "From the file", "auto": "Work out"}
 MUSICXML_FINGERING = ("auto", "file", "fill")
 MUSICXML_FINGERING_LABEL = {"auto": "Auto", "file": "From the file", "fill": "Fill in"}
 PEDAL_MODES = ("score", "auto")
-PEDAL_MODE_LABEL = {"score": "From the score", "auto": "Auto by measure"}
+PEDAL_MODE_LABEL = {"score": "From the score", "auto": "Auto by harmony"}
 
 
 def _next_choice(choices, current):
@@ -287,7 +287,7 @@ class SettingsScreen:
                 ("MusicXML hands", "Follow the score's own layout, or work the hands out from the music."),
                 ("MusicXML fingering", "Auto: plan every finger. From the file: keep the score's printed "
                                        "fingers. Fill in: keep them, plan what the score leaves blank."),
-                ("Pedal", "From the score: keep the file's pedal. Auto by measure: auto pedal.")]
+                ("Pedal", "From the score: keep the file's pedal. Auto by harmony: pedal follows the left hand's chords.")]
         for i, (title, desc) in enumerate(rows):
             ry = y + i * self.row_h
             if i:
