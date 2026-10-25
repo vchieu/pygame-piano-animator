@@ -72,6 +72,9 @@ def pcs_of(notes, t0: float, t1: float,
     return core, set(w.keys())
 
 
+# parameter added above
+
+
 def harmony_conflict(old_bass_pc: int, union_pcs: Set[int]) -> bool:
     """
     Test (a) from section 11.1: does the union contain a conflict relative to old_bass_pc?
@@ -133,7 +136,7 @@ def is_bass_candidate(candidate: Note, lowest_lh_pitch: int, lh_in_window: List[
 
 def harmony_verdict(old_bass_pc: int, old_core: Set[int], old_all: Set[int],
                     new_bass_pc: int, new_core: Set[int],
-                    strict: bool = False) -> Tuple[bool, str]:
+                    strict: bool = False, bass_move_changes_pedal: bool = False) -> Tuple[bool, str]:
     """
     Decide whether the harmony changes between the old pedal window and the new window.
     Returns (changed: bool, reason: str).
@@ -146,6 +149,13 @@ def harmony_verdict(old_bass_pc: int, old_core: Set[int], old_all: Set[int],
         return True, "a:conflict"
     if new_chord_on_bass(new_bass_pc, new_core, old_all, strict=strict):
         return True, "b:new-chord-on-bass"
+    # If bass changed and new has a chord-like set different from old
+    if not strict and bass_move_changes_pedal and new_bass_pc != old_bass_pc:
+        for intervals in ((0, 4, 7), (0, 3, 7)):
+            triad = {(new_bass_pc + i) % 12 for i in intervals}
+            if new_bass_pc in new_core and len((triad - {new_bass_pc}) & new_core) >= 1:
+                if bool((triad & new_core) - old_all):
+                    return True, "b:new-chord-on-bass"
     return False, "same"
 
 
@@ -581,7 +591,7 @@ def build(song, gap_s: float = DEFAULT_PEDAL_GAP, max_hold_bars: int = 4,
                                      struck_from=a.start - 0.05)
                 old_bass_pc = st["bass"] % 12
                 new_bass_pc = a.pitch % 12
-                changed, why = harmony_verdict(old_bass_pc, old_core, old_all, new_bass_pc, new_core, strict=True)
+                changed, why = harmony_verdict(old_bass_pc, old_core, old_all, new_bass_pc, new_core, strict=True, bass_move_changes_pedal=False)
                 if not changed:
                     continue
                 press_change(a, m.end)
@@ -634,7 +644,7 @@ def build(song, gap_s: float = DEFAULT_PEDAL_GAP, max_hold_bars: int = 4,
                                    struck_from=t0_start - 0.05)
         new_core, _ = pcs_of(all_idx.sounding(nxt.start - 0.04, nxt.end), nxt.start - 0.04, nxt.end,
                              struck_from=nxt.start - 0.05)
-        changed, why = harmony_verdict(old_bass_pc, old_core, old_all, new_bass_pc, new_core, strict=False)
+        changed, why = harmony_verdict(old_bass_pc, old_core, old_all, new_bass_pc, new_core, strict=False, bass_move_changes_pedal=bass_move_changes_pedal)
 
         if not changed and st["held"] >= max_hold_bars:
             changed = True
