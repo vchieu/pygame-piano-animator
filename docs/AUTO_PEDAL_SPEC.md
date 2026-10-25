@@ -41,11 +41,11 @@ Cập nhật theo `auto_pedal.py` hiện tại (đổi pedal theo **hợp âm ta
 ## 4. Định nghĩa dùng chung
 
 - **LH / bass** (`lh_notes`, `is_lh_note`): nốt `hand == LEFT`, hoặc nốt **chưa gán tay** (`hand != RIGHT`) có `pitch < 60`. Nốt mà bản nhạc gán cho **tay phải không bao giờ là bass**, dù thấp đến đâu (giai điệu RH xuống dưới đô giữa, hợp âm RH). Bỏ grace và nốt dài ≤ 0.
-- **Trọng số pitch class** (`pcs_of(notes, t0, t1)`): tính cho **cả hai tay** trên cửa sổ `[t0, t1)`. Trả về `(core_pcs, all_pcs)` trong đó `core_pcs` gồm các pitch class chiếm ≥ 7% (`W_MIN = 0.07`) tổng độ dài vang trong cửa sổ.
+- **Trọng số pitch class** (`pcs_of(notes, t0, t1, struck_from=None)`): tính cho **cả hai tay** trên cửa sổ `[t0, t1)`. Trả về `(core_pcs, all_pcs)` trong đó `core_pcs` gồm các pitch class chiếm ≥ 7% (`W_MIN = 0.07`) tổng độ dài vang trong cửa sổ. `old_all` dùng để xác định nốt "chưa từng vang kể từ lần đạp pedal hiện tại".
 - **Phán quyết hợp âm** (`harmony_verdict` / `harmony_conflict` / `new_chord_on_bass`):
-  - **(a) Conflict (Xung đột):** hợp âm cũ + mới (tính từ `old_bass_pc`) chứa quãng 2 thứ (1), tritone (6), hoặc cả 3 trưởng và 3 thứ (3 và 4).
-  - **(b) New chord on bass (Hợp âm mới trên bass):** tam diện trưởng/thứ đặt trên phách bass mới có đủ 3 nốt trong cửa sổ mới (nghiêm ngặt `strict=True` cho `mid_bar`) hoặc bass + ít nhất 1 nốt khác (nới lỏng `strict=False` cho vạch nhịp), và mang lại nốt mới chưa từng vang kể từ lần đạp pedal hiện tại.
-  - **(c) Bass-only texture:** cửa sổ mới không có pitch class nào ngoài phách bass mới (đổi khi `new_bass_pc != old_bass_pc`).
+  - **(a) Conflict (Xung đột):** hợp âm cũ + mới (tính từ `old_bass_pc`, union `old_core | new_core`) chứa quãng 2 thứ (1), tritone (6), hoặc cả 3 trưởng và 3 thứ (3 và 4).
+  - **(b) New chord on bass (Hợp âm mới trên bass):** tam diện trưởng/thứ đặt trên phách bass mới. `strict=True` cho **mid-bar** yêu cầu **cả 3** nốt của tam diện trong `new_core`. `strict=False` cho **vạch nhịp** chỉ yêu cầu bass + **ít nhất 1** nốt khác của tam diện trong `new_core`. Trong cả hai trường hợp phải có ít nhất 1 nốt của tam diện **chưa có** trong `old_all` (chưa từng vang dưới pedal hiện tại).
+  - **(c) Bass-only texture:** cửa sổ mới không có pitch class nào ngoài phách bass mới (`new_core - {nb}` rỗng) -> đổi khi `nb != old_bass_pc`.
 
 ## 5. Điểm đổi pedal: delay, clamp và gap
 
@@ -74,17 +74,18 @@ Duyệt các ô không phải pickup theo thứ tự:
 1. **Khởi động:** chưa nhấn pedal (hoặc pedal đang nhả vì LH im, bước 4c) thì tìm cụm attack LH ở đầu ô; không có thì sang ô sau. Có thì `t_down = đầu ô`, lưu chữ ký hợp âm của ô.
 2. **Giữa ô (nếu `mid_bar`):** xét từng nốt bass LH (thấp nhất của mỗi cụm onset) nằm giữa ô. Đổi pedal tại nốt đó khi thoả **tất cả các guards**:
    - nằm đúng một phách (`on_beat`);
-   - **Register guard:** cao độ nốt ứng viên ≤ nốt LH thấp nhất từng vang từ lần đạp hiện tại + 7 bán âm (`REGISTER_GUARD = 7`);
-   - **Window guard:** cửa sổ còn lại từ ứng viên đến cuối ô ≥ `mid_min_beats` phách (2 phách);
-   - **Gap guard:** cách lần attack bass trước ≥ `mid_min_gap_beats` phách (1 phách);
+   - **Register guard:** cao độ nốt ứng viên ≤ nốt LH thấp nhất từng vang từ lần đạp hiện tại + 7 bán âm (`REGISTER_GUARD = 7`). Nốt ở vị trí rất cao (vd. đỉnh arpeggio) bị bỏ qua;
+   - **Window guard:** cửa sổ còn lại từ ứng viên đến cuối ô ≥ `mid_min_beats` phách (2 phách) (dùng cửa sổ hợp âm, không chỉ độ dài nốt anchor);
+   - **Gap guard:** cách lần attack bass trước ≥ `mid_min_gap_beats` phách (1 phách, `eps = 0.02 s`);
    - **Bass of window:** không có nốt LH nào thấp hơn được đánh sau đó trong cùng cửa sổ;
-   - và phán quyết hợp âm (`harmony_verdict`) trả về đổi (bởi xung đột conflict, hợp âm mới trên bass, hoặc texture bass-only).
+   - Nốt kéo dài qua vạch nhịp và ô tiếp theo **không có** attack LH ở phách 1 được ưu tiên giữ qua barline thay vì đổi mid-bar;
+   - và phán quyết hợp âm (`harmony_verdict`, `strict=True`) trả về đổi (bởi xung đột conflict, hợp âm mới trên bass, hoặc texture bass-only).
 3. **Ô cuối:** nhả pedal tại `max(min(hết ô, duration), nốt cuối kết thúc) + FINAL_TAIL_S (0.3 s)`, không muộn hơn `duration + FINAL_TAIL_LIMIT_S (0.45 s)` (Transport dừng ở `duration + 0.5 s`), rồi kết thúc.
 4. **Vạch nhịp sang ô sau:**
    - a. **Không có cụm attack LH ở ô sau:** giữ pedal, tăng bộ đếm `held`. Nhưng nếu `held >= max_hold_bars`:
      - b. ô sau có onset LH nào đó: làm mới pedal tại onset LH **đầu tiên** của ô;
      - c. LH hoàn toàn im trong ô sau (không có nốt LH nào vang): **nhả pedal ở vạch nhịp** và để nhả cho tới khi LH attack lại (bước 1).
-   - b. **Có cụm attack:** tính phán quyết hợp âm (`harmony_verdict`, `strict=False`). Pedal đổi nếu hợp âm đổi, hoặc giữ ≥ `max_hold_bars` ô, hoặc tùy chọn `bass_move_changes_pedal=True` khi phách bass đổi; ngược lại giữ pedal (mặc định thể đảo cùng hợp âm sẽ giữ pedal).
+    - b. **Co cum attack:** tinh phan quyet hop am (`harmony_verdict`, `strict=False`). Pedal doi neu hop am doi (conflict / new chord on bass voi dieu kien noi long / bass-only), hoac giu >= `max_hold_bars` o, hoac tuy chon `bass_move_changes_pedal=True` khi phach bass doi; nguoc lai giu pedal (**mac dinh the dao cung hop am se giu pedal**). Not bass chi di chuyen trong cung hop am se **khong** doi pedal.
 
 Đầu ra:
 - `controls`: `[(t, 64, 127 | 0), ...]`, đã sort và gộp.

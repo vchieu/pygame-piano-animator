@@ -72,10 +72,7 @@ def pcs_of(notes, t0: float, t1: float,
     return core, set(w.keys())
 
 
-# parameter added above
 
-
-def harmony_conflict(old_bass_pc: int, union_pcs: Set[int]) -> bool:
     """
     Test (a) from section 11.1: does the union contain a conflict relative to old_bass_pc?
     A conflict is: minor second (1), tritone (6), or both minor and major third (3 and 4).
@@ -132,6 +129,12 @@ def is_bass_candidate(candidate: Note, lowest_lh_pitch: int, lh_in_window: List[
         if candidate.start + 0.04 < n.start < measure_end and n.pitch < candidate.pitch:
             return False
     return True
+
+
+def harmony_conflict(old_bass_pc: int, union_pcs: Set[int]) -> bool:
+    """Test (a) from section 11.1: does the union contain a conflict relative to old_bass_pc?"""
+    rel = {(p - old_bass_pc) % 12 for p in union_pcs}
+    return (1 in rel) or (6 in rel) or (3 in rel and 4 in rel)
 
 
 def harmony_verdict(old_bass_pc: int, old_core: Set[int], old_all: Set[int],
@@ -569,6 +572,14 @@ def build(song, gap_s: float = DEFAULT_PEDAL_GAP, max_hold_bars: int = 4,
                 aq = qlen(a.start)
                 if not on_beat(a.start, aq):
                     continue
+                # If this note carries over the bar line and next has no LH attack, prefer holding
+                if a.end >= m.end - 0.01:
+                    nxt_m_cand = ms[i + 1] if i + 1 < len(ms) else None
+                    if nxt_m_cand is not None:
+                        nq2 = qlen(nxt_m_cand.start)
+                        cln2 = attack_cluster(lh_idx, nxt_m_cand, nq2)
+                        if not cln2:
+                            continue
                 # Guard 1: Register guard
                 if st.get("low") is not None and a.pitch > st["low"] + REGISTER_GUARD:
                     continue

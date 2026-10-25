@@ -19,23 +19,16 @@ Detailed design notes, kept up to date as features were added. Start with `CLAUD
     3. Otherwise `hand_split.split_hands()`.
 - `auto_pedal.py` – the automatic sustain pedal (2026-10-24; design notes: `docs/AUTO_PEDAL_SPEC.md`). Pure functions,
   no UI or audio; imports only `LEFT`, `RIGHT`, `Note` from `midi_loader`.
-  - `build(song, gap_s=0.03, max_hold_bars=4, mid_bar=True, mid_min_beats=2.0, mid_min_gap_beats=1.5)` returns
+  - `build(song, gap_s=0.03, max_hold_bars=4, mid_bar=True, mid_min_beats=2.0, mid_min_gap_beats=1.5, bass_move_changes_pedal=False)` returns
     `(controls, spans)`: `controls` = `[(t, 64, 127|0)]` (UP before DOWN at one time, same values merged), `spans` =
     `[(t_down, t_release)]` for the staff's Ped. brackets (two spans of a change are `gap_s` apart).
-  - The pedal changes with the **left hand's harmony**, not at every bar line. It goes down at the first full measure
-    where the LH (`lh_notes`: LEFT hand or pitch < 60) attacks on beat 1; the pickup gets none. At a bar line it is
-    re-pressed only if the LH attacks there and `harmony_changed` (bass pitch class differs, or the same bass with a
-    different pitch-class set, Jaccard <= 0.5) - repeated chords and Alberti bass hold it across the bar line - or after
-    `max_hold_bars`. The last measure releases at `min(its end, duration + 0.3)`.
-  - Change point: released `d1` after the new bass note's attack (`split_lengths`: `d1` = a quarter of a beat if the
-    note lasts a beat or more, else half the note; clamped so the pedal is down again before the note ends), pressed
-    again `gap_s` later, so the new bass note is caught by the new pedal. The notes are **not** split:
-    `SoundfontOut` keeps a held key sounding when the pedal lifts.
-  - `mid_bar`: also inside a measure, at an LH bass note that is on a beat, lasts >= `mid_min_beats`, is >=
-    `mid_min_gap_beats` after the last press, and changes the chord colour (`pcs_changed`: pitch-class sets only,
-    so root -> fifth of one chord does not count). Short bass notes (Alberti, walking bass) never trigger it.
-  - The bar-line attack window scales with the beat (`attack_window`: 0.2 before, 0.3 after), so an LH note played a
-    little early still counts; the anchor is the lowest LH note of that cluster (`attack_cluster`, `pick_anchor`).
+  - The pedal changes with the **left hand's harmony** (both hands considered for chord detection), not at every bar line. It goes down at the first full measure
+    where the LH (`lh_notes`: LEFT hand or pitch < 60) attacks on beat 1; the pickup gets none. 
+  - Harmony decision uses `harmony_verdict` with `harmony_conflict` (a) and `new_chord_on_bass` (b): triad rooted on new bass must bring a tone absent from `old_all` (tones struck since press). `W_MIN = 0.07`. By default, inversions of the same chord keep the pedal (`bass_move_changes_pedal=False`); `bass_move_changes_pedal=True` forces change on bass move.
+  - At a bar line with LH attack: change on conflict / new chord on bass (relaxed, root + one other triad tone) / bass-only / `held >= max_hold_bars`. No LH attack: hold up to `max_hold_bars`, then refresh at first LH onset or let go if LH silent. The last measure releases at `min(its end, duration + 0.3)`.
+  - Change point: released `d1 = release_delay(q)` (40–80 ms) after the new bass note's attack (clamped so pedal down again before note ends), pressed again `gap_s` later. The notes are **not** split: `SoundfontOut` keeps a held key sounding when the pedal lifts.
+  - `mid_bar`: inside a measure at an LH bass note on a beat, passing guards: register guard `pitch <= lowest_lh_since_press + 7`, window >= `mid_min_beats` to bar end, gap >= `mid_min_gap_beats` after previous bass attack, bass of its own window (no lower LH later), and note not held across barline when next measure has no LH attack at beat 1. Harmony uses `strict=True`. Arpeggio top notes above register guard are skipped.
+  - The bar-line attack window scales with the beat (`attack_window`: 0.2 before, 0.3 after); anchor is the lowest LH note of that cluster (`attack_cluster`, `pick_anchor`).
   - Times are seconds; the beat length comes from `song.quarter_length(t)`. Without `bar_times` there is no auto pedal.
 - `hand_split.py` – works out which hand plays each note in unlabeled MIDI.
 - `figures.py` – recognises standard figures and gives them their standard fingering (see below).
