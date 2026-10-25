@@ -520,7 +520,6 @@ def _read_all_parts(parts, order: List[int], hands: List[Optional[str]],
     current = 0         # the key in force
     key_seen = False    # whether the score has declared a key yet
     key_changes: List[Tuple[float, int]] = []
-    controls: List[Tuple[float, int, int]] = []
     for idx in order:
         present = [its[idx].elem for its in part_measures if idx < len(its)]
         if not present:
