@@ -1,0 +1,102 @@
+--- a/auto_pedal.py
++++ b/auto_pedal.py
+@@ -73,14 +73,6 @@
+ 
+ 
+ 
+-    """
+-    Test (a) from section 11.1: does the union contain a conflict relative to old_bass_pc?
+-    A conflict is: minor second (1), tritone (6), or both minor and major third (3 and 4).
+-    """
+-    rel = {(pc - old_bass_pc) % 12 for pc in union_pcs}
+-    return (1 in rel) or (6 in rel) or (3 in rel and 4 in rel)
+-
+-
+ def triad_on_bass(bass_pc: int, pcs: Set[int], strict: bool = True) -> Optional[Tuple[int, int, int]]:
+     """
+     Test whether pcs contains a major or minor triad rooted on bass_pc.
+@@ -139,7 +131,9 @@
+ 
+ def harmony_verdict(old_bass_pc: int, old_core: Set[int], old_all: Set[int],
+                     new_bass_pc: int, new_core: Set[int],
+-                    strict: bool = False, bass_move_changes_pedal: bool = False) -> Tuple[bool, str]:
++                    strict: bool = False, bass_move_changes_pedal: bool = False,
++                    lh_pcs: Optional[Set[int]] = None,
++                    old_lh_pcs: Optional[Set[int]] = None) -> Tuple[bool, str]:
+     """
+     Decide whether the harmony changes between the old pedal window and the new window.
+     Returns (changed: bool, reason: str).
+@@ -148,10 +142,21 @@
+     bass_only = len(new_core - {new_bass_pc}) == 0
+     if bass_only:
+         return new_bass_pc != old_bass_pc, "c:bass-only"
+-    if harmony_conflict(old_bass_pc, old_core | new_core):
++    union = old_core | new_core
++    if lh_pcs is not None:                      # RH-only tones (passing / neighbour notes) are not harmony
++        union = union & (lh_pcs | {old_bass_pc, new_bass_pc})
++    if harmony_conflict(old_bass_pc, union):
+         return True, "a:conflict"
+     if new_chord_on_bass(new_bass_pc, new_core, old_all, strict=strict):
+         return True, "b:new-chord-on-bass"
++    # (b2) the bass moves, the complete triad rooted on the new bass is sounding now, and the old left hand
++    # did not hold that complete triad: a new chord, even if the melody had touched its tones before.
++    # (Inversions are safe: the triad rooted on an inverted bass is incomplete, e.g. Em/G has no D.)
++    if old_lh_pcs is not None and new_bass_pc != old_bass_pc:
++        for intervals in ((0, 4, 7), (0, 3, 7)):
++            triad = {(new_bass_pc + i) % 12 for i in intervals}
++            if triad <= new_core and not triad <= old_lh_pcs:
++                return True, "b2:new-root-in-bass"
+     # If bass changed and new has a chord-like set different from old
+     if not strict and bass_move_changes_pedal and new_bass_pc != old_bass_pc:
+         for intervals in ((0, 4, 7), (0, 3, 7)):
+@@ -595,14 +600,20 @@
+                     continue
+                 # Compute old harmony from st["t0"] to a.start
+                 t0_start = st.get("t0", m.start)
+-                old_core, old_all = pcs_of(all_idx.sounding(t0_start, a.start), t0_start, a.start,
+-                                           struck_from=t0_start - 0.05)
++                old_bass_pc = st["bass"] % 12
++                new_bass_pc = a.pitch % 12
++                lo_old = max(t0_start, m.start)
++                old_core, old_all = pcs_of(all_idx.sounding(lo_old, a.start), lo_old, a.start,
++                                           struck_from=lo_old - 0.05)
++                _, old_lh = pcs_of(lh_idx.sounding(lo_old, a.start), lo_old, a.start,
++                                   struck_from=lo_old - 0.05)
++                old_lh = old_lh | {old_bass_pc}
+                 # Compute new harmony from a.start to m.end
+                 new_core, _ = pcs_of(all_idx.sounding(a.start - 0.04, m.end), a.start - 0.04, m.end,
+                                      struck_from=a.start - 0.05)
+-                old_bass_pc = st["bass"] % 12
+-                new_bass_pc = a.pitch % 12
+-                changed, why = harmony_verdict(old_bass_pc, old_core, old_all, new_bass_pc, new_core, strict=True, bass_move_changes_pedal=False)
++                new_core = new_core | {new_bass_pc} | {n.pitch % 12 for n in lh_idx.starting(a.start - 0.05, a.start + 0.5 * (m.end - a.start))}
++                lh_pcs = {n.pitch % 12 for n in lh_idx.sounding(lo_old, m.end)}
++                changed, why = harmony_verdict(old_bass_pc, old_core, old_all, new_bass_pc, new_core, strict=True, bass_move_changes_pedal=False, lh_pcs=lh_pcs, old_lh_pcs=old_lh)
+                 if not changed:
+                     continue
+                 press_change(a, m.end)
+@@ -651,11 +662,21 @@
+         new_bass_pc = a.pitch % 12
+         old_bass_pc = st["bass"] % 12
+         t0_start = st.get("t0", m.start)
+-        old_core, old_all = pcs_of(all_idx.sounding(t0_start, nxt.start), t0_start, nxt.start,
+-                                   struck_from=t0_start - 0.05)
++        # "old" harmony = the bar just finished (not everything since the press: that saturates)
++        lo_old = max(t0_start, m.start)
++        old_core, old_all = pcs_of(all_idx.sounding(lo_old, nxt.start), lo_old, nxt.start,
++                                   struck_from=lo_old - 0.05)
++        _, old_lh = pcs_of(lh_idx.sounding(lo_old, nxt.start), lo_old, nxt.start,
++                           struck_from=lo_old - 0.05)
++        old_lh = old_lh | {old_bass_pc}
+         new_core, _ = pcs_of(all_idx.sounding(nxt.start - 0.04, nxt.end), nxt.start - 0.04, nxt.end,
+                              struck_from=nxt.start - 0.05)
+-        changed, why = harmony_verdict(old_bass_pc, old_core, old_all, new_bass_pc, new_core, strict=False, bass_move_changes_pedal=bass_move_changes_pedal)
++        # the LH tones of the bar's first half are always chord tones (short bass / arpeggio notes are
++        # otherwise diluted below W_MIN by a busy RH, and the bass note itself can drop out)
++        half = nxt.start + 0.5 * (nxt.end - nxt.start)
++        new_core = new_core | {n.pitch % 12 for n in lh_idx.starting(nxt.start - 0.05, nxt.start + 0.5 * (nxt.end - nxt.start))} | {new_bass_pc}
++        lh_pcs = {n.pitch % 12 for n in lh_idx.sounding(lo_old, nxt.end)}
++        changed, why = harmony_verdict(old_bass_pc, old_core, old_all, new_bass_pc, new_core, strict=False, bass_move_changes_pedal=bass_move_changes_pedal, lh_pcs=lh_pcs, old_lh_pcs=old_lh)
+ 
+         if not changed and st["held"] >= max_hold_bars:
+             changed = True

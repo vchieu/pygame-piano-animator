@@ -41,10 +41,11 @@ Cập nhật theo `auto_pedal.py` hiện tại (đổi pedal theo **hợp âm ta
 ## 4. Định nghĩa dùng chung
 
 - **LH / bass** (`lh_notes`, `is_lh_note`): nốt `hand == LEFT`, hoặc nốt **chưa gán tay** (`hand != RIGHT`) có `pitch < 60`. Nốt mà bản nhạc gán cho **tay phải không bao giờ là bass**, dù thấp đến đâu (giai điệu RH xuống dưới đô giữa, hợp âm RH). Bỏ grace và nốt dài ≤ 0.
-- **Trọng số pitch class** (`pcs_of(notes, t0, t1, struck_from=None)`): tính cho **cả hai tay** trên cửa sổ `[t0, t1)`. Trả về `(core_pcs, all_pcs)` trong đó `core_pcs` gồm các pitch class chiếm ≥ 7% (`W_MIN = 0.07`) tổng độ dài vang trong cửa sổ. `old_all` dùng để xác định nốt "chưa từng vang kể từ lần đạp pedal hiện tại".
+- **Trọng số pitch class** (`pcs_of(notes, t0, t1, struck_from=None)`): tính cho **cả hai tay** trên cửa sổ `[t0, t1)`. Trả về `(core_pcs, all_pcs)` trong đó `core_pcs` gồm các pitch class chiếm ≥ 7% (`W_MIN = 0.07`) tổng độ dài vang trong cửa sổ. Cửa sổ `old` tính trên **ô nhịp vừa kết thúc** (không tích lũy từ lúc đạp pedal để tránh bão hòa). `new_core` luôn bao gồm nốt bass mới và các nốt LH đánh ở nửa đầu ô nhịp/cửa sổ mới để không bị loãng bởi RH.
 - **Phán quyết hợp âm** (`harmony_verdict` / `harmony_conflict` / `new_chord_on_bass`):
-  - **(a) Conflict (Xung đột):** hợp âm cũ + mới (tính từ `old_bass_pc`, union `old_core | new_core`) chứa quãng 2 thứ (1), tritone (6), hoặc cả 3 trưởng và 3 thứ (3 và 4).
-  - **(b) New chord on bass (Hợp âm mới trên bass):** tam diện trưởng/thứ đặt trên phách bass mới. `strict=True` cho **mid-bar** yêu cầu **cả 3** nốt của tam diện trong `new_core`. `strict=False` cho **vạch nhịp** chỉ yêu cầu bass + **ít nhất 1** nốt khác của tam diện trong `new_core`. Trong cả hai trường hợp phải có ít nhất 1 nốt của tam diện **chưa có** trong `old_all` (chưa từng vang dưới pedal hiện tại).
+  - **(a) Conflict (Xung đột):** hợp âm cũ + mới (tính từ `old_bass_pc`, union `old_core | new_core`) chứa quãng 2 thứ (1), tritone (6), hoặc cả 3 trưởng và 3 thứ (3 và 4). Khi truyền `lh_pcs`, chỉ các nốt LH (hoặc bass cũ/mới) mới xét xung đột, loại bỏ nốt thêu/lướt ở RH.
+  - **(b) New chord on bass (Hợp âm mới trên bass):** tam diện trưởng/thứ đặt trên phách bass mới. `strict=True` cho **mid-bar** yêu cầu **cả 3** nốt của tam diện trong `new_core`. `strict=False` cho **vạch nhịp** chỉ yêu cầu bass + **ít nhất 1** nốt khác của tam diện trong `new_core`. Trong cả hai trường hợp phải có ít nhất 1 nốt của tam diện **chưa có** trong `old_all`.
+  - **(b2) New root in bass (Gốc mới ở bass):** nếu bass di chuyển và toàn bộ tam diện trưởng/thứ trên bass mới đang vang, nhưng tay trái ở ô trước chưa từng giữ đủ tam diện đó: tính là hợp âm mới (cho dù giai điệu RH từng chạm các nốt đó trước đây). Đảo hợp âm vẫn an toàn vì tam diện trên bass đảo bị thiếu.
   - **(c) Bass-only texture:** cửa sổ mới không có pitch class nào ngoài phách bass mới (`new_core - {nb}` rỗng) -> đổi khi `nb != old_bass_pc`.
 
 ## 5. Điểm đổi pedal: delay, clamp và gap
@@ -66,7 +67,7 @@ t_down_mới = t_rel + gap_s                              # gap luôn đúng gap
 
 ```
 build(song, gap_s=0.03, max_hold_bars=4, mid_bar=True,
-      mid_min_beats=2.0, mid_min_gap_beats=1.5) -> (controls, spans)
+      mid_min_beats=2.0, mid_min_gap_beats=1.0, bass_move_changes_pedal=False) -> (controls, spans)
 ```
 
 Duyệt các ô không phải pickup theo thứ tự:
@@ -85,7 +86,7 @@ Duyệt các ô không phải pickup theo thứ tự:
    - a. **Không có cụm attack LH ở ô sau:** giữ pedal, tăng bộ đếm `held`. Nhưng nếu `held >= max_hold_bars`:
      - b. ô sau có onset LH nào đó: làm mới pedal tại onset LH **đầu tiên** của ô;
      - c. LH hoàn toàn im trong ô sau (không có nốt LH nào vang): **nhả pedal ở vạch nhịp** và để nhả cho tới khi LH attack lại (bước 1).
-    - b. **Co cum attack:** tinh phan quyet hop am (`harmony_verdict`, `strict=False`). Pedal doi neu hop am doi (conflict / new chord on bass voi dieu kien noi long / bass-only), hoac giu >= `max_hold_bars` o, hoac tuy chon `bass_move_changes_pedal=True` khi phach bass doi; nguoc lai giu pedal (**mac dinh the dao cung hop am se giu pedal**). Not bass chi di chuyen trong cung hop am se **khong** doi pedal.
+   - b. **Có cụm attack:** tính phán quyết hợp âm (`harmony_verdict`, `strict=False`). Pedal đổi nếu hợp âm đổi (conflict / new chord on bass / new root in bass / bass-only), hoặc giữ >= `max_hold_bars` ô, hoặc tùy chọn `bass_move_changes_pedal=True` khi phách bass đổi; ngược lại giữ pedal (**mặc định thể đảo cùng hợp âm sẽ giữ pedal**). Nốt bass chỉ di chuyển trong cùng hợp âm sẽ **không** đổi pedal.
 
 Đầu ra:
 - `controls`: `[(t, 64, 127 | 0), ...]`, đã sort và gộp.

@@ -903,3 +903,75 @@ def test_low_reset_allows_change_after_deep_bass():
     events, spans = auto_pedal.build(s)
     # Should have changes
     assert len(spans) >= 2, spans
+
+
+# --- new tests (append to tests/test_auto_pedal.py; uses the file's _beat_song, Note, LEFT, RIGHT, auto_pedal) ---
+BEAT = 0.5   # seconds per beat in these tests
+
+
+def _legato(pitches_and_beats, bar_start, bar_beats, hand):
+    """[(pitch, beat_in_bar), ...] -> Notes, each lasting until the next onset of the list (the last to the bar end)."""
+    out = []
+    for i, (p, b) in enumerate(pitches_and_beats):
+        end_b = pitches_and_beats[i + 1][1] if i + 1 < len(pitches_and_beats) else bar_beats
+        out.append(Note(p, bar_start + b * BEAT, bar_start + end_b * BEAT, 80, 0, hand))
+    return out
+
+
+def _bar(i, bar_beats, lh, rh):
+    t0 = i * bar_beats * BEAT
+    return _legato(lh, t0, bar_beats, LEFT) + _legato(rh, t0, bar_beats, RIGHT)
+
+
+def _starts(spans):
+    return [round(a, 2) for a, _ in spans]
+
+
+def test_busy_right_hand_does_not_hide_a_bass_chord_change():
+    """4/4: D | Em F#m | Bm | G, LH = short bass + arpeggio notes, RH = busy melody (anh-dau-tu-luc-em-di bars 7-10)."""
+    bars = [
+        _bar(0, 4, [(50, 0), (57, 0.5), (62, 1), (64, 1.5), (66, 2), (57, 3)], [(79, 0), (74, 2.5), (76, 2.8), (78, 3)]),
+        _bar(1, 4, [(40, 0), (47, 0.5), (55, 1), (42, 2), (49, 2.5), (57, 3)], [(71, 0), (69, 2), (73, 3)]),
+        _bar(2, 4, [(47, 0), (54, 0.5), (59, 1), (61, 1.5), (62, 2)], [(71, 0), (66, 2.5), (64, 3), (66, 3.5)]),
+        _bar(3, 4, [(43, 0), (50, 0.5), (55, 1), (59, 1.5)], [(66, 0), (66, 2), (66, 2.5), (64, 2.8), (61, 3.3)]),
+        _bar(4, 4, [(50, 0), (57, 1)], [(74, 0)]),
+    ]
+    notes = [n for b in bars for n in b]
+    s = _beat_song(notes, [0.0, 2.0, 4.0, 6.0, 8.0, 10.0], 10.0)
+    _, spans = auto_pedal.build(s)
+    starts = _starts(spans)
+    for bar_line in (2.0, 4.0, 6.0, 8.0):                      # Em, Bm, G, D: each bar line re-pressed
+        assert any(abs(t - bar_line) < 0.2 for t in starts), (bar_line, spans)
+    assert any(abs(t - 3.0) < 0.2 for t in starts), spans       # Em | F#m inside bar 2
+
+
+def test_rh_passing_tone_does_not_cut_a_sustained_chord_3_4():
+    """3/4: the same D chord for 3 bars, RH melody F#4 G#4 A4 (G#4 = tritone to D): one pedal span (Khi-nguoi-lon-co-don bars 23-25)."""
+    bar = lambda i: _bar(i, 3, [(38, 0), (45, 1), (50, 2)], [(66, 0), (68, 1.5), (69, 2)])
+    notes = [n for i in range(3) for n in bar(i)]
+    s = _beat_song(notes, [0.0, 1.5, 3.0, 4.5], 4.5)
+    _, spans = auto_pedal.build(s)
+    assert len(spans) == 1, spans
+
+
+def test_melody_tone_does_not_hide_new_chord_root_3_4():
+    """3/4: A | A | F#m | F#m with the melody sitting on F#4 all along: the pedal changes at bar 3 (Khi-nguoi-lon-co-don bars 68-71)."""
+    A = dict(lh=[(45, 0), (52, 1), (57, 2), (61, 2.5)], rh=[(66, 0)])
+    Fm = dict(lh=[(42, 0), (49, 1), (54, 2), (57, 2.5)], rh=[(66, 0)])
+    notes = []
+    for i, c in enumerate((A, A, Fm, Fm)):
+        notes += _bar(i, 3, c["lh"], c["rh"])
+    s = _beat_song(notes, [0.0, 1.5, 3.0, 4.5, 6.0], 6.0)
+    _, spans = auto_pedal.build(s)
+    assert any(abs(t - 3.0) < 0.2 for t in _starts(spans)), spans
+
+
+def test_four_bar_progression_four_presses():
+    """4/4: I | ii | V | I, one clear LH chord per bar under a melody: four presses, not one long smear."""
+    chords = [((48, 55, 60, 64), 72), ((50, 57, 62, 65), 74), ((43, 55, 59, 62), 71), ((48, 55, 60, 64), 72)]
+    notes = []
+    for i, (lh, mel) in enumerate(chords):
+        notes += _bar(i, 4, [(lh[0], 0), (lh[1], 1), (lh[2], 2), (lh[3], 3)], [(mel, 0), (mel + 2, 2)])
+    s = _beat_song(notes, [0.0, 2.0, 4.0, 6.0, 8.0], 8.0)
+    _, spans = auto_pedal.build(s)
+    assert len(spans) == 4, spans
