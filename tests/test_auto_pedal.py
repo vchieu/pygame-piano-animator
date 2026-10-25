@@ -864,3 +864,42 @@ def test_arpeggio_same_chord_no_split():
     s = _beat_song(notes, [0.0, 2.0], 2.0)
     events, spans = auto_pedal.build(s)
     assert len(spans) == 1, spans
+
+
+def test_tempo_map_divisions_and_tempo_changes():
+    from musicxml_loader import _Tempo
+    t = _Tempo()
+    # initial 120 bpm, 1 division per quarter
+    t.set_divisions(4, 0)  # 4 divisions per quarter
+    t.set_tempo(60.0, 4)  # at div 4 change to 60 bpm
+    # 4 divisions at 120 bpm = (4/4)*(60/120)=0.5s, then 4 divisions at 60 bpm = (4/4)*(60/60)=1.0s -> total 1.5s
+    assert t.sec(8) == pytest.approx(1.5)
+    # change divisions in middle: use old divisions to compute elapsed
+    t2 = _Tempo()
+    t2.set_divisions(4, 0)  # 4 div/q
+    t2.set_tempo(120.0, 4)
+    # now at div 4 (1 quarter done, 0.5s). change divisions to 12
+    t2.set_divisions(12, 4)  # restart using OLD divisions (4)
+    # should be at div 4 time = 0.5s
+    assert t2.sec(4) == pytest.approx(0.5)
+    # add 48 divisions at new divisions (12 div/q means 4 quarters = 48 divs) at 120 bpm
+    assert t2.sec(52) == pytest.approx(0.5 + 2.0)
+
+
+def test_low_reset_allows_change_after_deep_bass():
+    from midi_loader import LEFT, Note
+    # bar 1: deep G1, bar 2: C3 then G3 in middle, bar 3: should be able to change
+    notes = [
+        Note(31, 0.0, 2.0, 80, 0, LEFT),      # G1 deep
+        Note(48, 2.0, 2.5, 80, 0, LEFT),      # C3
+        Note(55, 2.5, 4.0, 80, 0, LEFT),      # G3
+    ]
+    # Add harmony
+    notes.extend([
+        Note(55, 0.0, 2.0, 80, 0, RIGHT), Note(59, 0.0, 2.0, 80, 0, RIGHT), Note(62, 0.0, 2.0, 80, 0, RIGHT),
+        Note(60, 2.0, 4.0, 80, 0, RIGHT), Note(64, 2.0, 4.0, 80, 0, RIGHT), Note(67, 2.0, 4.0, 80, 0, RIGHT),
+    ])
+    s = _beat_song(notes, [0.0, 2.0, 4.0], 4.0)
+    events, spans = auto_pedal.build(s)
+    # Should have changes
+    assert len(spans) >= 2, spans
