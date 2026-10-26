@@ -93,10 +93,17 @@ OCTAVE_BRACKET_SP = 3.0
 STAFF_EDGE_SP = 2.15
 # The 10 px measure-number font plus its 1 px gap: a band above the content block.
 MEASURE_NUM_PAD_PX = 14.0
+# A pedal bracket belongs below the bass staff and below every note's ink, with this much
+# clear air for its "Ped." label (the label has a 9 px minimum, so at the smallest staff
+# this much keeps even it clear of the notes), and this much room for the line and ticks.
+PEDAL_GAP_SP = 3.4
+PEDAL_BAND_SP = 0.4
 
 # Where a system's ink sits when it is laid out: its size, the two staff middle lines,
-# and the room the head of the staff leaves before the notes.
-StaffGeometry = namedtuple("StaffGeometry", "s treble_mid_y bass_mid_y margin_left usable_w")
+# the room the head of the staff leaves before the notes, and where a pedal bracket goes
+# (None when the system shows no pedal).
+StaffGeometry = namedtuple(
+    "StaffGeometry", "s treble_mid_y bass_mid_y margin_left usable_w pedal_y")
 
 # These are the values MuseScore engraves with (src/engraving/style/styledef.cpp:
 # stemLength 3.5, stemWidth 0.10, beamWidth 0.5), all measured in staff spaces -
@@ -504,7 +511,8 @@ def split_at_bar_lines(notes: List[Note], bar_times: List[float]) -> Tuple[List[
                          # so is the tuplet the note is written in: the bracket spans
                          # whichever pieces of it this system can see
                          tuplet_num=n.tuplet_num,
-                         tuplet_type=n.tuplet_type)
+                         tuplet_type=n.tuplet_type,
+                         voice=n.voice)
             pieces.append(piece)
             if prev is not None:
                 ties.append((prev, piece))
@@ -2116,28 +2124,49 @@ class StaffView:
         return staff_rect.x + margin_left + frac * usable_w
 
     def _staff_size(self, rect: pygame.Rect) -> float:
-        """How big the staff itself is drawn, in pixels (the user's zoom scales it)."""
-        return max(4.0, min(12.0, ((rect.h - 26) / 14.0) * self.scale))
+        """How big the staff itself is drawn at zoom 1, in pixels per space.
+
+        The panel's height sets it: a grand staff stands about 10 spaces tall (the two
+        staves plus their baseline gap), so a taller panel draws a bigger score. The
+        user's zoom multiplies this later, in `staff_geometry`.
+        """
+        return max(4.0, min(12.0, (rect.h - 26) / 14.0))
+
+    def _pedal_spans(self, sys) -> list:
+        """The auto-pedal spans this system shows (empty when it would be too crowded)."""
+        spans = getattr(self.song, "pedal_spans", None) if self.song is not None else None
+        if not spans or sys is None:
+            return []
+        sys_spans = [sp for sp in spans if sp[1] > sys.start_t and sp[0] < sys.end_t]
+        return sys_spans if len(sys_spans) <= 12 else []
 
     def staff_geometry(self, sys, rect: pygame.Rect) -> StaffGeometry:
         """
-        How this system is drawn in `rect`: its size, the two staff middle lines and the
-        room its head leaves before the notes.
+        How this system is drawn in `rect`: its size, the two staff middle lines, the
+        room its head leaves before the notes, and where its pedal bracket goes.
 
-        The treble and bass staves stand BASE_MID_GAP_SP apart, and further apart when the
-        two hands' ink would crowd or collide in the gap - the way MuseScore spaces a grand
-        staff. If that spread no longer fits the panel, the whole system is drawn smaller
+        The size starts from the panel's own size and the user's zoom. The treble and
+        bass staves stand BASE_MID_GAP_SP apart, and further apart when the two hands'
+        ink would crowd or collide in the gap - the way MuseScore spaces a grand staff.
+        If that spread no longer fits the panel, the whole system is drawn smaller
         (never below MIN_FIT_SCALE of the user's size) and its content block is centred
-        between the measure-number band at the top and STAFF_PAD_Y at the bottom. A system
-        that needs no extra room keeps the size the user chose.
+        between the measure-number band at the top and STAFF_PAD_Y at the bottom. The
+        space a pedal bracket needs below the lowest ink is reserved as well, so the
+        bracket never sits on a note.
+
+        Zooming in past what the panel holds is allowed: like any zoom it then runs off
+        the paper rather than being silently ignored.
         """
         base_s = self._staff_size(rect)
+        zoom = clamp_scale(self.scale)
         if sys is None:
+            s = max(4.0, base_s * zoom)
             return StaffGeometry(
-                base_s,
-                rect.centery - round(3.0 * base_s),
-                rect.centery + round(3.0 * base_s),
-                *self._header(rect, None, base_s),
+                s,
+                rect.centery - round(3.0 * s),
+                rect.centery + round(3.0 * s),
+                *self._header(rect, None, s),
+                None,
             )
 
         bar_times = getattr(self.song, "bar_times", [])
@@ -2150,17 +2179,20 @@ class StaffView:
 
         top_sp, inner_t_sp, inner_b_sp, bottom_sp = vertical_extents(steps, base_s)
         gap_sp = max(BASE_MID_GAP_SP, inner_t_sp + inner_b_sp + INNER_CLEARANCE_SP)
-        total_sp = gap_sp + top_sp + bottom_sp
+        ink_sp = gap_sp + top_sp + bottom_sp
+        pedal_sp = (PEDAL_GAP_SP + PEDAL_BAND_SP) if self._pedal_spans(sys) else 0.0
+        total_sp = ink_sp + pedal_sp
 
         top_pad = STAFF_PAD_Y + MEASURE_NUM_PAD_PX
         avail = max(1.0, rect.h - top_pad - STAFF_PAD_Y)
         fit = max(MIN_FIT_SCALE, min(1.0, avail / (total_sp * base_s)))
-        s = base_s * fit
+        s = max(4.0, base_s * zoom * fit)
         block_top = rect.y + top_pad + (avail - total_sp * s) / 2.0
         treble_mid_y = block_top + top_sp * s
         bass_mid_y = treble_mid_y + gap_sp * s
+        pedal_y = block_top + (ink_sp + PEDAL_GAP_SP) * s if pedal_sp else None
         margin_left, usable_w = self._header(rect, sys, s)
-        return StaffGeometry(s, treble_mid_y, bass_mid_y, margin_left, usable_w)
+        return StaffGeometry(s, treble_mid_y, bass_mid_y, margin_left, usable_w, pedal_y)
 
     def _key_fifths(self, sys) -> int:
         """
@@ -2184,7 +2216,7 @@ class StaffView:
         The head of the system holds the clef, the key signature and the time
         signature, and a key signature makes it wider - so the notes start further
         right, and the music between them is a little narrower. `s` is the size the
-        system is drawn at; when omitted, the user's size is used.
+        system is drawn at; when omitted, the panel's unzoomed size is used.
         """
         if s is None:
             s = self._staff_size(rect)
@@ -2303,6 +2335,29 @@ class StaffView:
                     # everything below - layout, beams, brackets, the draw loop - works on the
                     # pieces, never on the raw notes. `sys_ties` pairs the pieces to join.
                     sys_pieces, sys_ties = split_at_bar_lines(sys.notes, self.song.bar_times)
+                    if getattr(self.song, "xml_ties", None):
+                        # The score's own ties. Each side is resolved on its own: when a
+                        # tie runs over a system break only one half is on this system,
+                        # and the draw loop then carries the tie out to the edge (or in
+                        # from it) instead of dropping the pair.
+                        def tie_piece(note, last):
+                            found = [p for p in sys_pieces
+                                     if p.pitch == note.pitch and p.track == note.track
+                                     and p.voice == note.voice
+                                     and p.start >= note.start - 1e-3 and p.end <= note.end + 1e-3
+                                     and sys.start_t - 1e-9 <= p.start < sys.end_t - 1e-9]
+                            if not found:
+                                return None
+                            return max(found, key=lambda p: p.start) if last \
+                                else min(found, key=lambda p: p.start)
+                        for l, r in self.song.xml_ties:
+                            l_piece = tie_piece(l, last=True)
+                            r_piece = tie_piece(r, last=False)
+                            if l_piece is None and r_piece is None:
+                                continue
+                            pair = (l_piece or l, r_piece or r)
+                            if pair not in sys_ties:
+                                sys_ties.append(pair)
                     # Keep only the pieces that belong to this system (starting on or after
                     # sys.start_t and before sys.end_t). A note crossing system boundaries is
                     # split at the bar line; the head piece is rendered on the earlier system
@@ -2368,12 +2423,12 @@ class StaffView:
 
                     # Compute chord-level stem direction and y-bounds for each cluster
                     for tc_idx, tc in enumerate(time_clusters):
-                        by_c = {CLEF_TREBLE: [], CLEF_BASS: []}
+                        by_hc = {}
                         for n in tc:
                             c = notes_info[id(n)]["clef"]
-                            by_c[c].append(n)
+                            by_hc.setdefault((n.hand, c), []).append(n)
 
-                        for c, c_notes in by_c.items():
+                        for (h, c), c_notes in by_hc.items():
                             if not c_notes:
                                 continue
                             mid_step = TREBLE_MID_STEP if c == CLEF_TREBLE else BASS_MID_STEP
@@ -2416,11 +2471,11 @@ class StaffView:
                                 # height, even in the rare cluster it shares with the main
                                 # note it leans on (group_chords split them by time)
                                 if info_n.get("grace"):
-                                    info_n["stem_key"] = (tc_idx, c, id(n))
+                                    info_n["stem_key"] = (tc_idx, h, c, id(n))
                                     my = note_y(info_n["step_draw"], c, treble_mid_y, bass_mid_y, s)
                                     info_n["y_top"] = info_n["y_bot"] = my
                                 else:
-                                    info_n["stem_key"] = (tc_idx, c)
+                                    info_n["stem_key"] = (tc_idx, h, c)
 
                             # A rolled chord ("arpeggio") is written with its notes
                             # slightly staggered - they are plucked or swept one after
@@ -2698,16 +2753,12 @@ class StaffView:
                         if x1 > x0:
                             notation.draw_tie(staff_surf, s, x0, x1, y, up, col)
 
-                    # 7b. Pedal Brackets
-                    if getattr(self.song, "pedal_spans", None):
-                        sys_spans = [sp for sp in self.song.pedal_spans if sp[1] > sys.start_t and sp[0] < sys.end_t]
-                        if len(sys_spans) <= 12:
-                            ped_y = min(local_rect.bottom - max(8, round(s * 0.9)),
-                                        max(bass_bot + s * 1.5,
-                                            max((v["y_bot"] for v in notes_info.values()), default=bass_bot) + s * 1.5))
-                            draw_pedal_brackets(staff_surf, self.song.pedal_spans, sys.start_t, sys.end_t,
-                                                lambda st_: local_rect.x + margin_left + (st_ - sys.start_t) / sys.duration * usable_w,
-                                                ped_y, s)
+                    # 7b. Pedal brackets: the geometry reserved room for them below the
+                    # lowest ink, so the line never sits on a note.
+                    if self._pedal_spans(sys):
+                        draw_pedal_brackets(staff_surf, self.song.pedal_spans, sys.start_t, sys.end_t,
+                                            lambda st_: local_rect.x + margin_left + (st_ - sys.start_t) / sys.duration * usable_w,
+                                            geo.pedal_y, s)
 
                     # 8. Playback cursor
                     cx = round(self.cursor_x(t, local_rect, margin_left, usable_w))

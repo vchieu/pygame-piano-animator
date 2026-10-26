@@ -61,6 +61,9 @@ DEFAULT_VELOCITY = 64
 GRACE_DURATION = 0.06      # s, a grace note has no <duration>: it is written, not measured
 GRACE_STEP = 0.05          # s, how far back from its main note each grace of a run is placed
 MAX_PASSES = 256           # guard against a score whose repeat signs would never settle
+# A tied note's two written halves meet at one moment. Sanitizing a very short note
+# may lengthen it to its minimum, so allow that much overlap when pairing the halves.
+TIE_MEET_T = 0.06          # s
 
 
 def is_musicxml(path: str) -> bool:
@@ -417,6 +420,29 @@ def _tie(note) -> tuple:
     return starts, ends
 
 
+def _pair_ties(notes: List[Note]) -> List[Tuple[Note, Note]]:
+    """The scored ties of `notes` as [(left, right)], once the note list is final."""
+    ties: List[Tuple[Note, Note]] = []
+    pending = {}                     # (part, voice, pitch) -> notes still waiting for their stop
+    for n in sorted(notes, key=lambda n: (n.start, n.end, n.pitch)):
+        waiting = pending.setdefault((n.track, n.voice, n.pitch), [])
+        if n.tie in ("stop", "continue"):
+            # The stop belongs to the latest open note of that part, voice and pitch
+            # that reaches it - the voice keeps two equal pitches on different staves
+            # apart, and a malformed score still pairs the nearest one.
+            # The two halves of a tie meet - after sanitizing a very short tied note
+            # may have been lengthened to its minimum, so allow that much overlap.
+            for i in range(len(waiting) - 1, -1, -1):
+                prev = waiting[i]
+                if prev.start < n.start <= prev.end + TIE_MEET_T:
+                    del waiting[i]
+                    ties.append((prev, n))
+                    break
+        if n.tie in ("start", "continue"):
+            waiting.append(n)
+    return ties
+
+
 def _tuplet(note) -> tuple:
     """
     (tuplet_num, tuplet_type): the tuplet this note is written in, when the score
@@ -496,7 +522,8 @@ def _key_fifths(attributes) -> Optional[int]:
 
 
 def _read_all_parts(parts, order: List[int], hands: List[Optional[str]],
-                    notes: List[Note], staff_from_file: bool = True,
+                    notes: List[Note],
+                    staff_from_file: bool = True,
                     controls: Optional[List[Tuple[float, int, int]]] = None) -> tuple:
     """
     Read every part together, measure by measure, in playing order.
@@ -512,7 +539,6 @@ def _read_all_parts(parts, order: List[int], hands: List[Optional[str]],
     if controls is None:
         controls = []
     part_measures = [[_Measure(m) for m in _kids(p, "measure")] for p in parts]
-    ties: List[dict] = [{} for _ in parts]
     tempo = _Tempo()
     at = 0.0            # the running position in seconds
     div = 0             # the running position in divisions
@@ -546,7 +572,7 @@ def _read_all_parts(parts, order: List[int], hands: List[Optional[str]],
             if idx >= len(its):
                 continue
             length = max(length, _read_measure(its[idx].elem, tempo, div, at, i,
-                                               hands[i], notes, ties[i], staff_from_file,
+                                               hands[i], notes, staff_from_file,
                                                controls=controls))
         div += _measure_span(part_measures, idx, tempo.divisions)
         at += length
@@ -672,7 +698,7 @@ def _pedal_events(direction, t: float) -> List[Tuple[float, int, int]]:
 
 def _read_measure(measure, tempo: _Tempo, start_div: int, at: float,
                   part_index: int, hand: Optional[str],
-                  notes: List[Note], ties: dict, staff_from_file: bool = True,
+                  notes: List[Note], staff_from_file: bool = True,
                   controls: Optional[List[Tuple[float, int, int]]] = None) -> float:
     """
     Read one measure's notes into `notes`; returns its length in seconds.
@@ -729,11 +755,13 @@ def _read_measure(measure, tempo: _Tempo, start_div: int, at: float,
         end = start + (GRACE_DURATION if is_grace
                        else max(0.0, tempo.sec(start_div + onset + dur)
                                 - tempo.sec(start_div + onset)))
-        voice = _text(c, "voice") or ""
         tuplet_num, tuplet_type = _tuplet(c)
+        starts, ends = _tie(c)
+        tie = "continue" if (starts and ends) else "start" if starts else "stop" if ends else None
         n = Note(pitch, start, end, _velocity(c, DEFAULT_VELOCITY), part_index, note_hand,
                  _fingering(c), False, octave * 7 + "CDEFGAB".index(step_name), alter,
-                 _printed_value(c), tuplet_num, tuplet_type, grace=is_grace)
+                 _printed_value(c), tuplet_num, tuplet_type, grace=is_grace, tie=tie,
+                 voice=_text(c, "voice") or None)
         if is_grace:
             # A grace note has no <duration>: every grace of a measure lands on the
             # same cursor. They are placed once their main note is seen, so a run of
@@ -744,31 +772,10 @@ def _read_measure(measure, tempo: _Tempo, start_div: int, at: float,
         elif pending_graces:
             _place_graces(notes, pending_graces, n)
             pending_graces = []
-        starts, ends = _tie(c)
-        # A tie runs between notes of the same voice and pitch. The staff is not
-        # part of the key: a grand staff writes the hands as different voices
-        # (1/2 up, 5/6 down), and keying on the staff too would break the tie
-        # the moment a hand is re-written into <staff> on export.
-        key = (voice, pitch)
-        if ends:
-            prev = ties.pop(key, None)
-            if prev is not None:
-                held = replace(prev, end=max(prev.end, end))
-                # replace() keeps the held note's own fields; a tuplet mark only
-                # the dropped stop note carries (a tie running through a tuplet's
-                # start or stop note) moves over, or it would never be seen.
-                if tuplet_type is not None and held.tuplet_type is None:
-                    held = replace(held, tuplet_num=tuplet_num, tuplet_type=tuplet_type)
-                for k, old in enumerate(notes):
-                    if old is prev:
-                        notes[k] = held
-                        break
-                if starts:
-                    ties[key] = held
-                continue
+        # Both tied noteheads are kept: the score writes two notes, and the staff
+        # prints two heads joined by a tie. `_pair_ties` joins them after the note
+        # list is final (sanitized, handed), so no reference goes stale.
         notes.append(n)
-        if starts:
-            ties[key] = n
     return tempo.sec(start_div + _measure_divisions(measure, tempo.divisions)) - origin
 
 
@@ -899,7 +906,8 @@ def load_musicxml(path: str, hands_from_file: bool = True, fingering: str = "fil
 
     duration = max((n.end for n in notes), default=duration)
     song = MidiSong(notes, tracks, duration, bar_times, beat_times, path, controls,
-                    key_fifths=key_fifths, key_changes=key_changes)
+                    key_fifths=key_fifths, key_changes=key_changes,
+                    xml_ties=_pair_ties(notes))
     song.quarter_times = quarter_times
     if _first_measure_pickup(part_measures, order) and len(bar_times) >= 2:
         song.pickup_end = bar_times[1]

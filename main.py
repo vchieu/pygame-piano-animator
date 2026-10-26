@@ -197,6 +197,8 @@ class Visualizer(Transport):
         self.hands = hands if hands is not None else build_hands(song)
         # what's heard and the keys that go down follow what the hands play
         self.perf = Performance.from_animators(self.hands.values()) if self.hands else None
+        if self.perf is not None:
+            self.perf = self.perf.with_ties(getattr(song, "xml_ties", None))
         self.t = -LEAD_IN
         self.paused = bool(self.audio)          # with a recording: paused, to line it up first
         self.sounding = {}

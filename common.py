@@ -746,6 +746,35 @@ class Performance:
     def from_notes(cls, notes):
         return cls([(n.start, n.end, n) for n in notes])
 
+    def with_ties(self, ties):
+        """
+        The same performance with the score's ties played as one note.
+
+        A tie writes two heads but only one attack: the second head is not struck
+        again, and the note keeps sounding until the second head would be released.
+        Chains (a tie running through several notes) are followed to the last one.
+        """
+        if not ties:
+            return self
+        items = list(self.items)
+        index = {id(n): i for i, (_, _, n) in enumerate(items)}
+        owner = {}                       # a stop note's item -> the item still sounding
+        dropped = set()
+        for left, right in ties:
+            li, ri = index.get(id(left)), index.get(id(right))
+            if li is None or ri is None or li == ri:
+                continue
+            root = owner.get(li, li)
+            if root == ri:
+                continue
+            owner[ri] = root
+            dropped.add(ri)
+            press, release, note = items[root]
+            items[root] = (press, max(release, items[ri][1]), note)
+        if not dropped:
+            return self
+        return Performance([it for i, it in enumerate(items) if i not in dropped])
+
     def active(self, t):
         """[(press, release, note)] sounding (key down) at t."""
         lo = bisect.bisect_left(self._starts, t - self._max)

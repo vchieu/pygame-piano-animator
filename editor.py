@@ -305,6 +305,8 @@ class FingeringEditor(Transport):
         self.hands = planned
         self.difficulty = None
         self.perf = Performance.from_animators(planned.values()) if planned else None
+        if self.perf is not None:
+            self.perf = self.perf.with_ties(getattr(song, "xml_ties", None))
         self.index = {id(n): i for i, n in enumerate(self.notes)}
         self.selection.clear()
         self.seq = None
@@ -326,7 +328,8 @@ class FingeringEditor(Transport):
         old = self.song
         self.song = MidiSong(self.notes, old.tracks, old.duration, old.bar_times,
                              old.beat_times, old.path, old.raw_controls,
-                             key_fifths=old.key_fifths, key_changes=old.key_changes)
+                             key_fifths=old.key_fifths, key_changes=old.key_changes,
+                             xml_ties=getattr(old, "xml_ties", None))
         if hasattr(old, "quarter_times"):
             self.song.quarter_times = old.quarter_times
         if hasattr(old, "pickup_end"):
@@ -342,6 +345,8 @@ class FingeringEditor(Transport):
         pair_hands(self.hands.values())
         settle_heap()                           # (the old animators collected, the new ones kept out of gc passes)
         self.perf = Performance.from_animators(self.hands.values()) if self.hands else None
+        if self.perf is not None:
+            self.perf = self.perf.with_ties(getattr(self.song, "xml_ties", None))
         self.difficulty = None
         self.seek(self.t)
         self.dirty = True

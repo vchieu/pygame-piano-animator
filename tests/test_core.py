@@ -1520,3 +1520,19 @@ def test_the_shadow_layer_is_cleared_where_it_was_drawn():
     skins._shadow_cache.clear()
     skins._shadow_dirty.clear()
     assert after == shot([second])
+
+
+def test_a_tied_note_is_not_struck_again():
+    # MusicXML writes a tie as two heads: only the first is attacked, and the sound is
+    # held until the second head's release. A chain of ties reaches the last release.
+    from common import Performance
+    a = Note(72, 0.0, 1.0, 80, 0, RIGHT, tie="start")
+    b = Note(72, 1.0, 2.0, 80, 0, RIGHT, tie="continue")
+    c = Note(72, 2.0, 3.0, 80, 0, RIGHT, tie="stop")
+    perf = Performance([(n.start, n.end, n) for n in (a, b, c)])
+    tied = perf.with_ties([(a, b), (b, c)])
+    assert len(tied.items) == 1
+    press, release, note = tied.items[0]
+    assert (press, release, note.pitch) == (0.0, 3.0, 72)
+    assert tied.starting(0.99, 1.01) == []          # nothing is struck at the join
+    assert tied.starting(1.99, 2.01) == []          # ... nor at the second join

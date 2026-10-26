@@ -172,15 +172,15 @@ def test_chord_and_backup_voices(tmp_path):
     assert g.start == pytest.approx(c.start)         # the backup restarted the cursor
 
 
-def test_ties_are_merged(tmp_path):
+def test_ties_are_kept_separate(tmp_path):
     direction = '<direction><sound tempo="60"/></direction>'
     m1 = measure(note("C", 4, 4, "quarter", tie="start"), number=1, direction=direction)
     m2 = measure(note("C", 4, 4, "quarter", tie="stop"), number=2)
     p = one_part(tmp_path, m1 + m2)
     song = load_musicxml(p)
     c = [n for n in song.notes if n.pitch == 60]
-    assert len(c) == 1
-    assert c[0].duration == pytest.approx(2.0)       # two tied quarters sound once, 2 s long
+    assert len(c) == 2
+    assert len(song.xml_ties) == 1
 
 
 def test_tuplets_are_read(tmp_path):
@@ -199,18 +199,15 @@ def test_tuplets_are_read(tmp_path):
     assert [n.tuplet_type for n in song.notes] == ["start", None, "stop", None]
 
 
-def test_a_tuplets_marks_survive_a_tie_merge(tmp_path):
-    # A tie's stopping note is not drawn - the two tied notes sound once - so a
-    # tuplet mark only that note carries moves onto the note it joined, instead
-    # of disappearing with it.
+def test_a_tuplets_marks_survive_a_tie(tmp_path):
     direction = '<direction><sound tempo="60"/></direction>'
     m1 = measure(note("C", 4, 4, "quarter", tie="start"), number=1, direction=direction)
     m2 = measure(note("C", 4, 4, "quarter", tie="stop", tuplet=(3, "stop")), number=2)
     p = one_part(tmp_path, m1 + m2)
     song = load_musicxml(p)
     c = [n for n in song.notes if n.pitch == 60]
-    assert len(c) == 1
-    assert c[0].tuplet_type == "stop"                # the merged note carries the mark
+    assert len(c) == 2
+    assert c[1].tuplet_type == "stop"
 
 
 def test_tuplets_in_khong_mon_dang_ho_doi_measure_51():

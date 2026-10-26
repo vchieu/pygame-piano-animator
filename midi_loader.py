@@ -149,6 +149,15 @@ class Note:
     # A grace note is written, not measured: it takes no time of its own, so the
     # auto pedal never uses it to decide where a measure's first attack is.
     grace: bool = False
+    # The score's tie on this notehead (MusicXML only): "start" opens a tie, "stop"
+    # closes one, "continue" is a middle note that both closes and opens one. The
+    # note is kept as its own written head - the tie is not merged away - so the
+    # staff can print both heads and join them; `MidiSong.xml_ties` pairs them.
+    tie: Optional[str] = None
+    # The score's voice this note is written in (MusicXML only): a tie runs between
+    # two notes of the same voice, so this is what pairs them when the same pitch
+    # sounds in more than one voice.
+    voice: Optional[str] = None
 
     @property
     def duration(self) -> float:
@@ -189,8 +198,10 @@ class MidiSong:
     def __init__(self, notes: List[Note], tracks: List[TrackInfo], duration: float,
                  bar_times: List[float], beat_times: List[float], path: Optional[str] = None,
                  controls: Optional[list] = None, key_fifths: int = 0,
-                 key_changes: Optional[list] = None):
+                 key_changes: Optional[list] = None,
+                 xml_ties: Optional[List[Tuple[Note, Note]]] = None):
         self.notes: List[Note] = sorted(notes, key=lambda n: (n.start, n.pitch))
+        self.xml_ties = list(xml_ties or [])
         # pedals: [(time, controller, value)] for sustain (64), sostenuto (66), soft (67).
         # Performance recordings (MAESTRO, Disklavier) send the pedal's exact
         # position many times a second, and a pianist's resting foot often

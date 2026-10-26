@@ -265,6 +265,29 @@ def test_a_tie_over_a_system_break_reaches_both_margins(screen, monkeypatch):
         "the tie entering the system should start at the staff's left edge"
 
 
+def test_a_score_tie_over_a_system_break_draws_on_both_systems(screen, monkeypatch):
+    # A MusicXML tie whose two written heads fall on either side of a system break is
+    # still drawn: the earlier system carries it out to the closing bar line and the
+    # later one opens it at the staff's left edge.
+    a = _note(72, 2.5, RIGHT, dur=0.5)
+    b = _note(72, 3.0, RIGHT, dur=0.5)
+    song = _BracketSong([a, b], duration=4.0, bar=1.0)
+    song.xml_ties = [(a, b)]
+    sv = StaffView(song, target_dur=3.0)
+    rect = pygame.Rect(0, 0, 1200, 220)
+    assert len(sv.systems) >= 2
+
+    calls = []
+    monkeypatch.setattr(notation, "draw_tie",
+                        lambda surf, sp, x0, x1, y, up, color: calls.append((x0, x1)))
+    for sysm in sv.systems[:2]:
+        before = len(calls)
+        sv.draw(pygame.Surface(rect.size), rect, sysm.start_t + 0.01)
+        assert len(calls) == before + 1, "each side of the break draws its half of the tie"
+    for x0, x1 in calls:
+        assert x0 < x1
+
+
 def test_note_crossing_system_boundary_is_drawn_on_next_system():
     # A note starting in system 0 and extending into system 1 must be present in
     # system 1's split pieces so that the continuation note is drawn at the start
@@ -786,6 +809,19 @@ def test_visualizer_staff_zoom_shortcuts_and_wheel(screen):
 
     vis.render()
 
+    # ... and the drawn staff really changes size with it: the panel's fit-to-height
+    # must not swallow the zoom (it used to, once a crowded system filled the panel).
+    sysm = vis.staff_view.system_for_time(vis.song.notes[0].start)
+    vis.set_staff_scale(1.0)
+    drawn_1 = vis.staff_view.staff_geometry(sysm, vis.staff_rect).s
+    vis.set_staff_scale(1.4)
+    drawn_14 = vis.staff_view.staff_geometry(sysm, vis.staff_rect).s
+    vis.set_staff_scale(0.7)
+    drawn_07 = vis.staff_view.staff_geometry(sysm, vis.staff_rect).s
+    assert drawn_14 > drawn_1 * 1.2
+    assert drawn_07 < drawn_1
+    vis.set_staff_scale(1.0)
+
     # Ctrl + wheel over the staff: how much music a system holds
     pygame.mouse.set_pos(vis.staff_rect.center)
     vis.set_staff_target_dur(10.0)
@@ -798,6 +834,7 @@ def test_visualizer_staff_zoom_shortcuts_and_wheel(screen):
     vis.set_staff_scale(1.0)
     app.handle_event(pygame.event.Event(pygame.MOUSEWHEEL, x=0, y=-1, mod=pygame.KMOD_SHIFT))
     assert vis.staff_scale > 1.0
+    assert vis.staff_view.staff_geometry(sysm, vis.staff_rect).s > drawn_1
     app.handle_event(pygame.event.Event(pygame.MOUSEWHEEL, x=0, y=1, mod=pygame.KMOD_SHIFT))
     assert abs(vis.staff_scale - 1.0) < 1e-6
 
@@ -972,12 +1009,13 @@ def test_a_calm_system_keeps_the_users_size_and_the_baseline_gap():
 
 
 def test_a_tall_system_shrinks_to_fit_the_staff_panel():
-    # A5 over A1 at scale 1.5 needs more than the 140 px panel holds at the user's size.
-    # That one system shrinks (but never below MIN_FIT_SCALE of it) and its content stays
-    # inside the panel with STAFF_PAD_Y of padding.
+    # A5 over A1 at the user's size needs more than the 140 px panel holds. That one
+    # system shrinks (but never below MIN_FIT_SCALE of it) and its content stays inside
+    # the panel with STAFF_PAD_Y of padding. (Zooming in past the panel is the user's
+    # choice; that is covered by the zoom tests.)
     song = _BracketSong([_note(81, 0.0, RIGHT), _note(33, 0.0, LEFT)])
     rect = pygame.Rect(0, 0, 1200, 140)
-    view = StaffView(song, scale=1.5)
+    view = StaffView(song)
     geo = view.staff_geometry(view.systems[0], rect)
     base_s = view._staff_size(rect)
 
@@ -996,7 +1034,7 @@ def test_the_measure_numbers_fit_above_the_fullest_system(screen):
     # room for it and still keep all its ink inside the panel.
     song = _BracketSong([_note(81, 0.0, RIGHT), _note(33, 0.0, LEFT)])
     rect = pygame.Rect(0, 0, 1200, 140)
-    view = StaffView(song, scale=1.5)
+    view = StaffView(song)
     geo = view.staff_geometry(view.systems[0], rect)
 
     assert geo.treble_mid_y - 2 * geo.s - staff.MEASURE_NUM_PAD_PX >= 0
@@ -1010,6 +1048,38 @@ def test_the_measure_numbers_fit_above_the_fullest_system(screen):
     bottom_ink = note_y(12, CLEF_BASS, geo.treble_mid_y, geo.bass_mid_y, geo.s) + head_half
     assert top_ink >= rect.top + staff.STAFF_PAD_Y + staff.MEASURE_NUM_PAD_PX - 0.5
     assert bottom_ink <= rect.bottom - staff.STAFF_PAD_Y + 0.5
+
+
+def test_a_pedal_bracket_sits_below_the_lowest_ink(screen):
+    # A pedal belongs under the bass staff and under every note's ink, with clear air.
+    # It must not be pulled back up onto a low left-hand note by the panel's edge.
+    low = _note(41, 0.0, LEFT)                 # F2, below the bass staff
+    song = _BracketSong([low, _note(72, 0.0, RIGHT)])
+    song.pedal_spans = [(0.0, 2.0)]
+    rect = pygame.Rect(0, 0, 1200, 140)
+    view = StaffView(song)
+    geo = view.staff_geometry(view.systems[0], rect)
+
+    head_half = notation.NOTEHEAD_H_SP * geo.s / 2.0
+    lowest = note_y(diatonic_step(41)[0], CLEF_BASS,
+                    geo.treble_mid_y, geo.bass_mid_y, geo.s) + head_half
+    assert geo.pedal_y is not None
+    assert geo.pedal_y >= lowest + (staff.PEDAL_GAP_SP - 0.01) * geo.s
+    assert geo.pedal_y > geo.bass_mid_y + 2 * geo.s
+    assert geo.pedal_y <= rect.bottom - 1
+
+    # The "Ped." label stands above the line, and its font has a 9 px minimum: even at
+    # the smallest staff the air the gap leaves must hold the whole label.
+    small = StaffView(song, scale=staff.MIN_SCALE)
+    tight = small.staff_geometry(small.systems[0], rect)
+    lowest = note_y(diatonic_step(41)[0], CLEF_BASS,
+                    tight.treble_mid_y, tight.bass_mid_y, tight.s) + \
+        notation.NOTEHEAD_H_SP * tight.s / 2.0
+    label_h = staff.ui_font(max(9, int(round(tight.s * 1.15))), bold=True).get_height() + 1
+    assert tight.pedal_y - lowest >= label_h
+
+    song.pedal_spans = []
+    assert view.staff_geometry(view.systems[0], rect).pedal_y is None
 
 
 def test_an_empty_staff_still_straddles_the_panels_centre(screen):
