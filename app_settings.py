@@ -44,8 +44,8 @@ from midi_loader import LEFT, RIGHT
 
 TO_MENU = "menu"
 FPS_CAP_MIN, FPS_CAP_MAX = 24, 240      # (as main.py's: the slider's top step past FPS_CAP_MAX is "uncapped")
-ROW_H = 56                              # each setting's row in the panel (less in a small window...
-ROW_H_MIN = 36                          # ...down to this: the panel kept above the window's centre)
+ROW_H = 62                              # each setting's row in the panel (less in a small window...
+ROW_H_MIN = 42                          # ...down to this: the panel kept above the window's centre)
 ROWS = 10
 PICK_ROW_H = 34                         # the font list's rows...
 PICK_PREVIEW = 20                       # ...each name drawn in its own face this big
@@ -99,27 +99,27 @@ class SettingsScreen:
         pw = min(820, w - 40)
         # the panel sits above the highest the keys can go (the window's centre)
         self.row_h = rh = max(ROW_H_MIN, min(ROW_H, (h // 2 - TOP_BAR_H - 16 - 20) // ROWS))
-        self.panel_h = ROWS * rh + 20
+        self.panel_h = ROWS * rh + 28
         self.panel = pygame.Rect((w - pw) // 2, TOP_BAR_H + 16, pw, self.panel_h)
-        self.view = pygame.Rect(self.panel.x + 8, self.panel.y + 4, self.panel.w - 16, self.panel_h - 8)
-        x, y = self.panel.x + 20, self.panel.y + 12
-        right = self.panel.right - 20
-        self.reset.rect = pygame.Rect(right - 150, y + 6, 150, 30)
-        self.keys.rect = pygame.Rect(right - 150, y + rh + 6, 150, 30)
-        self.fps.layout(pygame.Rect(right - 240, y + 2 * rh - 6, 248, 52))
-        self._text_w = right - 260 - x              # (descriptions stop short of the controls)
-        self.perf.rect = pygame.Rect(right - 150, y + 3 * rh + 6, 150, 30)
-        self.sf_default.rect = pygame.Rect(right - 110, y + 4 * rh + 6, 110, 30)
-        self.sf_browse.rect = pygame.Rect(right - 110 - 8 - 110, y + 4 * rh + 6, 110, 30)
-        self.font_default.rect = pygame.Rect(right - 110, y + 5 * rh + 6, 110, 30)
-        self.font_choose.rect = pygame.Rect(right - 110 - 8 - 110, y + 5 * rh + 6, 110, 30)
-        self.xml_hands.rect = pygame.Rect(right - 150, y + 6 * rh + 6, 150, 30)
-        self.xml_fingering.rect = pygame.Rect(right - 150, y + 7 * rh + 6, 150, 30)
-        self.pedal.rect = pygame.Rect(right - 150, y + 8 * rh + 6, 150, 30)
-        self.normalize.rect = pygame.Rect(right - 150, y + 9 * rh + 6, 150, 30)
+        self.view = pygame.Rect(self.panel.x + 8, self.panel.y + 6, self.panel.w - 16, self.panel_h - 12)
+        x, y = self.panel.x + 22, self.panel.y + 14
+        right = self.panel.right - 22
+        self.reset.rect = pygame.Rect(right - 150, y + 2, 150, 30)
+        self.keys.rect = pygame.Rect(right - 150, y + rh + 2, 150, 30)
+        self.fps.layout(pygame.Rect(right - 240, y + 2 * rh - 10, 248, 52))
+        self._text_w = right - 280 - x              # (descriptions stop short of the controls)
+        self.perf.rect = pygame.Rect(right - 150, y + 3 * rh + 2, 150, 30)
+        self.sf_default.rect = pygame.Rect(right - 110, y + 4 * rh + 2, 110, 30)
+        self.sf_browse.rect = pygame.Rect(right - 110 - 8 - 110, y + 4 * rh + 2, 110, 30)
+        self.font_default.rect = pygame.Rect(right - 110, y + 5 * rh + 2, 110, 30)
+        self.font_choose.rect = pygame.Rect(right - 110 - 8 - 110, y + 5 * rh + 2, 110, 30)
+        self.xml_hands.rect = pygame.Rect(right - 150, y + 6 * rh + 2, 150, 30)
+        self.xml_fingering.rect = pygame.Rect(right - 150, y + 7 * rh + 2, 150, 30)
+        self.pedal.rect = pygame.Rect(right - 150, y + 8 * rh + 2, 150, 30)
+        self.normalize.rect = pygame.Rect(right - 150, y + 9 * rh + 2, 150, 30)
         self._rows = (x, y)
         total_h = ROWS * rh
-        self.max_scroll = max(0, total_h - (self.view.h - 8))
+        self.max_scroll = max(0, total_h - (self.view.h - 16))
         self.scroll = min(max(0, self.scroll), self.max_scroll)
 
     # ----- the soundfont ---------------------------------------------------------
