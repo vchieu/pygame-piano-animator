@@ -521,6 +521,17 @@ def _key_fifths(attributes) -> Optional[int]:
     return None if f is None else max(-7, min(7, int(f)))
 
 
+def _time_signature(attributes) -> Optional[Tuple[int, int]]:
+    time = _kid(attributes, "time")
+    if time is None:
+        return None
+    beats = _int(time, "beats")
+    beat_type = _int(time, "beat-type")
+    if beats and beat_type:
+        return (beats, beat_type)
+    return None
+
+
 def _read_all_parts(parts, order: List[int], hands: List[Optional[str]],
                     notes: List[Note],
                     staff_from_file: bool = True,
@@ -546,6 +557,9 @@ def _read_all_parts(parts, order: List[int], hands: List[Optional[str]],
     current = 0         # the key in force
     key_seen = False    # whether the score has declared a key yet
     key_changes: List[Tuple[float, int]] = []
+    time_signature = (4, 4)
+    time_seen = False
+    time_changes: List[Tuple[float, int, int]] = []
     for idx in order:
         present = [its[idx].elem for its in part_measures if idx < len(its)]
         if not present:
@@ -567,6 +581,14 @@ def _read_all_parts(parts, order: List[int], hands: List[Optional[str]],
                     elif fifths != current:
                         key_changes.append((at, fifths))
                     current = fifths
+                ts = _time_signature(attributes)
+                if ts is not None:
+                    if not time_seen:
+                        time_signature = ts
+                        time_seen = True
+                    elif ts != time_signature:
+                        time_changes.append((at, ts[0], ts[1]))
+                        time_signature = ts
         length = 0.0
         for i, its in enumerate(part_measures):
             if idx >= len(its):
@@ -576,7 +598,7 @@ def _read_all_parts(parts, order: List[int], hands: List[Optional[str]],
                                                controls=controls))
         div += _measure_span(part_measures, idx, tempo.divisions)
         at += length
-    return at, key_fifths, key_changes, controls
+    return at, key_fifths, key_changes, controls, time_signature, time_changes
 
 
 def _measure_span(part_measures, idx: int, divisions: int) -> int:
@@ -869,8 +891,8 @@ def load_musicxml(path: str, hands_from_file: bool = True, fingering: str = "fil
         notes: List[Note] = []
         tracks: List[TrackInfo] = []
         controls: List[Tuple[float, int, int]] = []
-        duration, key_fifths, key_changes, controls = _read_all_parts(parts, order, part_hand, notes,
-                                                                      hands_from_file, controls)
+        duration, key_fifths, key_changes, controls, time_signature, time_changes = _read_all_parts(parts, order, part_hand, notes,
+                                                                                                                   hands_from_file, controls)
         for i in range(len(parts)):
             hand = part_hand[i] if hands_from_file else None
             tracks.append(TrackInfo(i, (names[i] if i < len(names) else "") or f"Part {i + 1}",
@@ -907,7 +929,7 @@ def load_musicxml(path: str, hands_from_file: bool = True, fingering: str = "fil
     duration = max((n.end for n in notes), default=duration)
     song = MidiSong(notes, tracks, duration, bar_times, beat_times, path, controls,
                     key_fifths=key_fifths, key_changes=key_changes,
-                    xml_ties=_pair_ties(notes))
+                    xml_ties=_pair_ties(notes), time_signature=time_signature)
     song.quarter_times = quarter_times
     if _first_measure_pickup(part_measures, order) and len(bar_times) >= 2:
         song.pickup_end = bar_times[1]

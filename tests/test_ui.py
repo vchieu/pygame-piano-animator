@@ -437,6 +437,17 @@ def test_frame_rate_cap_setting(screen):
     assert main.fps_cap_value(500) == 240 and main.fps_cap_value(5) == 24 and main.fps_cap_value("x") == 60
 
 
+def test_settings_screen_row_height_and_descriptions(screen):
+    app = app_on(screen)
+    app.settings()
+    st = app.mode
+    st.render()
+    assert st.row_h >= 54                                            # enough height for title + 2nd line
+    norm_h = app.fonts["normal"].get_height()
+    small_h = app.fonts["small"].get_height()
+    assert norm_h + small_h + 4 <= st.row_h                           # fits without vertical clipping
+
+
 def test_a_falling_note_keeps_its_length_and_moves_smoothly():
     """No flicker: frame after frame a note's box is exactly the same length, and it moves on steadily."""
     pps = 173.3                                      # (pixels a second: not a whole number)

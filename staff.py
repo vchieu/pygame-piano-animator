@@ -2287,18 +2287,20 @@ class StaffView:
             if all(drawn_key):
                 key_end = key_x + key_sig_width_sp(key_fifths, s) * s
 
-        # 5. Time signature '4/4' - the numerator on the line above the middle one and the
+        # 5. Time signature - the numerator on the line above the middle one and the
         # denominator on the line below (notation.draw_time_signature places them). The
         # old UI-font digits are the fallback for a build without the music font.
         ts_x = time_sig_x(left_x, s, key_end)
-        drawn = [notation.draw_time_signature(staff_surf, ts_x, ts_mid, s, 4, 4, TIME_SIG_COLOR)
+        ts_num, ts_den = getattr(self.song, "time_signature", (4, 4)) if self.song else (4, 4)
+        drawn = [notation.draw_time_signature(staff_surf, ts_x, ts_mid, s, ts_num, ts_den, TIME_SIG_COLOR)
                  for ts_mid in (treble_mid_y, bass_mid_y)]
         if not all(drawn):
             ts_font = ui_font(max(10, int(s * 1.6)), bold=True)
-            ts_img = ts_font.render("4", True, TIME_SIG_COLOR)
+            ts_num_img = ts_font.render(str(ts_num), True, TIME_SIG_COLOR)
+            ts_den_img = ts_font.render(str(ts_den), True, TIME_SIG_COLOR)
             for ts_mid in (treble_mid_y, bass_mid_y):
-                staff_surf.blit(ts_img, ts_img.get_rect(center=(ts_x, round(ts_mid - s * 0.9))))
-                staff_surf.blit(ts_img, ts_img.get_rect(center=(ts_x, round(ts_mid + s * 0.9))))
+                staff_surf.blit(ts_num_img, ts_num_img.get_rect(center=(ts_x, round(ts_mid - s * 0.9))))
+                staff_surf.blit(ts_den_img, ts_den_img.get_rect(center=(ts_x, round(ts_mid + s * 0.9))))
 
         if self.song and self.systems:
             # 6. Active system

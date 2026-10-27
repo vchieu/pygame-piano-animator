@@ -199,7 +199,8 @@ class MidiSong:
                  bar_times: List[float], beat_times: List[float], path: Optional[str] = None,
                  controls: Optional[list] = None, key_fifths: int = 0,
                  key_changes: Optional[list] = None,
-                 xml_ties: Optional[List[Tuple[Note, Note]]] = None):
+                 xml_ties: Optional[List[Tuple[Note, Note]]] = None,
+                 time_signature: Tuple[int, int] = (4, 4)):
         self.notes: List[Note] = sorted(notes, key=lambda n: (n.start, n.pitch))
         self.xml_ties = list(xml_ties or [])
         # pedals: [(time, controller, value)] for sustain (64), sostenuto (66), soft (67).
@@ -229,6 +230,7 @@ class MidiSong:
         # clock's warp) so an export can write a two-staff MIDI of it.
         self.normalized = False
         self.clean = None
+        self.time_signature = time_signature if time_signature and len(time_signature) == 2 else (4, 4)
         # The key signature the file declares: how many sharps (positive) or flats
         # (negative) it holds. The staff draws it at the head of every system and
         # leaves out the accidentals the key already covers (see staff.py).
@@ -546,6 +548,27 @@ def read_key_signature(path: str) -> Optional[int]:
                 fifths = sf - 256 if sf > 127 else sf
                 if -7 <= fifths <= 7:
                     return fifths
+    return None
+
+
+def read_time_signature(path: str) -> Optional[Tuple[int, int]]:
+    """
+    The time signature a Standard MIDI File declares, or None when it declares none.
+    The `FF 58` meta event carries (nn, dd, cc, bb).
+    """
+    try:
+        _, _, tracks = _smf_tracks(path)
+    except Exception:
+        return None
+    # Look in conductor/first track first
+    for events in tracks.values():
+        for _t, kind, p in events:
+            if kind == 'meta' and p[0] == 0x58 and len(p[1]) >= 2:
+                nn = p[1][0]
+                dd_exp = p[1][1]
+                dd = 2 ** dd_exp if dd_exp >= 0 else 4
+                if nn > 0 and dd > 0:
+                    return (int(nn), int(dd))
     return None
 
 
@@ -1063,6 +1086,7 @@ def load_midi(path: str, include_drums: bool = False, split_pitch: int = MIDDLE_
     # The key the file declares: the staff draws it and leaves out the accidentals
     # it already covers.
     key_fifths = read_key_signature(path) or 0
+    time_sig = read_time_signature(path) or (4, 4)
 
     # How a black key is written: a MIDI file carries no spelling of its own, so it
     # is read as a sharp - unless the key flattens it, as in Bb major.
@@ -1106,7 +1130,7 @@ def load_midi(path: str, include_drums: bool = False, split_pitch: int = MIDDLE_
 
     duration = max((n.end for n in notes), default=0.0)
     song = MidiSong(notes, tracks, duration, bar_times, beat_times, path, controls,
-                    key_fifths=key_fifths)
+                    key_fifths=key_fifths, time_signature=time_sig)
     try:
         tempo_times, tempi = pm.get_tempo_changes()
         song.quarter_times = [(float(t), 60.0 / float(bpm))
