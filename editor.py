@@ -70,7 +70,7 @@ from midi_loader import (HIGHEST_PIANO_KEY, LEFT, LOWEST_PIANO_KEY, RIGHT, MidiS
                          clean_options, is_black_key, is_pig, note_name, save_fingered_midi,
                          save_pig)
 from musicxml_loader import is_musicxml, save_musicxml
-from normalize import clean_song, write_midi
+from normalize import clean_song, revoice, write_midi
 
 INFO_H = 24                  # status line under the top bar
 RULER_H = 20                 # bar numbers above the roll
@@ -757,9 +757,12 @@ class FingeringEditor(Transport):
         if not path:
             return False
         try:
-            fingers = {id(n): n.hand + ("g" if n.gliss else (str(f) if f else ""))
-                       for n, f in zip(self.notes, self.finger) if n.hand}
-            clean = replace(self.song.clean, notes=self.notes, controls=self.song.controls)
+            label = {id(n): n.hand + ("g" if n.gliss else (str(f) if f else ""))
+                     for n, f in zip(self.notes, self.finger) if n.hand}
+            # hands may have been edited since the clean: voice each hand again (one voice a
+            # hand), and carry every label over to the note that replaces its own
+            clean, pairs = revoice(replace(self.song.clean, notes=self.notes, controls=self.song.controls))
+            fingers = {id(new): label[id(old)] for old, new in pairs if id(old) in label}
             count = write_midi(path, clean, key_fifths=self.song.key_fifths, fingers=fingers)
         except Exception as exc:
             self.say(f"Export failed: {exc}")

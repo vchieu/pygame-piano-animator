@@ -40,6 +40,7 @@ and the staff view can use directly.
 from __future__ import annotations
 
 import math
+import os
 import struct
 from dataclasses import dataclass, field, replace
 from typing import List, Optional, Sequence, Tuple
@@ -395,7 +396,7 @@ def normalize(notes: Sequence, controls: Optional[Sequence[tuple]] = None, beats
                 if hasattr(n, "tuplet_num"):
                     kw.update(tuplet_num=None, tuplet_type=None, printed=None)
                 out_notes.append(replace(n, **kw))
-        counters["merged"] += before - sum(1 for _ in out_notes if _.hand == hand)
+        counters["merged"] += before - sum(1 for o in out_notes if o.hand == hand)
     out_notes.sort(key=lambda n: (n.start, n.pitch))
 
     # --- the clock: bars and beats from the first bar line to past the last note
@@ -440,6 +441,33 @@ def normalize(notes: Sequence, controls: Optional[Sequence[tuple]] = None, beats
     return clean
 
 
+def revoice(clean: Clean, voices: str = "single", chord_end: str = "median", tidy: bool = True):
+    """
+    Voice `clean.notes` again, per hand as they now carry it. Needed after the notes were edited
+    on the clean clock (a note moved to the other hand may overlap that hand's held notes, which
+    a notation program prints as a second voice). Returns (Clean, [(old note, new note)]); a note
+    that lands on a key its hand already plays at that unit is merged away (no pair).
+    """
+    unit = clean.unit
+    rest_min = max(2, round(REST_MIN_BEAT * clean.units_per_beat))
+    per = {RIGHT: {}, LEFT: {}}
+    for n in clean.notes:
+        hand = n.hand or (LEFT if n.pitch < MIDDLE_C else RIGHT)
+        per[hand].setdefault(int(round(n.start / unit)), []).append((n, n.end / unit))
+    counters = {"cut": 0, "rests": 0, "merged": 0, "tidied": 0}
+    pairs = []
+    for hand in (RIGHT, LEFT):
+        for u, ends, ns in _voice(per[hand], voices, chord_end, rest_min, counters, tidy):
+            for n, e in zip(ns, ends):
+                pairs.append((n, replace(n, start=u * unit, end=e * unit, hand=hand,
+                                         track=0 if hand == RIGHT else 1)))
+    pairs.sort(key=lambda p: (p[1].start, p[1].pitch))
+    notes = [new for _, new in pairs]
+    rh = sum(1 for n in notes if n.hand == RIGHT)
+    stats = dict(clean.stats, notes_out=len(notes), right=rh, left=len(notes) - rh)
+    return replace(clean, notes=notes, stats=stats), pairs
+
+
 # --------------------------------------------------------------------------- #
 # Output: a MIDI file with two staves
 # --------------------------------------------------------------------------- #
@@ -479,6 +507,8 @@ def write_midi(path: str, clean: Clean, key_fifths: int = 0, program: int = 0,
     written as a text event right before that note, in the form midi_loader.read_markers reads
     (the fingering editor's markers), so an exported score keeps the fingering.
     """
+    if PPQ % clean.units_per_beat:
+        raise ValueError("units_per_beat %d does not divide PPQ %d" % (clean.units_per_beat, PPQ))
     tpu = PPQ // clean.units_per_beat
     tick = lambda t: max(0, int(round(t / clean.unit)) * tpu)
     tempo = int(round(60_000_000 / clean.bpm))
@@ -510,7 +540,6 @@ def write_midi(path: str, clean: Clean, key_fifths: int = 0, program: int = 0,
     tmp = path + ".tmp"
     with open(tmp, "wb") as fh:
         fh.write(data)
-    import os
     os.replace(tmp, path)
     return total
 
@@ -557,7 +586,7 @@ def main(argv=None) -> int:
     ap.add_argument("--downbeat", choices=("auto", "first"), default="auto")
     a = ap.parse_args(argv)
     from midi_loader import load_song
-    song = load_song(a.src)
+    song = load_song(a.src, normalize=False)      # (normalized once, below - not twice)
     clean = normalize(song.notes, controls=getattr(song, "raw_controls", None), beats_per_bar=a.beats,
                       max_bpm=a.max_bpm, voices=a.voices, chord_end=a.chord_end, downbeat=a.downbeat,
                       tidy=not a.no_tidy)

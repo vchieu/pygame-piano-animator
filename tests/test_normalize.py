@@ -174,11 +174,15 @@ def test_auto_normalize_app_setting_is_honoured():
     import pianist
     from conftest import midi_path
     p = midi_path("demo_song.mid")
-    pianist.set_app_setting("auto_normalize", True)
-    assert midi_loader.load_song(p).normalized         # None follows the app setting
-    assert not midi_loader.load_song(p, normalize=False).normalized
-    pianist.set_app_setting("auto_normalize", False)
-    assert not midi_loader.load_song(p).normalized
+    old = pianist.app_setting("auto_normalize", False)
+    try:                                               # (the user's own setting comes back)
+        pianist.set_app_setting("auto_normalize", True)
+        assert midi_loader.load_song(p).normalized     # None follows the app setting
+        assert not midi_loader.load_song(p, normalize=False).normalized
+        pianist.set_app_setting("auto_normalize", False)
+        assert not midi_loader.load_song(p).normalized
+    finally:
+        pianist.set_app_setting("auto_normalize", old)
 
 
 def test_load_with_hands_normalizes():
@@ -196,6 +200,27 @@ def test_a_song_too_short_to_clean_keeps_its_timings():
     song = MidiSong([Note(60, 0.0, 1.0, 90, 0, RIGHT), Note(53, 2.0, 5.0, 90, 1, LEFT)], tracks, 6.0, [], [])
     assert midi_loader.maybe_normalize(song, True) is song          # a raw song that loads beats none at all
     assert not song.normalized and any("Normalize failed" in l for l in song.cleanup)
+
+
+def test_revoice_after_a_hand_edit_keeps_one_voice_a_hand():
+    """A note moved to the other hand may overlap that hand's held note: revoice cuts it there."""
+    from dataclasses import replace
+    notes, _ = _piece(bars=6)
+    clean = N.normalize(notes)
+    r = next(n for n in clean.notes if n.hand == "R" and any(
+        l.hand == "L" and l.start < n.start < l.end for l in clean.notes))     # starts inside a left-hand note
+    moved = [replace(n, hand="L", track=1) if n is r else n for n in clean.notes]
+    starts = sorted({n.start for n in moved if n.hand == "L"})                 # (the overlap is really there)
+    assert any(max(n.end for n in moved if n.hand == "L" and n.start == a) > b + 1e-9
+               for a, b in zip(starts, starts[1:]))
+    edited, pairs = N.revoice(replace(clean, notes=moved))
+    assert len(pairs) == len(moved) and edited.stats["left"] == clean.stats["left"] + 1
+    for hand in "RL":
+        starts = sorted({n.start for n in edited.notes if n.hand == hand})
+        for a, b in zip(starts, starts[1:]):
+            assert max(n.end for n in edited.notes if n.hand == hand and n.start == a) <= b + 1e-9
+    assert edited.notes == [new for _, new in pairs]
+    assert N.revoice(edited)[0].notes == edited.notes             # already one voice: nothing moves
 
 
 def test_writer_fingers_survive_a_round_trip(tmp_path):
