@@ -27,6 +27,8 @@ app_settings.py - The Settings screen (main menu > Settings).
     leaves blank ("musicxml_fingering").
   * Pedal: From the score keeps the file's own sustain pedal, Auto by harmony
     follows the left hand's chords and harmony changes ("pedal_mode").
+  * Auto Normalize: On cleans every opened song onto a metrical grid first
+    (normalize.py - what --clean does from the command line; "auto_normalize").
 """
 import os
 
@@ -43,8 +45,8 @@ from midi_loader import LEFT, RIGHT
 TO_MENU = "menu"
 FPS_CAP_MIN, FPS_CAP_MAX = 24, 240      # (as main.py's: the slider's top step past FPS_CAP_MAX is "uncapped")
 ROW_H = 56                              # each setting's row in the panel (less in a small window...
-ROW_H_MIN = 40                          # ...down to this: the panel kept above the window's centre)
-ROWS = 9
+ROW_H_MIN = 36                          # ...down to this: the panel kept above the window's centre)
+ROWS = 10
 PICK_ROW_H = 34                         # the font list's rows...
 PICK_PREVIEW = 20                       # ...each name drawn in its own face this big
 
@@ -78,6 +80,7 @@ class SettingsScreen:
         self.xml_hands = Button(MUSICXML_HANDS_LABEL[pianists.app_setting("musicxml_hands", "file")], "xml_hands", font="small")
         self.xml_fingering = Button(MUSICXML_FINGERING_LABEL[pianists.app_setting("musicxml_fingering", "fill")], "xml_fingering", font="small")
         self.pedal = Button(PEDAL_MODE_LABEL[pianists.app_setting("pedal_mode", "score")], "pedal", font="small")
+        self.normalize = Button("", "normalize", font="small")
         self.picker = None               # the font list (FontPicker) while it's open
         cap = app.fps_cap
         self.fps = Slider("", FPS_CAP_MIN, FPS_CAP_MAX + 1, FPS_CAP_MAX + 1 if cap is None else cap,
@@ -109,6 +112,7 @@ class SettingsScreen:
         self.xml_hands.rect = pygame.Rect(right - 150, y + 6 * rh + 6, 150, 30)
         self.xml_fingering.rect = pygame.Rect(right - 150, y + 7 * rh + 6, 150, 30)
         self.pedal.rect = pygame.Rect(right - 150, y + 8 * rh + 6, 150, 30)
+        self.normalize.rect = pygame.Rect(right - 150, y + 9 * rh + 6, 150, 30)
         self._rows = (x, y)
 
     # ----- the soundfont ---------------------------------------------------------
@@ -228,6 +232,10 @@ class SettingsScreen:
                 if getattr(self.app, "mode", None) and hasattr(self.app.mode, "song") and self.app.mode.song:
                     self.app.mode.song.set_pedal_mode(pianists.app_setting("pedal_mode", "score"))
                 return True
+            if self.normalize.hit(event.pos):
+                pianists.set_app_setting("auto_normalize",
+                                         not bool(pianists.app_setting("auto_normalize", False)))
+                return True
             kb_rect, _ = self._kb()
             grab = kb_rect.inflate(0, 2 * FELT_H).move(0, -FELT_H // 2)
             if grab.collidepoint(event.pos):
@@ -289,7 +297,9 @@ class SettingsScreen:
                 ("MusicXML hands", "Follow the score's own layout, or work the hands out from the music."),
                 ("MusicXML fingering", "Auto: plan every finger. From the file: keep the score's printed "
                                        "fingers. Fill in: keep them, plan what the score leaves blank."),
-                ("Pedal", "From the score: keep the file's pedal. Auto by harmony: pedal follows the left hand's chords.")]
+                ("Pedal", "From the score: keep the file's pedal. Auto by harmony: pedal follows the left hand's chords."),
+                ("Auto Normalize", "On: a song is cleaned onto a metrical grid when it's opened (two staves, "
+                                   "even timings - what --clean does). Off: the file's own timings are kept.")]
         for i, (title, desc) in enumerate(rows):
             ry = y + i * self.row_h
             if i:
@@ -309,10 +319,12 @@ class SettingsScreen:
         self.xml_hands.label = MUSICXML_HANDS_LABEL[pianists.app_setting("musicxml_hands", "file")]
         self.xml_fingering.label = MUSICXML_FINGERING_LABEL[pianists.app_setting("musicxml_fingering", "fill")]
         self.pedal.label = PEDAL_MODE_LABEL[pianists.app_setting("pedal_mode", "score")]
+        self.normalize.active = bool(pianists.app_setting("auto_normalize", False))
+        self.normalize.label = "On" if self.normalize.active else "Off"
         if self.picker is not None:
             mouse = (-1, -1)                         # (no hover under the font list)
         for b in (self.reset, self.keys, self.perf, self.sf_browse, self.sf_default, self.font_choose,
-                  self.font_default, self.xml_hands, self.xml_fingering, self.pedal):
+                  self.font_default, self.xml_hands, self.xml_fingering, self.pedal, self.normalize):
             b.draw(s, f, mouse)
         self.fps.draw(s, f)
 

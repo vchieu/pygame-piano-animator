@@ -612,3 +612,46 @@ def test_a_second_jump_before_the_first_settles_waits_afresh(screen):
     v.seek(12.0)
     v.update(1 / 60)
     assert v._waiting and v.t == 12.0
+
+
+def test_editor_cleans_the_score_undoes_and_exports_it(screen, tmp_path, monkeypatch):
+    import editor as editor_mod
+    app = app_on(screen)
+    app.edit(midi_loader.load_song(midi_path("demo_song.mid")))
+    ed = app.mode
+    raw_song = ed.song
+    raw_starts = [n.start for n in ed.notes]
+    ed._button("clean")
+    assert ed.song.normalized and ed.song is not raw_song and ed.song.clean is not None
+    u = ed.song.clean.unit
+    assert all(abs(n.start / u - round(n.start / u)) < 1e-6 for n in ed.notes)   # on the grid
+    ed.render()                                        # (the staff draws the cleaned clock)
+    ed.undo()                                          # the file's own timings come back
+    assert not ed.song.normalized and [n.start for n in ed.notes] == raw_starts
+    ed.undo(redo=True)                                 # and the cleaned score again
+    assert ed.song.normalized and ed.song.clean is not None
+    first = min(range(len(ed.notes)), key=lambda i: (ed.notes[i].start, -ed.notes[i].pitch))
+    ed.set_note(first, ed.notes[first].hand, 3)        # a finger to carry out to the file
+    out = tmp_path / "clean.mid"
+    monkeypatch.setattr(editor_mod, "save_file_dialog", lambda **kw: str(out))
+    assert ed.export() and out.exists()                # a cleaned score exports cleaned
+    marks = midi_loader.read_markers(str(out))
+    assert marks and (ed.notes[first].hand, 3) in marks.values()
+    ed.render()
+
+
+def test_the_cli_clean_flag_reaches_the_player(monkeypatch, tmp_path):
+    import sys
+    seen = []
+    play = main.App.play
+
+    def spy(self, path, **kw):
+        seen.append(kw.get("normalize"))
+        return play(self, path, **kw)
+    monkeypatch.setattr(main.App, "play", spy)
+    shot = str(tmp_path / "frame.png")
+    for flags, want in ((["--clean"], True), (["--normalize"], True), ([], None)):
+        monkeypatch.setattr(sys, "argv", ["main.py", midi_path("demo_song.mid"), *flags,
+                                          "--no-sound", "--screenshot", shot, "--at", "1"])
+        main.main()
+    assert seen == [True, True, None]

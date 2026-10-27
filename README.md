@@ -79,7 +79,8 @@ python main.py song.mid --edit   # open it in the fingering editor
 Switching an existing install from `pygame` to `pygame-ce` (both install as `import pygame`, so
 remove the old one first): `pip uninstall -y pygame` then `pip install -r requirements.txt`.
 
-Other options: `--no-sound`, `--speed 0.5`, `--screenshot frame.png --at 12.5`, and
+Other options: `--no-sound`, `--speed 0.5`, `--clean` (or `--normalize`: clean the
+score onto a metrical grid first), `--screenshot frame.png --at 12.5`, and
 `--audio recording.wav --audio-speed 0.75 --audio-offset 1.5` to play a synced recording straight away.
 
 Keyboard controls are listed at the top of `main.py` (player) and `editor.py` (editor), and in

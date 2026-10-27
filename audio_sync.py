@@ -204,7 +204,11 @@ class SyncAudio:
 # The screens between choosing a MIDI file and playing it
 # --------------------------------------------------------------------------- #
 class PlaybackSetup:
-    """Default sound, or a synced audio file (its speed chosen first, fixed after)."""
+    """
+    Default sound, or a synced audio file (its speed chosen first, fixed after).
+    Either way the score can be switched to its cleaned version (normalize.py:
+    the notes on a metrical grid, two staves) and back - "Clean score" / C.
+    """
 
     def __init__(self, app, song, hands=None):
         self.app, self.song = app, song
@@ -212,10 +216,17 @@ class PlaybackSetup:
         self.page = "sound"
         self.message = ""
         self.speed = 1.0
+        # The cleaned score to play instead, or the file's own: `clean` says
+        # which is showing now, `_variants` keeps both once each is loaded
+        # (a song that came in already cleaned starts on its cleaned clock).
+        self.clean = bool(getattr(song, "normalized", False))
+        self._variants = {self.clean: (song, hands)}
         self.default_button = Button("Default sound", "default", font="button", key_hint="1")
         self._label_sound()
         self.sync_button = Button("Sync an audio file", "sync", font="button", key_hint="2",
                                   sub="Play a recording in time with the notes and hands")
+        self.clean_button = Button("Clean score", "clean", font="small", key_hint="C",
+                                   sub="Put the notes on a metrical grid (normalize.py)")
         self.back_button = Button("Back", "back", font="normal", key_hint="Esc")
         self.choose_button = Button("Choose audio file…", "choose", font="button", key_hint="Enter")
         self.slider = Slider("Playback speed (fixed once playing)", 0.25, SPEED_MAX, 1.0, self._set_speed,
@@ -237,6 +248,33 @@ class PlaybackSetup:
         self.speed = round(v, 2)
         self.message = ""
 
+    def _variant(self, clean):
+        """
+        (song, hands) for the score cleaned (`clean`) or as the file plays it,
+        built the first time each is asked for and kept for the way back.
+        """
+        if clean not in self._variants:
+            from hands import load_with_hands
+            what = "Cleaning" if clean else "Loading"
+            source = self.song.path or self.song
+            song, hands = run_busy(self.app.screen, self.app.fonts, f"{what} {self.song.title}…",
+                                   lambda: load_with_hands(source, normalize=clean))
+            self._variants[clean] = (song, hands)
+        return self._variants[clean]
+
+    def _toggle_clean(self):
+        """Switch between the file's timings and the cleaned score (the hands rebuilt for it)."""
+        want = not self.clean
+        try:
+            song, hands = self._variant(want)
+        except Exception as exc:
+            self.message = f"Could not clean {self.song.title}: {exc}"
+            return
+        self.clean = want and bool(getattr(song, "normalized", False))
+        self.song, self.hands = song, hands
+        self.message = ("Could not clean the score; kept the file's timings"
+                        if want and not self.clean else "")
+
     def needed(self):
         """How long the MIDI takes at the chosen speed: the shortest audio that will do."""
         return self.song.duration / self.speed
@@ -250,7 +288,8 @@ class PlaybackSetup:
         self.sync_button.rect = pygame.Rect((w - bw) // 2, y + bh + 16, bw, bh)
         self.slider.layout(pygame.Rect((w - bw) // 2, y, bw, 60))
         self.choose_button.rect = pygame.Rect((w - bw) // 2, y + 120, bw, bh)
-        self.back_button.rect = pygame.Rect((w - 160) // 2, y + 2 * bh + 60, 160, 40)
+        self.clean_button.rect = pygame.Rect((w - bw) // 2, y + 2 * bh + 28, bw, 48)
+        self.back_button.rect = pygame.Rect((w - 160) // 2, y + 2 * bh + 84, 160, 40)
 
     def handle_event(self, event):
         from main import TO_MENU
@@ -271,6 +310,9 @@ class PlaybackSetup:
                 return self._do("default")
             if self.page == "sound" and event.key == pygame.K_2:
                 return self._do("sync")
+            if self.page == "sound" and event.key == pygame.K_c:
+                self._toggle_clean()
+                return True
             if self.page == "speed" and event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 return self._do("choose")
             if self.page == "speed" and event.key in (pygame.K_LEFT, pygame.K_RIGHT):
@@ -278,7 +320,8 @@ class PlaybackSetup:
                 self.slider.value = min(SPEED_MAX, max(0.25, round(v, 2)))
                 self._set_speed(self.slider.value)
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            buttons = [self.default_button, self.sync_button] if self.page == "sound" else [self.choose_button]
+            buttons = ([self.default_button, self.sync_button, self.clean_button]
+                       if self.page == "sound" else [self.choose_button])
             for b in buttons + [self.back_button]:
                 if b.hit(event.pos):
                     return self._do(b.action)
@@ -290,6 +333,8 @@ class PlaybackSetup:
             self.app.play(self.song, hands=self.hands)
         elif action == "sync":
             self.page, self.message = "speed", ""
+        elif action == "clean":
+            self._toggle_clean()
         elif action == "back":
             if self.page == "speed":
                 self.page, self.message = "sound", ""
@@ -340,8 +385,16 @@ class PlaybackSetup:
         s.blit(img, img.get_rect(midbottom=(w // 2, top - 22)))
         mouse = pygame.mouse.get_pos()
         if self.page == "sound":
+            self.clean_button.active = self.clean
+            if self.clean:
+                self.clean_button.label = "Cleaned score"
+                self.clean_button.sub = "Playing the cleaned grid; press to go back to the file's timings"
+            else:
+                self.clean_button.label = "Clean score"
+                self.clean_button.sub = "Put the notes on a metrical grid (normalize.py)"
             self.default_button.draw(s, f, mouse)
             self.sync_button.draw(s, f, mouse)
+            self.clean_button.draw(s, f, mouse)
         else:
             box = self.slider.rect.inflate(24, 24)
             pygame.draw.rect(s, PANEL, box, border_radius=10)

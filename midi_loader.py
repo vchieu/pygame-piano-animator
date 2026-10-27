@@ -224,6 +224,11 @@ class MidiSong:
         self.path = path
         self.title = os.path.splitext(os.path.basename(path))[0] if path else "Untitled"
         self.cleanup: List[str] = []           # what load_midi's sanitizing changed
+        # Set by normalize.clean_song: whether the notes sit on the cleaned
+        # clock, and the Clean that produced them (bpm, bars, unit, the old
+        # clock's warp) so an export can write a two-staff MIDI of it.
+        self.normalized = False
+        self.clean = None
         # The key signature the file declares: how many sharps (positive) or flats
         # (negative) it holds. The staff draws it at the head of every system and
         # leaves out the accidentals the key already covers (see staff.py).
@@ -1201,7 +1206,42 @@ def save_pig(path: str, notes, fingers) -> int:
     return len(rows)
 
 
-def load_song(path: str, musicxml_hands: str = "file", musicxml_fingering: str = "fill") -> MidiSong:
+def clean_options(options=None):
+    """
+    The normalize options to clean a song with: `options` on top of the app
+    settings ("normalize_voices", "normalize_max_bpm"; see app_settings).
+    """
+    import pianist
+    out = {"voices": pianist.app_setting("normalize_voices", "single"),
+           "max_bpm": float(pianist.app_setting("normalize_max_bpm", 130.0))}
+    out.update(options or {})
+    return out
+
+
+def maybe_normalize(song, normalize=None, options=None):
+    """
+    `song` cleaned per `normalize`: None follows the "auto_normalize" app
+    setting, True/False forces it. Returns the cleaned song, or `song`
+    unchanged when the answer is no, and when cleaning fails (the failure
+    joins song.cleanup - a raw song that loads beats none at all).
+    """
+    if normalize is None:
+        import pianist
+        normalize = bool(pianist.app_setting("auto_normalize", False))
+    if not normalize or getattr(song, "normalized", False):
+        return song
+    from normalize import clean_song
+    try:
+        out = clean_song(song, **clean_options(options))
+    except Exception as exc:
+        song.cleanup.append(f"Normalize failed ({exc}); kept the file's timings")
+        print(f"normalize failed: {exc}; kept the file's timings")
+        return song
+    return out
+
+
+def load_song(path: str, musicxml_hands: str = "file", musicxml_fingering: str = "fill",
+              normalize=None, normalize_options: Optional[dict] = None) -> MidiSong:
     """
     Load any score the app opens, by extension.
 
@@ -1210,14 +1250,21 @@ def load_song(path: str, musicxml_hands: str = "file", musicxml_fingering: str =
     to a MusicXML score: `musicxml_hands` is "file" to keep the score's own
     layout or "auto" to work the hands out from the music, and
     `musicxml_fingering` is "auto", "file" or "fill" (see musicxml_loader).
+
+    `normalize` cleans the loaded song onto a metrical clock (see
+    normalize.clean_song): None follows the "auto_normalize" app setting,
+    True/False forces the answer, and `normalize_options` goes to it.
     """
     if is_pig(path):
-        return read_pig(path)
-    from musicxml_loader import is_musicxml, load_musicxml
-    if is_musicxml(path):
-        return load_musicxml(path, hands_from_file=(musicxml_hands != "auto"),
-                             fingering=musicxml_fingering)
-    return load_midi(path)
+        song = read_pig(path)
+    else:
+        from musicxml_loader import is_musicxml, load_musicxml
+        if is_musicxml(path):
+            song = load_musicxml(path, hands_from_file=(musicxml_hands != "auto"),
+                                  fingering=musicxml_fingering)
+        else:
+            song = load_midi(path)
+    return maybe_normalize(song, normalize, normalize_options)
 
 
 if __name__ == "__main__":

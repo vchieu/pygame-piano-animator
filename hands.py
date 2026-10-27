@@ -523,20 +523,28 @@ def build_hands(song, **kw):
     return out
 
 
-def load_with_hands(path_or_song, musicxml_hands="file", musicxml_fingering="fill", **kw):
+def load_with_hands(path_or_song, musicxml_hands="file", musicxml_fingering="fill",
+                    normalize=None, normalize_options=None, **kw):
     """
     (song, hands.build_hands(song, **kw)) for a MIDI/PIG/MusicXML path or a
     song; reports progress (progress.py).
 
     The two MusicXML settings (see midi_loader.load_song) are read from the
     path; `fingering_mode` goes on to the animators so "file" keeps the score's
-    fingers exactly and "fill" plans around them.
+    fingers exactly and "fill" plans around them. `normalize` (None follows the
+    "auto_normalize" app setting) and `normalize_options` go on to
+    midi_loader.load_song; a song that is already passed in is only cleaned
+    when `normalize` is True (midi_loader.maybe_normalize).
     """
     song = path_or_song
     if isinstance(path_or_song, str):
         with progress.stage(0.0, 0.5):
             song = midi_loader.load_song(path_or_song, musicxml_hands=musicxml_hands,
-                                         musicxml_fingering=musicxml_fingering)
+                                         musicxml_fingering=musicxml_fingering,
+                                         normalize=normalize,
+                                         normalize_options=normalize_options)
+    else:
+        song = midi_loader.maybe_normalize(song, normalize, normalize_options)
     kw.setdefault("fingering_mode", musicxml_fingering)
     with progress.stage(0.5 if isinstance(path_or_song, str) else 0.0, 1.0):
         return song, build_hands(song, **kw)

@@ -5,6 +5,7 @@ main.py - Hand-thesia: falling-notes player and fingering editor, built on Pygam
     python main.py song.mid         # play a file straight away (falling notes)
     python main.py song.mid --edit  # open a file in the fingering editor
     python main.py song.mid --no-sound --speed 0.75
+    python main.py song.mid --clean        # clean the score onto a metrical grid first (--normalize)
     python main.py song.mid --screenshot frame.png --at 12.5   # save one frame and exit
 
 Main menu
@@ -27,8 +28,11 @@ Falling-notes controls
 
 Playing a file first asks how it should sound (audio_sync.PlaybackSetup):
 the MIDI synth, or a recording synced to the notes - its speed chosen
-first and fixed. With a recording, its waveform runs under the top bar:
-drag it (Shift: finer) or press , / . (Shift: x10) to line it up.
+first and fixed. There the C key (or "Clean score") switches between the
+file's own timings and a cleaned score (normalize.py): the notes on a
+metrical grid, two staves. With a recording, its waveform runs under
+the top bar: drag it (Shift: finer) or press , / . (Shift: x10) to line
+it up.
 
 The editor's controls are listed in editor.py (and shown in the editor itself).
 
@@ -1587,9 +1591,12 @@ class App:
         if song:
             self._switch(PlaybackSetup(self, song, hands))
 
-    def play(self, path_or_song, audio=None, speed=None, hands=None):
-        """Play straight away: with the synth, or with a synced recording (audio_sync.SyncAudio) at `speed`."""
-        song, hands = self._load(path_or_song) if hands is None else (path_or_song, hands)
+    def play(self, path_or_song, audio=None, speed=None, hands=None, normalize=None):
+        """
+        Play straight away: with the synth, or with a synced recording (audio_sync.SyncAudio) at `speed`.
+        `normalize` (None follows the "auto_normalize" app setting) cleans the score first.
+        """
+        song, hands = self._load(path_or_song, normalize=normalize) if hands is None else (path_or_song, hands)
         if song:
             self._switch(Visualizer(self.screen, song, midi=self.midi, speed=speed or self.speed,
                                     fonts=self.fonts, audio=audio, hands=hands))
@@ -1597,10 +1604,10 @@ class App:
                 recent.add_play(song.path, soundfont=getattr(self.midi, "path", None),
                                 audio=audio.path if audio else None, speed=speed)
 
-    def edit(self, path_or_song):
+    def edit(self, path_or_song, normalize=None):
         from editor import FingeringEditor
         # the editor shows the file's fingering as it is, even where it can't be played
-        song, hands = self._load(path_or_song, repair=False)
+        song, hands = self._load(path_or_song, repair=False, normalize=normalize)
         if song:
             self._switch(FingeringEditor(self, song, hands))
             if song.path:
@@ -1841,6 +1848,8 @@ def main():
     parser.add_argument("--version", action="version", version=f"Hand-thesia {VERSION}")
     parser.add_argument("midi", nargs="?", help="MIDI file to open straight away")
     parser.add_argument("--edit", action="store_true", help="open the file in the fingering editor")
+    parser.add_argument("--clean", "--normalize", dest="clean", action="store_true",
+                        help="clean the score onto a metrical grid first (two staves, even timings)")
     parser.add_argument("--no-sound", action="store_true", help="don't play through the MIDI synth")
     parser.add_argument("--speed", type=float, default=1.0, help="playback speed (1.0 = normal)")
     parser.add_argument("--screenshot", metavar="PNG", help="render one frame to this file and exit")
@@ -1865,9 +1874,10 @@ def main():
         except Exception as exc:
             print(f"Could not open {args.audio}: {exc} - playing with the synth instead")
     if audio is not None:
-        app.play(args.midi, audio=audio, speed=min(SPEED_MAX, max(SPEED_MIN, args.audio_speed)))
+        app.play(args.midi, audio=audio, speed=min(SPEED_MAX, max(SPEED_MIN, args.audio_speed)),
+                 normalize=args.clean or None)
     elif args.midi:
-        (app.edit if args.edit else app.play)(args.midi)
+        (app.edit if args.edit else app.play)(args.midi, normalize=args.clean or None)
 
     if args.screenshot:
         if hasattr(app.mode, "seek"):

@@ -61,6 +61,28 @@ def test_setup_checks_the_length_and_syncs(screen, tmp_path):
     assert isinstance(app.mode, main.Visualizer) and app.mode.audio is None and app.mode.wave_rect.h == 0
 
 
+def test_the_setup_switches_between_the_file_and_the_clean_score(screen):
+    import main
+    from audio_sync import PlaybackSetup
+    from conftest import midi_path
+    app = main.App(screen, sound=False)
+    app.choose_playback(midi_path("demo_song.mid"))
+    setup = app.mode
+    assert isinstance(setup, PlaybackSetup) and not setup.clean       # the file's own timings
+    raw, raw_hands = setup.song, setup.hands
+    setup.render()
+    app.handle_event(key(pygame.K_c))                                 # clean the score
+    assert setup.clean and setup.song is not raw
+    assert setup.song.normalized and setup.song.clean.bpm == 100.0    # on the metrical grid
+    assert setup.hands is not raw_hands and setup.message == ""
+    setup.render()
+    assert setup.clean_button.active and setup.clean_button.label == "Cleaned score"
+    app.handle_event(key(pygame.K_c))                                 # back to the file (cached)
+    assert not setup.clean and setup.song is raw and setup.hands is raw_hands
+    setup.render()
+    assert not setup.clean_button.active and setup.clean_button.label == "Clean score"
+
+
 def test_dragging_the_waveform_moves_the_recording(screen, tmp_path):
     import main
     from audio_sync import SyncAudio

@@ -4,6 +4,9 @@ right, like a DAW) above the keyboard and the animated hands.
 
 Notes, velocities and timing are read-only here; what you edit is which hand
 plays each note and with which finger. Every note shows its finger number.
+"Clean score" (the toolbar button) is the one exception: it puts the notes on
+a metrical grid (normalize.py - a two-staff score at an even tempo), keeps
+the hands and fingers, and can be undone like any edit.
 
     Click a note                 select it (Ctrl/Shift+click adds or removes it)
     Drag on empty space          select every note in the box (Ctrl/Shift adds)
@@ -36,7 +39,8 @@ plays each note and with which finger. Every note shows its finger number.
     D                            difficulty colouring on/off (green easy .. red hard)
     G                            the selected notes are a glissando (again: they're not); "g" marks
                                  glissando notes, the pianist's own and the ones you mark
-    Ctrl+O, Ctrl+S (or Ctrl+E)   open another file, export
+    Ctrl+O, Ctrl+S (or Ctrl+E)   open another file, export (a cleaned score is
+                                 exported cleaned: a two-staff MIDI of its grid)
     Esc with nothing selected    back to the main menu
 
 Exported files are copies of the original with each note's hand and finger
@@ -63,9 +67,10 @@ from hands import (HandAnimator, build_hands, draw_hands, hands_waiting, live_po
                    settle_heap)
 from version import VERSION
 from midi_loader import (HIGHEST_PIANO_KEY, LEFT, LOWEST_PIANO_KEY, RIGHT, MidiSong,
-                         is_black_key, is_pig, note_name, save_fingered_midi,
+                         clean_options, is_black_key, is_pig, note_name, save_fingered_midi,
                          save_pig)
 from musicxml_loader import is_musicxml, save_musicxml
+from normalize import clean_song, write_midi
 
 INFO_H = 24                  # status line under the top bar
 RULER_H = 20                 # bar numbers above the roll
@@ -283,6 +288,7 @@ class FingeringEditor(Transport):
         self._rebuild_due = None           # time left before a deferred _rebuild
         self.top_buttons = [Button("Follow pitch", "follow", font="small"),
                             Button("Difficulty", "difficulty", font="small"),
+                            Button("Clean score", "clean", font="small"),
                             Button("Open…", "open", font="small"),
                             Button("Export…", "export", font="small"),
                             Button("Menu", "menu", font="small")]
@@ -334,6 +340,10 @@ class FingeringEditor(Transport):
             self.song.quarter_times = old.quarter_times
         if hasattr(old, "pickup_end"):
             self.song.pickup_end = old.pickup_end
+        # a cleaned score stays cleaned: the grid (bars, beats, tempo) is the same,
+        # and the Clean stays there for a clean export (see export)
+        self.song.normalized = getattr(old, "normalized", False)
+        self.song.clean = getattr(old, "clean", None)
         if hasattr(old, "_pedal_memo") and old._pedal_memo is not None:
             self.song._pedal_memo = old._pedal_memo
         self.song.set_pedal_mode(getattr(old, "pedal_mode", "score"))
@@ -350,6 +360,59 @@ class FingeringEditor(Transport):
         self.difficulty = None
         self.seek(self.t)
         self.dirty = True
+
+    # ----- the cleaned score ----------------------------------------------------
+    def normalize_score(self):
+        """
+        Clean the score onto a metrical grid (normalize.py): the notes snap to the pulse,
+        one voice per hand. The hands are kept and the fingers carried over to the nearest
+        note of the same hand and key; undo brings the file's own timings back.
+        """
+        self.seq = None
+        self._flush()
+        if self.song.normalized:
+            self.say("This score is already cleaned")
+            return False
+        # the fingers the editor holds, pooled per (hand, key) in start order to carry over
+        carry = {}
+        for i, n in enumerate(self.notes):
+            carry.setdefault((n.hand, n.pitch), []).append((n.start, self.finger[i], i in self.user_set))
+        try:
+            cleaned = clean_song(self.song, **clean_options())
+        except Exception as exc:
+            self.say(f"Could not clean the score: {exc}")
+            return False
+        finger, user_set = [], set()
+        for j, n in enumerate(cleaned.notes):
+            pool = carry.get((n.hand, n.pitch), [])
+            if pool:
+                k = min(range(len(pool)), key=lambda k: abs(pool[k][0] - n.start))
+                _, f, user = pool.pop(k)
+                finger.append(f)
+                if user:
+                    user_set.add(j)
+            else:
+                finger.append(None)
+        report = list(cleaned.cleanup)          # (the rebuild below makes a new song object)
+        self._push_state("Clean score")
+        self.midi.silence()
+        self.song = cleaned
+        cleaned.set_pedal_mode(pianists.app_setting("pedal_mode", "score"))
+        self.notes = list(cleaned.notes)
+        self.finger, self.user_set = finger, user_set
+        self.index = {id(n): i for i, n in enumerate(self.notes)}
+        self.selection.clear()
+        self._rebuild_due = None
+        first = self.notes[0].start if self.notes else 0.0
+        self.t = max(-LEAD_IN, first - 0.5)
+        self.paused = True
+        self.sounding = {}
+        self._fit_rows()
+        self._rebuild()                         # the hands on the new clock, with the carried fingers
+        warn = next((l for l in report if l.startswith("WARNING")), None)
+        self.say(warn or ("Clean score: the notes are on a metrical grid (%.2f bpm); "
+                          "Ctrl+Z brings the file's timings back" % self.song.clean.bpm))
+        return True
 
     # ----- difficulty -------------------------------------------------------
     def toggle_difficulty(self):
@@ -397,14 +460,39 @@ class FingeringEditor(Transport):
         del self.undo_stack[:-UNDO_LIMIT]
         self.redo_stack.clear()
 
+    def _state(self):
+        """The whole score's state (song, notes, fingers, selection): what an undo needs
+        for a change to the score itself, not to some of its notes (Clean score)."""
+        return {"song": self.song, "notes": list(self.notes), "finger": list(self.finger),
+                "user_set": set(self.user_set), "selection": set(self.selection), "t": self.t}
+
+    def _restore_state(self, s):
+        self.song = s["song"]
+        self.notes = list(s["notes"])
+        self.finger = list(s["finger"])
+        self.user_set = set(s["user_set"])
+        self.selection = set(s["selection"])
+        self.t = s["t"]
+        self.index = {id(n): i for i, n in enumerate(self.notes)}
+        self.difficulty = None
+
+    def _push_state(self, label):
+        self.undo_stack.append((label, self._state()))
+        del self.undo_stack[:-UNDO_LIMIT]
+        self.redo_stack.clear()
+
     def undo(self, redo=False):
         src, dst = (self.redo_stack, self.undo_stack) if redo else (self.undo_stack, self.redo_stack)
         if not src:
             self.say("Nothing to redo" if redo else "Nothing to undo")
             return
         label, snap = src.pop()
-        dst.append((label, self._snapshot([s[0] for s in snap])))
-        self._restore(snap)
+        if isinstance(snap, dict):          # a whole-score step (Clean score)
+            dst.append((label, self._state()))
+            self._restore_state(snap)
+        else:                               # a note-level step: [(index, hand, finger, user, gliss)]
+            dst.append((label, self._snapshot([s[0] for s in snap])))
+            self._restore(snap)
         self._rebuild()
         self.say(("Redid: " if redo else "Undid: ") + label)
 
@@ -574,7 +662,9 @@ class FingeringEditor(Transport):
             if k in (pygame.K_z, pygame.K_y):         # undo / redo, and go to that note
                 redo = k == pygame.K_y or bool(mod & pygame.KMOD_SHIFT)
                 stack = self.redo_stack if redo else self.undo_stack
-                target = stack[-1][1][0][0] if stack and stack[-1][1] else None
+                snap = stack[-1][1] if stack else None
+                # a whole-score step (dict) has no note index to go to
+                target = snap[0][0] if isinstance(snap, list) and snap else None
                 self.undo(redo=redo)
                 if self.seq and target is not None:
                     self._seq_goto(target)
@@ -606,8 +696,21 @@ class FingeringEditor(Transport):
         if self._rebuild_due is not None:
             self._rebuild()
 
-    def export(self):
+    def export(self, clean=None):
+        """
+        Save the fingering to a file. `clean` None follows the score: a cleaned one
+        (normalized) is written as the two-staff MIDI of its grid, a raw one as a copy
+        of the original file. True/False forces the answer (False on a raw score is
+        the plain export; True on a raw one asks for a clean first).
+        """
         self._flush()
+        if clean is None:
+            clean = bool(getattr(self.song, "normalized", False))
+        if clean and self.song.clean is None:
+            self.say("Clean the score first (Clean score), then it can be exported cleaned")
+            return False
+        if clean:
+            return self._export_clean()
         src_pig = is_pig(self.song.path)
         src_xml = is_musicxml(self.song.path)
         if not src_pig and (not self.song.path or not os.path.exists(self.song.path)):
@@ -636,6 +739,33 @@ class FingeringEditor(Transport):
         self.dirty = False
         missing = len(self.notes) - count
         self.say(f"Exported to {path}" + (f"  ({missing} notes couldn't be matched)" if missing > 0 else ""))
+        return True
+
+    def _export_clean(self):
+        """
+        The cleaned score as a two-staff MIDI (normalize.write_midi): a conductor
+        track, one track per hand, the current fingers written as text markers
+        ("R3"/"L1"/"Rg") so loading the file restores them. The original file is
+        not needed - the grid the editor shows is written as it is.
+        """
+        name = default_export_name(self.song.path or "song.mid").replace("fingered", "clean")
+        path = save_file_dialog(title="Export cleaned MIDI file",
+                                initialdir=os.path.dirname(os.path.abspath(self.song.path))
+                                if self.song.path else None,
+                                initialfile=name)
+        self.press = None
+        if not path:
+            return False
+        try:
+            fingers = {id(n): n.hand + ("g" if n.gliss else (str(f) if f else ""))
+                       for n, f in zip(self.notes, self.finger) if n.hand}
+            clean = replace(self.song.clean, notes=self.notes, controls=self.song.controls)
+            count = write_midi(path, clean, key_fifths=self.song.key_fifths, fingers=fingers)
+        except Exception as exc:
+            self.say(f"Export failed: {exc}")
+            return False
+        self.dirty = False
+        self.say(f"Exported the cleaned score to {path} ({count} notes)")
         return True
 
     def _open_other(self):
@@ -999,6 +1129,8 @@ class FingeringEditor(Transport):
             return self._guard(lambda: "menu")
         elif action == "difficulty":
             self.toggle_difficulty()
+        elif action == "clean":
+            self.normalize_score()
         elif action == "follow":
             self.follow_pitch = not self.follow_pitch
         return True
