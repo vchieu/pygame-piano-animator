@@ -44,9 +44,11 @@ from midi_loader import LEFT, RIGHT
 
 TO_MENU = "menu"
 FPS_CAP_MIN, FPS_CAP_MAX = 24, 240      # (as main.py's: the slider's top step past FPS_CAP_MAX is "uncapped")
-ROW_H = 56                              # each setting's row in the panel (less in a small window...
-ROW_H_MIN = 36                          # ...down to this: the panel kept above the window's centre)
-ROWS = 10
+ROW_H = 60                              # each setting's row in the panel (less in a small window...
+ROW_H_MIN = 40                          # ...down to this: the panel kept above the window's centre)
+ROWS = 12
+ROW_PAD = 10
+ROW_GAP = 8
 PICK_ROW_H = 34                         # the font list's rows...
 PICK_PREVIEW = 20                       # ...each name drawn in its own face this big
 
@@ -97,30 +99,16 @@ class SettingsScreen:
         self.bar_rect = pygame.Rect(0, 0, w, TOP_BAR_H)
         self.done.rect = pygame.Rect(w - 10 - 90, 5, 90, TOP_BAR_H - 10)
         pw = min(820, w - 40)
-        # the panel sits above the highest the keys can go (the window's centre)
-        self.row_h = rh = max(ROW_H_MIN, min(ROW_H, (h // 2 - TOP_BAR_H - 16 - 20) // ROWS))
-        self.panel_h = ROWS * rh + 20
-        self.panel = pygame.Rect((w - pw) // 2, TOP_BAR_H + 16, pw, self.panel_h)
-        self.view = pygame.Rect(self.panel.x + 8, self.panel.y + 4, self.panel.w - 16, self.panel_h - 8)
-        x, y = self.panel.x + 20, self.panel.y + 12
+        self.panel = pygame.Rect((w - pw) // 2, TOP_BAR_H + 16, pw, h - TOP_BAR_H - 32)
+        self.view = pygame.Rect(self.panel.x + 12, self.panel.y + 12, self.panel.w - 24, self.panel.h - 24)
+        x, y = self.panel.x + 20, self.panel.y + 16
         right = self.panel.right - 20
-        self.reset.rect = pygame.Rect(right - 150, y + 6, 150, 30)
-        self.keys.rect = pygame.Rect(right - 150, y + rh + 6, 150, 30)
-        self.fps.layout(pygame.Rect(right - 240, y + 2 * rh - 6, 248, 52))
-        self._text_w = right - 260 - x              # (descriptions stop short of the controls)
-        self.perf.rect = pygame.Rect(right - 150, y + 3 * rh + 6, 150, 30)
-        self.sf_default.rect = pygame.Rect(right - 110, y + 4 * rh + 6, 110, 30)
-        self.sf_browse.rect = pygame.Rect(right - 110 - 8 - 110, y + 4 * rh + 6, 110, 30)
-        self.font_default.rect = pygame.Rect(right - 110, y + 5 * rh + 6, 110, 30)
-        self.font_choose.rect = pygame.Rect(right - 110 - 8 - 110, y + 5 * rh + 6, 110, 30)
-        self.xml_hands.rect = pygame.Rect(right - 150, y + 6 * rh + 6, 150, 30)
-        self.xml_fingering.rect = pygame.Rect(right - 150, y + 7 * rh + 6, 150, 30)
-        self.pedal.rect = pygame.Rect(right - 150, y + 8 * rh + 6, 150, 30)
-        self.normalize.rect = pygame.Rect(right - 150, y + 9 * rh + 6, 150, 30)
-        self._rows = (x, y)
-        total_h = ROWS * rh
-        self.max_scroll = max(0, total_h - (self.view.h - 8))
-        self.scroll = min(max(0, self.scroll), self.max_scroll)
+        self._x, self._y = x, y
+        self._right = right
+        self._text_w = right - 280 - x
+        self.scroll = 0
+        self.max_scroll = 0
+        self._row_layouts = []
 
     # ----- the soundfont ---------------------------------------------------------
     def sound_text(self):
@@ -196,15 +184,15 @@ class SettingsScreen:
         elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
             return TO_MENU
         elif event.type == pygame.MOUSEWHEEL and self.view.collidepoint(pygame.mouse.get_pos()):
-            self.scroll -= event.y * self.row_h
+            self.scroll -= event.y * 60
             self.scroll = min(max(0, self.scroll), self.max_scroll)
             return True
         elif event.type == pygame.KEYDOWN and event.key == pygame.K_DOWN and self.view.collidepoint(pygame.mouse.get_pos()):
-            self.scroll += self.row_h
+            self.scroll += 60
             self.scroll = min(max(0, self.scroll), self.max_scroll)
             return True
         elif event.type == pygame.KEYDOWN and event.key == pygame.K_UP and self.view.collidepoint(pygame.mouse.get_pos()):
-            self.scroll -= self.row_h
+            self.scroll -= 60
             self.scroll = min(max(0, self.scroll), self.max_scroll)
             return True
         elif self.fps.handle_event(event):
@@ -273,6 +261,24 @@ class SettingsScreen:
         pass
 
     # ----- drawing ---------------------------------------------------------------
+    def _wrap(self, font, text, width):
+        if width <= 0 or not text:
+            return [text] if text else []
+        words = text.replace("\n", " ").split()
+        lines = []
+        cur = ""
+        for w in words:
+            test = (cur + " " + w).strip()
+            if font.size(test)[0] <= width:
+                cur = test
+            else:
+                if cur:
+                    lines.append(cur)
+                cur = w
+        if cur:
+            lines.append(cur)
+        return lines or [text]
+
     def render(self):
         s = self.app.screen
         f = self.app.fonts
@@ -284,7 +290,6 @@ class SettingsScreen:
         draw_felt(s, pygame.Rect(0, kb_rect.y - FELT_H, w, FELT_H))
         kb.draw(s, {60: RIGHT, 64: RIGHT, 67: RIGHT, 48: LEFT, 55: LEFT})
         draw_hand_area(s, hand_rect)
-        # where the keys' top may go: dashed lines at the highest and lowest, over everything
         for y, label in ((top, "highest"), (low, "lowest")):
             for x0 in range(0, w, 14):
                 pygame.draw.line(s, mix(ACCENT, BG, 0.45), (x0, y), (min(w, x0 + 7), y))
@@ -301,11 +306,12 @@ class SettingsScreen:
             blit_shadowed(s, f["normal"], tip, TEXT, (kb_rect.centerx - f["normal"].size(tip)[0] // 2,
                                                       kb_rect.y - FELT_H - f["normal"].get_height() - 6))
 
-        # the panel
         p = self.panel
         pygame.draw.rect(s, PANEL, p, border_radius=8)
         pygame.draw.rect(s, PANEL_EDGE, p, 1, border_radius=8)
-        x, y = self._rows
+        x, y = self._x, self._y
+        right = self._right
+        text_w = self._text_w
         where = "default" if keyboard_place() is None else f"{int(round(100 * (1 - keyboard_place())))}% up"
         rows = [("Keyboard position", f"Click and hold the keyboard, then drag it up or down. Now: {where}."),
                 ("Keyboard type", "Realistic keys, or equal keys: every key, black or white, the same width."),
@@ -321,20 +327,27 @@ class SettingsScreen:
                                    "even timings - what --clean does). Off: the file's own timings are kept.")]
         clip = s.get_clip()
         s.set_clip(self.view)
+        ty = f["normal"].get_height()
+        sy = f["small"].get_height()
+        self._row_layouts = []
+        cy = y - self.scroll
         for i, (title, desc) in enumerate(rows):
-            ry = y + i * self.row_h - self.scroll
-            if ry + self.row_h < self.view.y or ry > self.view.bottom:
-                continue
-            if i:
-                sep = ry - (8 if self.row_h >= ROW_H else 3)
-                if sep >= self.view.y and sep <= self.view.bottom:
-                    pygame.draw.line(s, mix(PANEL_EDGE, PANEL, 0.5), (x, sep), (p.right - 20, sep))
-            s.blit(f["normal"].render(title, True, TEXT), (x, ry))
-            clip2 = s.get_clip()
-            dy = f["normal"].get_height() + (2 if self.row_h >= ROW_H else 0)
-            s.set_clip(pygame.Rect(x, max(ry + dy - 2, self.view.y), max(0, self._text_w), min(self.row_h - dy - 2, self.view.bottom - (ry + dy - 2))))
-            s.blit(f["small"].render(desc, True, TEXT_DIM), (x, ry + dy))
-            s.set_clip(clip2)
+            lines = self._wrap(f["small"], desc, text_w)
+            rh = ROW_PAD + ty + ROW_GAP + sy * len(lines) + ROW_PAD
+            rtop = cy
+            if rtop + rh >= self.view.y and rtop <= self.view.bottom:
+                if i:
+                    sep = rtop + ROW_PAD // 2
+                    if sep >= self.view.y and sep <= self.view.bottom:
+                        pygame.draw.line(s, mix(PANEL_EDGE, PANEL, 0.5), (x, sep), (right, sep))
+                s.blit(f["normal"].render(title, True, TEXT), (x, rtop + ROW_PAD))
+                dx = x
+                dy = rtop + ROW_PAD + ty + ROW_GAP
+                for ln in lines:
+                    s.blit(f["small"].render(ln, True, TEXT_DIM), (dx, dy))
+                    dy += sy
+            self._row_layouts.append((rtop, rh))
+            cy += rh
         s.set_clip(clip)
         self.keys.label = "Equal keys" if key_style() == "equal" else "Realistic keys"
         self.perf.label = "Shown" if self.app.perf_overlay else "Hidden"
@@ -346,22 +359,36 @@ class SettingsScreen:
         self.pedal.label = PEDAL_MODE_LABEL[pianists.app_setting("pedal_mode", "score")]
         self.normalize.active = bool(pianists.app_setting("auto_normalize", False))
         self.normalize.label = "On" if self.normalize.active else "Off"
+        total_h = cy - (y - self.scroll)
+        self.max_scroll = max(0, total_h - self.view.h)
+        self.scroll = min(max(0, self.scroll), self.max_scroll)
         if self.picker is not None:
-            mouse = (-1, -1)                         # (no hover under the font list)
-        for b in (self.reset, self.keys, self.perf, self.sf_browse, self.sf_default, self.font_choose,
-                  self.font_default, self.xml_hands, self.xml_fingering, self.pedal, self.normalize):
-            if b is self.fps:  # handled separately
-                continue
-            # move buttons with scroll for settings in view
-            orig = b.rect.copy()
-            if b in (self.keys, self.perf, self.sf_browse, self.sf_default, self.font_choose, self.font_default,
-                     self.xml_hands, self.xml_fingering, self.pedal, self.normalize):
-                b.rect = orig.move(0, -self.scroll)
-            b.draw(s, f, mouse)
-            b.rect = orig
-        self.fps.layout(pygame.Rect(self._text_w + x, y + 2 * self.row_h - 6 - self.scroll, 248, 52))
+            mouse = (-1, -1)
+        btns = (self.reset, self.keys, self.perf, self.sf_browse, self.sf_default, self.font_choose,
+                self.font_default, self.xml_hands, self.xml_fingering, self.pedal, self.normalize)
+        order = [("keys", 1), ("perf", 2), ("sf_browse", 4), ("sf_default", 4), ("font_choose", 5), ("font_default", 5),
+                ("xml_hands", 6), ("xml_fingering", 7), ("pedal", 8), ("normalize", 9)]
+        bmap = {b.action: b for b in btns}
+        for action, idx in order:
+            if action in bmap:
+                b = bmap[action]
+                rtop, rh = self._row_layouts[idx] if idx < len(self._row_layouts) else (0, 0)
+                orig = b.rect.copy()
+                b.rect = orig.copy()
+                b.rect.centery = rtop + rh // 2
+                if action in ("sf_browse", "font_choose"):
+                    b.rect.right = right - 120
+                elif action in ("sf_default", "font_default"):
+                    b.rect.right = right
+                else:
+                    b.rect.right = right
+                b.draw(s, f, mouse)
+                b.rect = orig
+        self.fps.layout(pygame.Rect(right - 248, self._row_layouts[3][0] + self._row_layouts[3][1] // 2 - 26 if len(self._row_layouts) > 3 else y, 248, 52))
         self.fps.draw(s, f)
-
+        self.reset.rect.centery = self._row_layouts[0][0] + self._row_layouts[0][1] // 2 if self._row_layouts else y
+        self.reset.rect.right = right
+        self.reset.draw(s, f, mouse)
         pygame.draw.rect(s, BAR_BG, self.bar_rect)
         blit_shadowed(s, f["normal"], "Settings", TEXT,
                       (10, (self.bar_rect.h - f["normal"].get_height()) // 2))
