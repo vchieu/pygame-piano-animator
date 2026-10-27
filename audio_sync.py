@@ -23,6 +23,7 @@ import pygame
 
 from common import (ACCENT, BAR_BG, BG, PANEL, PANEL_EDGE, SPEED_MAX, TEXT, TEXT_DIM,
                     Button, Slider, _after_dialog, _tk_root, fmt_time, run_busy, wrap_text)
+from musicxml_loader import is_musicxml
 
 AUDIO_TYPES = [("Audio files", "*.wav *.ogg *.mp3 *.flac"), ("All files", "*.*")]
 PEAK_T = 0.005               # s, the waveform is kept as the loudest sample in each slice this long
@@ -216,6 +217,7 @@ class PlaybackSetup:
         self.page = "sound"
         self.message = ""
         self.speed = 1.0
+        self._is_xml = is_musicxml(getattr(song, "path", "") or "")
         # The cleaned score to play instead, or the file's own: `clean` says
         # which is showing now, `_variants` keeps both once each is loaded
         # (a song that came in already cleaned starts on its cleaned clock).
@@ -225,8 +227,12 @@ class PlaybackSetup:
         self._label_sound()
         self.sync_button = Button("Sync an audio file", "sync", font="button", key_hint="2",
                                   sub="Play a recording in time with the notes and hands")
-        self.clean_button = Button("Clean score", "clean", font="small", key_hint="C",
-                                   sub="Put the notes on a metrical grid (normalize.py)")
+        if self._is_xml:
+            self.clean_button = Button("Clean notation", "clean", font="small", key_hint="C",
+                                       sub="Tidy voices, ties and layout into clean 2-staff notation")
+        else:
+            self.clean_button = Button("Clean score", "clean", font="small", key_hint="C",
+                                       sub="Put the notes on a metrical grid (normalize.py)")
         self.back_button = Button("Back", "back", font="normal", key_hint="Esc")
         self.choose_button = Button("Choose audio file…", "choose", font="button", key_hint="Enter")
         self.slider = Slider("Playback speed (fixed once playing)", 0.25, SPEED_MAX, 1.0, self._set_speed,
@@ -387,11 +393,19 @@ class PlaybackSetup:
         if self.page == "sound":
             self.clean_button.active = self.clean
             if self.clean:
-                self.clean_button.label = "Cleaned score"
-                self.clean_button.sub = "Playing the cleaned grid; press to go back to the file's timings"
+                if self._is_xml:
+                    self.clean_button.label = "Cleaned notation"
+                    self.clean_button.sub = "Playing the cleaned notation; press to go back to the original"
+                else:
+                    self.clean_button.label = "Cleaned score"
+                    self.clean_button.sub = "Playing the cleaned grid; press to go back to the file's timings"
             else:
-                self.clean_button.label = "Clean score"
-                self.clean_button.sub = "Put the notes on a metrical grid (normalize.py)"
+                if self._is_xml:
+                    self.clean_button.label = "Clean notation"
+                    self.clean_button.sub = "Tidy voices, ties and layout into clean 2-staff notation"
+                else:
+                    self.clean_button.label = "Clean score"
+                    self.clean_button.sub = "Put the notes on a metrical grid (normalize.py)"
             self.default_button.draw(s, f, mouse)
             self.sync_button.draw(s, f, mouse)
             self.clean_button.draw(s, f, mouse)

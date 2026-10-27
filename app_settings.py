@@ -324,8 +324,8 @@ class SettingsScreen:
                 ("MusicXML fingering", "Auto: plan every finger. From the file: keep the score's printed "
                                        "fingers. Fill in: keep them, plan what the score leaves blank."),
                 ("Pedal", "From the score: keep the file's pedal. Auto by harmony: pedal follows the left hand's chords."),
-                ("Auto Normalize", "On: a song is cleaned onto a metrical grid when it's opened (two staves, "
-                                   "even timings - what --clean does). Off: the file's own timings are kept.")]
+                ("Auto clean", "On: clean MIDI onto a metrical grid, or tidy MusicXML into clean 2-staff "
+                                "notation on open. Off: keep the file's original timing/layout.")]
         clip = s.get_clip()
         s.set_clip(self.view)
         for i, (title, desc) in enumerate(rows):

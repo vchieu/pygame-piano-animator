@@ -1288,8 +1288,8 @@ def load_song(path: str, musicxml_hands: str = "file", musicxml_fingering: str =
                                   fingering=musicxml_fingering)
         else:
             song = load_midi(path)
-    if normalize is None and not path.lower().endswith((".mid", ".midi", ".kar")):
-        normalize = False            # (auto_normalize is for played-in MIDI; ask for the rest)
+    if normalize is None and not path.lower().endswith((".mid", ".midi", ".kar", ".xml", ".musicxml", ".mxl")):
+        normalize = False            # (auto_normalize for played-in MIDI and MusicXML; ask for the rest)
     return maybe_normalize(song, normalize, normalize_options)
 
 
