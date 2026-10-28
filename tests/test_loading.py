@@ -111,3 +111,20 @@ def test_midi_triplet_detection():
     assert [n.tuplet_type for n in m51] == ["start", None, "stop"]
     assert [n.printed for n in m51] == ["quarter", "quarter", "quarter"]
 
+
+def test_spell_with_key_octave_calculation():
+    """spell_with_key matches diatonic_step octaves for flat and sharp key signatures."""
+    import midi_loader
+    # Pitch 44 is Ab2 (or G#2). Octave is 2 (2 * 7 + 5 = 19).
+    step, alter = midi_loader.spell_with_key(44, -3)
+    assert step == 19 and alter == -1
+
+    # Pitch 70 is Bb4. Octave is 4 (4 * 7 + 6 = 34).
+    step, alter = midi_loader.spell_with_key(70, -1)
+    assert step == 34 and alter == -1
+
+    # Pitch 60 is C4. Octave is 4 (4 * 7 + 0 = 28).
+    step, alter = midi_loader.spell_with_key(60, 0)
+    assert step == 28 and alter == 0
+
+

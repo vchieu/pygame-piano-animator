@@ -91,7 +91,8 @@ def spell_with_key(pitch: int, fifths: int) -> Tuple[int, int]:
     what this has always drawn - unless the key says otherwise: in Bb major the black
     keys the key flattens (Bb, Eb) are written as flats, the way the key reads them.
     """
-    octave, cls = divmod(pitch, 12)
+    octave = pitch // 12 - 1
+    cls = pitch % 12
     step_in_oct, sharp = PITCH_MAP[cls]
     if not sharp or not fifths:
         return octave * 7 + step_in_oct, sharp
