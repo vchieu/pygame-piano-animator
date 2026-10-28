@@ -639,8 +639,12 @@ fast removes about a third of them: most are leaps of a few tens of milliseconds
   - **What the key alters.** `key_alterations(fifths)` builds the letter → alteration map
     in the order of sharps (F C G D A E B) or of flats (B E A D G C F); it alters that
     letter in **every octave**, as an engraver's does. `spell_with_key` also respells a MIDI
-    pitch the way the key would write it - a flat key reads 70 as B♭, not A♯ - while a sharp
-    key keeps the sharp spelling the app has always used.
+    pitch the way the key would write it. A black key is the sharp of the letter below it and
+    the flat of the letter above, and the function picks the spelling the key already alters,
+    so the note needs no sign of its own: in E♭ major (B♭ E♭ A♭) pitch 58 is written B♭3 on
+    the B line, not A♯3 with a printed sharp; in A♭ major (which adds D♭) pitch 63 is E♭, not
+    D♯. When the key alters neither letter the app keeps the sharp spelling it has always
+    used (a chromatic C♯ in E♭ major), and a sharp key keeps its sharps.
   - **Which notes still print a sign** (`staff.plan_accidentals`): a note prints one when
     its written alteration differs from the **state** of its step, i.e. from the key
     signature, or from an accidental already printed for that step and octave in this

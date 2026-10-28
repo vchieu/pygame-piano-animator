@@ -128,3 +128,15 @@ def test_spell_with_key_octave_calculation():
     assert step == 28 and alter == 0
 
 
+def test_a_flat_key_spells_its_black_keys_as_the_flats_it_holds():
+    import midi_loader
+    # Eb major holds Bb, Eb and Ab. Pitch 58 is the Bb the key calls for - B3 with a
+    # flat - not an A#3 that then needs a sharp beside it.
+    assert midi_loader.spell_with_key(58, -3) == (3 * 7 + 6, -1)
+    # Ab major adds Db, so the D# and C# pitches are written Eb and Db.
+    assert midi_loader.spell_with_key(63, -4) == (4 * 7 + 2, -1)
+    assert midi_loader.spell_with_key(61, -4) == (4 * 7 + 1, -1)
+    # A chromatic note the key does not alter keeps the sharp reading it always had.
+    assert midi_loader.spell_with_key(61, -3) == (4 * 7 + 0, 1)
+
+

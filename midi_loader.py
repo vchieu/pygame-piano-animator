@@ -88,8 +88,12 @@ def spell_with_key(pitch: int, fifths: int) -> Tuple[int, int]:
     How a pitch is written in a key: the (diatonic step, alteration) the staff draws.
 
     A MIDI file carries no spelling of its own, so a black key is read as a sharp -
-    what this has always drawn - unless the key says otherwise: in Bb major the black
-    keys the key flattens (Bb, Eb) are written as flats, the way the key reads them.
+    what this has always drawn - unless the key says otherwise. A black key is the
+    sharp of the letter below it and the flat of the letter above it; the key picks
+    the spelling it already alters, so the note needs no accidental of its own: in
+    Eb major (Bb, Eb, Ab) the A# pitch is written Bb, and the G# pitch Ab. When the
+    key alters neither letter the old sharp reading stays (a chromatic C# in Eb
+    major, say).
     """
     octave = pitch // 12 - 1
     cls = pitch % 12
@@ -97,11 +101,11 @@ def spell_with_key(pitch: int, fifths: int) -> Tuple[int, int]:
     if not sharp or not fifths:
         return octave * 7 + step_in_oct, sharp
     alt = key_alterations(fifths)
-    if alt.get(step_in_oct):
+    if alt.get(step_in_oct) == 1:
         return octave * 7 + step_in_oct, sharp      # the key sharpens this letter
     flat_letter = (step_in_oct + 1) % 7
     if alt.get(flat_letter) == -1:
-        return octave * 7 + flat_letter, -1         # the key flattens the letter below
+        return octave * 7 + flat_letter, -1         # the key flattens the letter above
     return octave * 7 + step_in_oct, sharp
 
 
