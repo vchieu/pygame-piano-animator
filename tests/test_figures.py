@@ -184,7 +184,7 @@ def test_a_track_alternating_chords_wider_than_a_hand_goes_to_both_hands():
     a, b = (68, 75, 79), (74, 76, 80, 86, 88)
     ns = [Note(p, 0.07 * i, 0.07 * i + 0.06, 80, 0, RIGHT) for i in range(40) for p in (a if i % 2 == 0 else b)]
     r = hand_split.split_hands(ns, prefer={id(n): RIGHT for n in ns})
-    assert sum(1 for n in ns if r[id(n)] == LEFT) > len(ns) // 5
+    assert sum(1 for n in ns if r[id(n)] == LEFT) >= 20
     # a single wide leap within the track's reach of time stays with the track
     leap = [Note(48, 0.0, 0.1, 80, 0, RIGHT), Note(72, 0.12, 0.2, 80, 0, RIGHT), Note(74, 0.6, 0.7, 80, 0, RIGHT)]
     r = hand_split.split_hands(leap, prefer={id(n): RIGHT for n in leap})

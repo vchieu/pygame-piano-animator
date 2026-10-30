@@ -1202,6 +1202,7 @@ def plan_with_slips(notes, vpitch=None, **kw):
     plan_fingering for one hand's notes, the slips (find_slips) left out of the
     plan and given the finger of the note they slip from. kw: plan_fingering's.
     """
+    notes = [n for n in notes if not getattr(n, "is_rest", False)]
     slips = find_slips(notes, vpitch, given=lambda n: getattr(n, "finger", None))
     rest = [n for n in notes if id(n) not in slips]
     out = plan_fingering(group_notes(rest, vpitch=vpitch), vpitch, **kw)

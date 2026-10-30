@@ -186,7 +186,7 @@ class PedalMeasure:
 class _Index:
     """Notes sorted by start, with bisect windows for fast range queries."""
     def __init__(self, notes: List[Note]):
-        self.notes = sorted(notes, key=lambda n: n.start)
+        self.notes = sorted([n for n in notes if not getattr(n, "is_rest", False)], key=lambda n: n.start)
         self.starts = [n.start for n in self.notes]
         self.max_dur = max((n.duration for n in self.notes), default=0.0)
 
@@ -336,12 +336,13 @@ def lh_notes(notes: List[Note]) -> List[Note]:
     """
     lh = [n for n in notes
           if not getattr(n, "grace", False)
+          and not getattr(n, "is_rest", False)
           and n.duration > 0.0
           and is_lh_note(n)]
     if lh:
         return lh
     # If no left-hand / low-pitch notes exist in score, return all notes
-    return [n for n in notes if not getattr(n, "grace", False) and n.duration > 0.0]
+    return [n for n in notes if not getattr(n, "grace", False) and not getattr(n, "is_rest", False) and n.duration > 0.0]
 
 
 def harmony_signature(notes, t0: float, win: float = 1.0, tol: float = 0.1,

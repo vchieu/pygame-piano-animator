@@ -761,6 +761,26 @@ def _read_measure(measure, tempo: _Tempo, start_div: int, at: float,
             prev_onset = onset
             cursor += dur
         if _kid(c, "rest") is not None:
+            rest_el = _kid(c, "rest")
+            display_step_el = _kid(rest_el, "display-step")
+            display_oct_el = _kid(rest_el, "display-octave")
+            pitch = 60
+            step_val = None
+            if display_step_el is not None and display_oct_el is not None:
+                d_step = (_text(rest_el, "display-step") or "").upper()
+                d_oct = _int(rest_el, "display-octave")
+                if d_step in STEP_SEMITONES and d_oct is not None:
+                    pitch = (d_oct + 1) * 12 + STEP_SEMITONES[d_step]
+                    step_val = d_oct * 7 + "CDEFGAB".index(d_step)
+            staff = _int(c, "staff")
+            note_hand = _note_hand(staff if staff_from_file else None, hand)
+            start = at + tempo.sec(start_div + onset) - origin
+            end = start + max(0.0, tempo.sec(start_div + onset + dur)
+                                   - tempo.sec(start_div + onset))
+            n = Note(pitch=pitch, start=start, end=end, velocity=0, track=part_index, hand=note_hand,
+                     printed=_printed_value(c), voice=_text(c, "voice") or None, is_rest=True,
+                     step=step_val)
+            notes.append(n)
             continue
         pitch_el = _kid(c, "pitch")
         if pitch_el is None:

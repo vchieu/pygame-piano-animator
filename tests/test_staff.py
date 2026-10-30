@@ -2332,3 +2332,24 @@ def test_the_notes_of_a_key_signature_score_print_no_accidental(screen):
     assert printed, "the test song should draw its notes"
     assert all(a is None for a in printed), f"the key should cover them all, got {printed}"
 
+
+def test_staff_draws_rests(screen):
+    rest_note = Note(60, 0.0, 0.5, 0, 0, RIGHT, is_rest=True, printed="quarter")
+    song = _KeySong([rest_note], key_fifths=0)
+    rect = pygame.Rect(0, 0, 1200, 140)
+    drawn_rests = []
+    real_draw_rest = notation.draw_rest
+
+    def spy_rest(*args, **kwargs):
+        drawn_rests.append(args)
+        return real_draw_rest(*args, **kwargs)
+
+    notation.draw_rest = spy_rest
+    staff.notation.draw_rest = spy_rest
+    try:
+        StaffView(song).draw(screen, rect, 0.0)
+    finally:
+        notation.draw_rest = real_draw_rest
+
+    assert len(drawn_rests) > 0
+

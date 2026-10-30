@@ -175,6 +175,13 @@ GLYPHS = {
     "tuplet7": 0xE887,
     "tuplet8": 0xE888,
     "tuplet9": 0xE889,
+    # SMuFL rest glyphs (U+E4E3 - U+E4E8)
+    "restWhole": 0xE4E3,
+    "restHalf": 0xE4E4,
+    "restQuarter": 0xE4E5,
+    "rest8th": 0xE4E6,
+    "rest16th": 0xE4E7,
+    "rest32nd": 0xE4E8,
 }
 # A stem's flags, by how many the note has: the 16th-note glyph carries both of
 # them, as in MuseScore, where a stem has a single Hook (hook.cpp:symIdForHookIndex).
@@ -629,6 +636,63 @@ def draw_staff_note(surf, x, y, sp, shape, color, stem_up, sounding=False,
             _flag(surf, sp, ox + ax * sp, stem[1], flags, stem_up, color)
         elif grace and not beamed:
             _stem_slash(surf, sp, ox + ax * sp, stem[1], stem_up, color)
+
+
+REST_MAPPING = {
+    "whole": ("restWhole", -1.0),
+    "half": ("restHalf", 0.0),
+    "quarter": ("restQuarter", 0.0),
+    "eighth": ("rest8th", 0.0),
+    "8th": ("rest8th", 0.0),
+    "sixteenth": ("rest16th", 0.0),
+    "16th": ("rest16th", 0.0),
+    "thirty_second": ("rest32nd", 0.0),
+    "32nd": ("rest32nd", 0.0),
+}
+
+
+def draw_rest(surf, x, mid_y, sp, rest_type, color):
+    """
+    A rest symbol on the staff (whole, half, quarter, eighth, sixteenth, etc.).
+    `mid_y` is the staff's middle line (line 3).
+    """
+    base_type = str(rest_type).lower().replace("-dotted", "").replace("_dotted", "").replace(".dot", "")
+    dotted = "dotted" in str(rest_type).lower() or str(rest_type).endswith(".dot")
+    glyph_name, y_offset_sp = REST_MAPPING.get(base_type, ("restQuarter", 0.0))
+    rest_y = mid_y + y_offset_sp * sp
+
+    g = glyph(glyph_name, sp, color)
+    if g is not None:
+        g.draw(surf, x - g.ox, rest_y)
+        if dotted:
+            _dots(surf, sp, x + sp * 0.8, rest_y, 1, color)
+    else:
+        _fallback_rest(surf, x, mid_y, sp, base_type, color, dotted=dotted)
+
+
+def _fallback_rest(surf, x, mid_y, sp, base_type, color, dotted=False):
+    """Fallback rendering for rests when Leland font is not available."""
+    w = max(2, round(sp * 0.8))
+    h = max(2, round(sp * 0.4))
+    if base_type == "whole":
+        rect = pygame.Rect(round(x - w / 2), round(mid_y - sp), w, h)
+        pygame.draw.rect(surf, color, rect)
+    elif base_type == "half":
+        rect = pygame.Rect(round(x - w / 2), round(mid_y - h), w, h)
+        pygame.draw.rect(surf, color, rect)
+    elif base_type in ("eighth", "8th", "sixteenth", "16th", "32nd", "thirty_second"):
+        pygame.draw.line(surf, color, (round(x - sp * 0.3), round(mid_y - sp * 0.5)),
+                                      (round(x + sp * 0.3), round(mid_y + sp * 0.5)), max(1, round(sp * 0.15)))
+        pygame.draw.circle(surf, color, (round(x + sp * 0.2), round(mid_y)), max(1, round(sp * 0.2)))
+    else:
+        pygame.draw.line(surf, color, (round(x - sp * 0.3), round(mid_y - sp * 0.4)),
+                                      (round(x + sp * 0.3), round(mid_y - sp * 0.1)), max(1, round(sp * 0.15)))
+        pygame.draw.line(surf, color, (round(x + sp * 0.3), round(mid_y - sp * 0.1)),
+                                      (round(x - sp * 0.3), round(mid_y + sp * 0.1)), max(1, round(sp * 0.15)))
+        pygame.draw.line(surf, color, (round(x - sp * 0.3), round(mid_y + sp * 0.1)),
+                                      (round(x + sp * 0.2), round(mid_y + sp * 0.4)), max(1, round(sp * 0.15)))
+    if dotted:
+        _dots(surf, sp, x + w / 2 + sp * 0.3, mid_y, 1, color)
 
 
 def _fallback_staff_note(surf, x, y, sp, shape, color, stem_up, stem, sharp, on_line,

@@ -303,7 +303,7 @@ class FingeringEditor(Transport):
         self.song = song
         if song:
             song.set_pedal_mode(pianists.app_setting("pedal_mode", "score"))
-        self.notes = list(song.notes)
+        self.notes = [n for n in song.notes if not n.is_rest]
         # the editor shows the file's fingering as it is, even where it can't be played
         planned = hands if hands is not None else build_hands(song, repair=False)
         self.finger = [planned[n.hand].finger_for(n) if n.hand in planned else None

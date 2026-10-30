@@ -163,6 +163,8 @@ class Note:
     # two notes of the same voice, so this is what pairs them when the same pitch
     # sounds in more than one voice.
     voice: Optional[str] = None
+    # True when this note object represents a rest symbol instead of a played note.
+    is_rest: bool = False
 
     @property
     def duration(self) -> float:
@@ -271,13 +273,13 @@ class MidiSong:
         """Notes that overlap the time window [t0, t1), in start order."""
         lo = bisect.bisect_left(self._starts, t0 - self._max_duration)
         hi = bisect.bisect_left(self._starts, t1)
-        return [n for n in self.notes[lo:hi] if n.end > t0]
+        return [n for n in self.notes[lo:hi] if n.end > t0 and not n.is_rest]
 
     def active_notes(self, t: float) -> List[Note]:
         """Notes sounding at time t (start <= t < end)."""
         lo = bisect.bisect_left(self._starts, t - self._max_duration)
         hi = bisect.bisect_right(self._starts, t)
-        return [n for n in self.notes[lo:hi] if n.end > t]
+        return [n for n in self.notes[lo:hi] if n.end > t and not n.is_rest]
 
     def controls_between(self, t0: float, t1: float) -> list:
         """Pedal events with t0 < time <= t1."""
@@ -559,22 +561,44 @@ def read_key_signature(path: str) -> Optional[int]:
 def read_time_signature(path: str) -> Optional[Tuple[int, int]]:
     """
     The time signature a Standard MIDI File declares, or None when it declares none.
-    The `FF 58` meta event carries (nn, dd, cc, bb).
+    The `FF 58` meta event carries (nn, dd, cc, bb). If multiple time signatures are
+    declared (e.g. an initial pickup measure followed by the piece's main time signature),
+    returns the dominant time signature that covers the piece.
     """
     try:
         _, _, tracks = _smf_tracks(path)
     except Exception:
         return None
-    # Look in conductor/first track first
+    ts_events = []
     for events in tracks.values():
-        for _t, kind, p in events:
+        for t, kind, p in events:
             if kind == 'meta' and p[0] == 0x58 and len(p[1]) >= 2:
                 nn = p[1][0]
                 dd_exp = p[1][1]
                 dd = 2 ** dd_exp if dd_exp >= 0 else 4
                 if nn > 0 and dd > 0:
-                    return (int(nn), int(dd))
-    return None
+                    ts_events.append((t, (int(nn), int(dd))))
+    if not ts_events:
+        return None
+    ts_events.sort(key=lambda x: x[0])
+    if len(ts_events) == 1:
+        return ts_events[0][1]
+
+    # Find the time signature with the longest tick duration
+    max_tick = 0
+    for events in tracks.values():
+        for t, kind, p in events:
+            if t > max_tick:
+                max_tick = t
+
+    durations = {}
+    for i in range(len(ts_events)):
+        t_curr, ts = ts_events[i]
+        t_next = ts_events[i + 1][0] if i + 1 < len(ts_events) else max_tick
+        dur = max(0, t_next - t_curr)
+        durations[ts] = durations.get(ts, 0) + dur
+
+    return max(durations.items(), key=lambda x: x[1])[0]
 
 
 def _tempo_map(header, tracks):
@@ -885,9 +909,11 @@ def sanitize_notes(notes, min_duration: float = 0.05):
     if t0 < 0:
         ok = [replace(n, start=n.start - t0, end=n.end - t0) for n in ok]
         report.append("shifted everything %.3f s later (the file started before 0)" % -t0)
+    rests = [n for n in ok if n.is_rest]
+    played = [n for n in ok if not n.is_rest]
     fixed = 0
     out = []
-    for n in ok:
+    for n in played:
         v, p = min(127, max(1, int(n.velocity))), _fit_to_piano(int(n.pitch))
         if (v, p) != (n.velocity, n.pitch):
             fixed += 1
@@ -929,6 +955,8 @@ def sanitize_notes(notes, min_duration: float = 0.05):
         report.append("merged %d doubled note(s)" % dup)
     if cut:
         report.append("ended %d note(s) where their key is struck again" % cut)
+    result += rests
+    result.sort(key=lambda n: (n.start, n.pitch))
     return result, report
 
 

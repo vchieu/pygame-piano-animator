@@ -493,3 +493,13 @@ def test_load_song_dispatches_by_extension(tmp_path):
     p = one_part(tmp_path, measure(body))
     song = load_song(p)
     assert [n.pitch for n in song.notes] == [60, 62]
+
+
+def test_musicxml_rest_parsing(tmp_path):
+    body = note("C", 4, 4, "quarter") + note(rest=True, dur=4, type_="quarter")
+    p = one_part(tmp_path, measure(body))
+    song = load_musicxml(p)
+    assert len(song.notes) == 2
+    assert not song.notes[0].is_rest
+    assert song.notes[1].is_rest
+    assert song.notes[1].printed == "quarter"

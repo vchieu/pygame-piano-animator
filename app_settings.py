@@ -187,7 +187,7 @@ class SettingsScreen:
         if not btn.enabled:
             return False
         rect = btn.rect.move(0, -self.scroll)
-        return self.view.collidepoint(pos) and rect.collidepoint(pos)
+        return rect.collidepoint(pos) or btn.hit(pos)
 
     # ----- input -----------------------------------------------------------------
     def handle_event(self, event):

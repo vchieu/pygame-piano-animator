@@ -265,6 +265,8 @@ def plan_accidentals(notes: List[Note], measure_starts: List[float],
     bounds = sorted(measure_starts)
     measure = None
     for n in sorted(notes, key=lambda n: (n.start, n.pitch)):
+        if n.is_rest:
+            continue
         step, alter = written_step(n)
         where = bisect.bisect_right(bounds, n.start + 1e-6) - 1
         if where != measure:
@@ -445,29 +447,25 @@ def build_systems(song, target_dur: float = 10.0) -> List[StaffSystem]:
     return systems
 
 
-def split_at_bar_lines(notes: List[Note], bar_times: List[float]) -> Tuple[List[Note], List[Tuple[Note, Note]]]:
+def split_at_bar_lines(notes: List[Note], bar_times: List[float], beat_times: Optional[List[float]] = None) -> Tuple[List[Note], List[Tuple[Note, Note]]]:
     """
-    Split the notes that run past a bar line, and pair the pieces that are tied.
+    Split the notes that run past a bar line or beat boundary, and pair the pieces that are tied.
 
-    An engraver never writes one note across a bar line: the note is cut at the bar,
-    the piece that ends the measure and the piece that opens the next one are written
-    out separately and joined by a tie, so no measure ever shows more beats of ink than
-    its time signature holds. The split is what makes that true here - `build_systems`
-    used to drop a crossing note whole into the measure holding its onset, hence the
-    half note in `50-nam-ve-sau`'s measure 2 reaching 1.87 beats into measure 3.
+    An engraver never writes one note across a bar line or across a beat boundary when
+    starting off-beat: the note is cut at the bar/beat, the piece that ends the subdivision
+    and the piece that opens the next beat are written out separately and joined by a tie.
 
-    Each note becomes the note itself when no bar time lies strictly inside it, or one
+    Each note becomes the note itself when no cut time lies strictly inside it, or one
     piece per span `[start, b1], [b1, b2], ..., [bk, end]` when it does. The pieces are
-    `Note`s too - same frozen dataclass, clipped start/end, everything else carried over
-    onto the first piece - so every consumer downstream (`group_chords`, `find_grace_runs`,
-    `compute_notes_info`, the beams, the draw loop) keeps working on them unchanged. The
-    last piece may be shorter than a printed value; its shape is worked out from its own
-    duration, which is what a tied piece of a long note normally is anyway.
+    `Note`s too - same frozen dataclass, clipped start/end, everything else carried over.
 
     Returns `(pieces, ties)`, `ties` pairing each `(left, right)` of pieces that must be
-    tied - the right piece starts exactly where the left one ends, on its own bar time.
+    tied - the right piece starts exactly where the left one ends.
     """
-    bars = sorted({float(b) for b in (bar_times or [])})
+    cuts_set = {float(b) for b in (bar_times or [])}
+    if beat_times:
+        cuts_set.update(float(b) for b in beat_times)
+    bars = sorted(cuts_set)
     pieces: List[Note] = []
     ties: List[Tuple[Note, Note]] = []
     for n in notes:
@@ -507,7 +505,7 @@ def split_at_bar_lines(notes: List[Note], bar_times: List[float]) -> Tuple[List[
                          # is written the same way - a Db stays a Db after the bar line.
                          step=n.step,
                          alter=n.alter,
-                         printed=n.printed if i == 0 else None,
+                         printed=n.printed if len(bounds) == 2 else None,
                          # so is the tuplet the note is written in: the bracket spans
                          # whichever pieces of it this system can see
                          tuplet_num=n.tuplet_num,
@@ -913,6 +911,8 @@ def group_chords(sorted_notes: List[Note], beat_len: float) -> List[List[Note]]:
 
 def is_beamable(sub: List[Note], beat_of) -> bool:
     """True when a chord is short enough to be joined to its neighbours by a beam."""
+    if any(n.is_rest for n in sub):
+        return False
     return printed_value(sub[0], sub[0].duration, beat_of(sub[0].start)) in (
         EIGHTH, DOTTED_EIGHTH, SIXTEENTH)
 
@@ -1249,12 +1249,20 @@ def drawn_steps(clusters: List[List[Note]], sys_notes: List[Note]) -> dict:
     for cluster in clusters:
         for n in cluster:
             clef = clef_for_note(n)
-            step_draw, oct_shift, label = get_octave_transposition(n, clef)
+            if n.is_rest:
+                step_draw = TREBLE_MID_STEP if clef == CLEF_TREBLE else BASS_MID_STEP
+                if getattr(n, "step", None) is not None:
+                    step_draw = n.step
+                oct_shift, label = 0, ""
+            else:
+                step_draw, oct_shift, label = get_octave_transposition(n, clef)
             info[id(n)] = {
                 "clef": clef,
                 "step_draw": step_draw,
                 "octave_shift": oct_shift,
                 "label": label,
+                "is_rest": n.is_rest,
+                "rest_type": n.printed or printed_value(n, n.duration, 0.5),
             }
 
     # Resolve phrase-level octave transpositions so intermediate notes under 8va/8vb
@@ -2170,7 +2178,8 @@ class StaffView:
             )
 
         bar_times = getattr(self.song, "bar_times", [])
-        sys_pieces, _ties = split_at_bar_lines(sys.notes, bar_times)
+        beat_times = getattr(self.song, "beat_times", None)
+        sys_pieces, _ties = split_at_bar_lines(sys.notes, bar_times, beat_times)
         # only the pieces that open in this system are drawn on it (see draw)
         kept = [p for p in sys_pieces if sys.start_t - 1e-9 <= p.start < sys.end_t - 1e-9]
         beat_len = get_beat_duration(self.song)
@@ -2336,7 +2345,11 @@ class StaffView:
                     # so no measure shows more ink than it holds. The split happens once, here:
                     # everything below - layout, beams, brackets, the draw loop - works on the
                     # pieces, never on the raw notes. `sys_ties` pairs the pieces to join.
-                    sys_pieces, sys_ties = split_at_bar_lines(sys.notes, self.song.bar_times)
+                    sys_pieces, sys_ties = split_at_bar_lines(
+                        sys.notes,
+                        getattr(self.song, "bar_times", []),
+                        getattr(self.song, "beat_times", None),
+                    )
                     if getattr(self.song, "xml_ties", None):
                         # The score's own ties. Each side is resolved on its own: when a
                         # tie runs over a system break only one half is on this system,
@@ -2630,6 +2643,11 @@ class StaffView:
                         # note stays on its line (staff.py's layout gave it its place).
                         is_grace = n_info.get("grace", False)
                         g_s = s * notation.GRACE_MAG if is_grace else s
+
+                        if n.is_rest:
+                            notation.draw_rest(staff_surf, nx, ny, g_s, n_info.get("rest_type", "quarter"), hand_col)
+                            continue
+
                         nh_g = round(g_s * 0.52)
 
                         b_len = get_beat_duration(self.song, n.start)

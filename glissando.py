@@ -70,7 +70,7 @@ def is_string(notes, max_skip=0):
 
 def _ordered(notes):
     """The hand's notes in playing order, notes struck within SAME_T ordered the way the music around them goes."""
-    ns = sorted(notes, key=lambda n: (n.start, n.pitch))
+    ns = sorted([n for n in notes if not getattr(n, "is_rest", False)], key=lambda n: (n.start, n.pitch))
     out, i = [], 0
     while i < len(ns):
         j = i + 1
