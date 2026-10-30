@@ -395,7 +395,7 @@ def test_volta_repeats_are_played(tmp_path):
                  barlines='<barline location="right"><repeat direction="backward" times="2"/>'
                           '<ending number="1" type="start"/></barline>')
     m3 = measure(note("E", 4, 4, "quarter") * 4, number=3,
-                 barlines='<barline location="left"><ending number="1" type="discontinue"/></barline>')
+                 barlines='<barline location="left"><ending number="2" type="start"/></barline>')
     p = one_part(tmp_path, m1 + m2 + m3)
     song = load_musicxml(p)
     # 4 played bars of 4 quarters, default 120 bpm: 2 s a bar, 8 s total
@@ -425,9 +425,36 @@ def test_play_order_directly():
     # the same with a 1st ending on bar 2 and a 2nd on bar 3: 1, 2, 1, 3
     e1 = '<barline location="right"><repeat direction="backward" times="2"/>' \
          '<ending number="1" type="start"/></barline>'
-    e2 = '<barline location="left"><ending number="1" type="discontinue"/></barline>'
+    e2 = '<barline location="left"><ending number="2" type="start"/></barline>'
     measures2 = [mk(1, fwd), mk(2, e1), mk(3, e2)]
     assert play_order(measures2, []) == [0, 1, 0, 2]
+
+
+def test_multi_measure_volta_and_real_file():
+    from musicxml_loader import _Measure, read_root, _kids
+    import xml.etree.ElementTree as ET
+    def mk(num, bl=""):
+        return _Measure(ET.fromstring(f'<measure number="{num}">{bl}</measure>'))
+    fwd = '<barline location="left"><repeat direction="forward"/></barline>'
+    e1_start = '<barline location="right"><ending number="1" type="start"/></barline>'
+    e1_stop = '<barline location="right"><repeat direction="backward" times="2"/><ending number="1" type="stop"/></barline>'
+    e2 = '<barline location="left"><ending number="2" type="start"/></barline>'
+    # Bars: 0(fwd), 1, 2(e1_start), 3(intermediate ending 1), 4(e1_stop), 5(e2)
+    measures = [mk(0, fwd), mk(1), mk(2, e1_start), mk(3), mk(4, e1_stop), mk(5, e2)]
+    order = play_order(measures, [])
+    # Pass 1: 0, 1, 2, 3, 4 (with ending 1) -> repeat back to 0
+    # Pass 2: 0, 1, skip 2, 3, 4, then play 5 (ending 2)
+    assert order == [0, 1, 2, 3, 4, 0, 1, 5]
+
+    path = r"D:\piano\Anh nang cua anh\Anh_Nang_Cua_Anh_-_Duc_Phuc_-_Piano_Sheet.mxl"
+    if os.path.exists(path):
+        root = read_root(path)
+        p = _kids(root, 'part')[0]
+        ms = [_Measure(m) for m in _kids(p, 'measure')]
+        ord_actual = play_order(ms, [])
+        assert ord_actual[14:17] == [14, 15, 16] # ending 1
+        assert ord_actual[17:22] == [9, 10, 11, 12, 13] # repeat main body
+        assert ord_actual[22] == 17 # ending 2
 
 
 # --------------------------------------------------------------------------- #

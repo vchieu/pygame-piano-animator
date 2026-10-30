@@ -169,7 +169,7 @@ class _Measure:
     """One measure of one part, with the signs that sit on its bar lines."""
 
     __slots__ = ("elem", "number", "forward_repeat", "backward_repeat", "backward_times",
-                 "endings", "segno", "coda", "dacapo", "dalsegno", "tocoda", "fine")
+                 "endings", "ending_type", "segno", "coda", "dacapo", "dalsegno", "tocoda", "fine")
 
     def __init__(self, elem):
         self.elem = elem
@@ -178,6 +178,7 @@ class _Measure:
         self.backward_repeat = False
         self.backward_times = 2
         self.endings: List[int] = []      # the volta numbers this measure is part of
+        self.ending_type: Optional[str] = None
         self.segno = self.coda = False
         self.dacapo = self.dalsegno = self.tocoda = self.fine = False
         for bl in _kids(elem, "barline"):
@@ -189,8 +190,10 @@ class _Measure:
                     self.backward_times = _attrs_int(rep, "times", 2)
             for end in _kids(bl, "ending"):
                 nums = re.findall(r"\d+", end.attrib.get("number", "") or "")
-                if end.attrib.get("type") in ("start", "discontinue") and nums:
+                ptype = end.attrib.get("type", "")
+                if ptype in ("start", "stop", "discontinue") and nums:
                     self.endings = [int(x) for x in nums]
+                    self.ending_type = ptype
         for direction in _kids(elem, "direction"):
             if _kid(direction, "segno") is not None:
                 self.segno = True
@@ -212,6 +215,21 @@ def _first(measures: List[_Measure], mark: str) -> Optional[int]:
     return next((k for k, m in enumerate(measures) if getattr(m, mark)), None)
 
 
+def _propagate_endings(measures: List[_Measure]):
+    active_endings = []
+    for m in measures:
+        if m.endings:
+            if m.ending_type == "start":
+                active_endings = m.endings
+            elif m.ending_type in ("stop", "discontinue"):
+                active_endings = m.endings
+        elif active_endings:
+            m.endings = active_endings
+
+        if m.ending_type in ("stop", "discontinue"):
+            active_endings = []
+
+
 def play_order(measures: List[_Measure], report: List[str]) -> List[int]:
     """
     The measure indices in the order the score says they are played.
@@ -230,6 +248,7 @@ def play_order(measures: List[_Measure], report: List[str]) -> List[int]:
     n = len(measures)
     if not n:
         return []
+    _propagate_endings(measures)
     order: List[int] = []
     segno_at = _first(measures, "segno")
     coda_at = _first(measures, "coda")
@@ -238,6 +257,7 @@ def play_order(measures: List[_Measure], report: List[str]) -> List[int]:
     i = 0
     repeat_lo = 0          # where the forward repeat of the open section sends us
     pass_no = 0            # which pass of that section we are on (0 = first)
+    in_ending = False
     jumps = 0
     took = set()           # the jump signs already followed
     total = 0
@@ -249,8 +269,11 @@ def play_order(measures: List[_Measure], report: List[str]) -> List[int]:
         m = measures[i]
         if m.forward_repeat and pass_no == 0 and not took:
             repeat_lo = i
+        if m.endings:
+            in_ending = True
         # voltas: a measure that names endings is played only on those passes
-        if not m.endings or (pass_no + 1) in m.endings:
+        played = not m.endings or (pass_no + 1) in m.endings
+        if played:
             order.append(i)
         # A jump is followed at the measure that asks for it, once. It ends the
         # section, so the repeat count starts over.
@@ -274,7 +297,7 @@ def play_order(measures: List[_Measure], report: List[str]) -> List[int]:
                 jumps += 1
                 jump_to = coda_at
         if jump_to is not None:
-            pass_no, repeat_lo = 0, 0
+            pass_no, repeat_lo, in_ending = 0, 0, False
             if jumps > MAX_PASSES or jump_to >= n:
                 break
             if jump_to == i:
@@ -284,12 +307,17 @@ def play_order(measures: List[_Measure], report: List[str]) -> List[int]:
         # a Fine closes the piece, but only on a pass a jump sent us on
         if m.fine and took:
             break
-        if m.backward_repeat:
+        if m.backward_repeat and played:
             pass_no += 1
             if pass_no < m.backward_times:
                 i = repeat_lo
+                in_ending = False
                 continue
             pass_no = 0
+            in_ending = False
+        if not m.endings and in_ending:
+            pass_no = 0
+            in_ending = False
         i += 1
     return order
 
