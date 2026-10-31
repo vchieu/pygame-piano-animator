@@ -187,6 +187,7 @@ def test_the_split_note_is_tied_on_screen(screen, monkeypatch):
     calls = []
     monkeypatch.setattr(notation, "draw_tie", lambda *a, **k: calls.append(a))
     without_tie = pygame.Surface(rect.size)
+    sv.clear_cache()            # (the system's paper is cached; engrave it again)
     sv.draw(without_tie, rect, sys3.start_t)
     monkeypatch.undo()
 
@@ -386,6 +387,88 @@ def test_cursor_progression_and_paging():
     assert sys_seek.index == 0
     cx_seek = sv.cursor_x(2.0, rect)
     assert rect.x + MARGIN_LEFT < cx_seek < rect.right - MARGIN_RIGHT
+
+
+def test_the_system_paper_is_engraved_once_and_cached(screen, monkeypatch):
+    # A system's paper (every notehead, stem, beam, tie and pedal bracket) is drawn once and
+    # cached: a frame only blits it and adds what moves (the sounding halos and the cursor),
+    # so the frame loop never engraves a page again - that is the whole point of the cache.
+    song = load_midi(midi_path("demo_song.mid"))
+    sv = StaffView(song)
+    rect = pygame.Rect(0, 0, screen.get_width(), 220)
+    t = sv.systems[0].start_t + 0.5
+
+    calls = []
+    real = notation.draw_staff_note
+
+    def spy(*a, **k):
+        sounding = a[7] if len(a) > 7 else k.get("sounding", False)
+        if not sounding:                     # (a sounding note is redrawn light over the paper)
+            calls.append(a)
+        return real(*a, **k)
+
+    monkeypatch.setattr(notation, "draw_staff_note", spy)
+
+    sv.draw(screen, rect, t)
+    first = len(calls)
+    assert first > 0, "the first frame should engrave the system"
+    for i in range(5):                       # the cursor crosses the page: no new engraving
+        sv.draw(screen, rect, t + i * 0.05)
+    assert len(calls) == first
+
+    sv.clear_cache()                         # an explicit re-engrave draws them again
+    sv.draw(screen, rect, t)
+    assert len(calls) == 2 * first
+
+    sv.scale = 1.2                           # a zoom is a different paper too
+    sv.draw(screen, rect, t)
+    assert len(calls) == 3 * first
+
+
+def test_a_click_on_the_paper_answers_with_a_note_of_that_system(screen):
+    # `time_at_x` is the inverse of `cursor_x` for the system on the page: it snaps to the
+    # nearest note or beat, and never jumps to another system.
+    song = load_midi(midi_path("demo_song.mid"))
+    sv = StaffView(song)
+    rect = pygame.Rect(0, 0, screen.get_width(), 220)
+    sys0 = sv.systems[0]
+
+    left = sv.time_at_x(rect.x, rect, sys0.start_t)
+    right = sv.time_at_x(rect.right, rect, sys0.start_t)
+    assert left == pytest.approx(sys0.start_t, abs=1e-6)
+    assert sys0.start_t - 1e-6 <= right <= sys0.end_t + 1e-6
+
+    t = sys0.start_t + sys0.duration * 0.4
+    when = sv.time_at_x(sv.cursor_x(t, rect), rect, t)
+    places = [n.start for n in sys0.notes] + list(song.beat_times)
+    assert min(abs(when - p) for p in places) < 1e-6, "the click should land on a note or a beat"
+    assert abs(when - t) < 0.25
+
+    # A system later in the song answers with its own times, not the first system's.
+    sys3 = sv.systems[3]
+    later = sv.time_at_x(rect.centerx, rect, sys3.start_t + 0.1)
+    assert sys3.start_t - 1e-6 <= later <= sys3.end_t + 1e-6
+
+
+def test_clicking_the_sheet_music_plays_from_that_note(screen):
+    # A click on the paper seeks to the note under it and, with STAFF_CLICK_PLAYS, starts
+    # playing there (the same gesture as clicking the score in the web normalizer).
+    app = main.App(screen, sound=False)
+    app.play(midi_path("demo_song.mid"))
+    vis = app.mode
+    rect = vis.staff_rect
+    assert rect.h > 0
+    vis.toggle_pause()                       # (stop first: the click is what starts it again)
+    assert vis.paused
+
+    x = int(rect.x + rect.w * 0.55)
+    want = vis.staff_view.time_at_x(x, rect, vis.t)
+    vis._last_staff_click = 0                # (a single click, not a double-click on the paper)
+    app.handle_event(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=(x, rect.centery)))
+
+    assert abs(vis.t - want) < 1e-6
+    if main.STAFF_CLICK_PLAYS:
+        assert not vis.paused
 
 
 def test_staff_view_draw(screen):
@@ -2059,9 +2142,10 @@ def test_grace_notes_draw_small_and_a_run_is_beamed_with_one_slash(screen):
     real_note = notation.draw_staff_note
     real_slash, real_beam_slash = notation._stem_slash, notation.beam_slash
 
-    def note_spy(surf, x, y, sp, shape, color, stem_up, *args, **kw):
-        drawn.append((sp, shape, kw.get("grace"), kw.get("stem")))
-        return real_note(surf, x, y, sp, shape, color, stem_up, *args, **kw)
+    def note_spy(surf, x, y, sp, shape, color, stem_up, sounding=False, *args, **kw):
+        if not sounding:                 # (a sounding note is redrawn light over the paper)
+            drawn.append((sp, shape, kw.get("grace"), kw.get("stem")))
+        return real_note(surf, x, y, sp, shape, color, stem_up, sounding, *args, **kw)
 
     def slash_spy(surf, sp, x_stem, y_tip, up, color):
         slashed.append(sp)

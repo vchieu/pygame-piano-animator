@@ -304,6 +304,13 @@ class Visualizer(Transport):
         if event.type == pygame.VIDEORESIZE:
             self.screen = pygame.display.get_surface()
             self.layout(self.screen.get_size())
+            if (hasattr(self, 'staff_view') and self.staff_view is not None
+                    and getattr(self.staff_view, 'use_osmd', False)
+                    and getattr(self.staff_view, 'osmd_systems', None)):
+                new_w = self.screen.get_width()
+                last_w = getattr(self.staff_view, '_osmd_render_width', 0)
+                if last_w > 0 and abs(new_w - last_w) / last_w > 0.20:
+                    self.staff_view.reload_osmd()
         elif event.type == pygame.DROPFILE:
             return ("open", event.file)
         elif self.volume.handle_event(event):

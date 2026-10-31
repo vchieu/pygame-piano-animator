@@ -2085,12 +2085,69 @@ def draw_pedal_brackets(surf: pygame.Surface, spans: List[Tuple[float, float]],
                 pygame.draw.line(surf, color, (round(x1), py), (round(x1), round(py - tick_h)), line_w)
 
 
+def _map_measure_frac_to_time(song, t0: float, t1: float, frac: float) -> float:
+    """Map a metric fraction [0.0, 1.0] within measure [t0, t1] to real-time seconds,
+    accounting for non-constant tempo using song.beat_times."""
+    frac = max(0.0, min(1.0, frac))
+    beats = getattr(song, 'beat_times', []) if song else []
+    if not beats or t1 <= t0:
+        return t0 + frac * (t1 - t0)
+
+    m_beats = [b for b in beats if (t0 - 1e-4) <= b < (t1 - 1e-4)]
+    if len(m_beats) <= 1:
+        return t0 + frac * (t1 - t0)
+
+    N = len(m_beats)
+    k = int(frac * N)
+    if k >= N:
+        return t1
+    f_a = k / N
+    f_b = (k + 1) / N
+    t_a = m_beats[k]
+    t_b = m_beats[k + 1] if k + 1 < N else t1
+    sub_frac = (frac - f_a) / max(1e-5, f_b - f_a)
+    return t_a + sub_frac * (t_b - t_a)
+
+
+def _map_measure_time_to_frac(song, t0: float, t1: float, t: float) -> float:
+    """Map real-time t within [t0, t1] to metric fraction [0.0, 1.0],
+    accounting for tempo changes using song.beat_times."""
+    if t <= t0:
+        return 0.0
+    if t >= t1:
+        return 1.0
+    beats = getattr(song, 'beat_times', []) if song else []
+    if not beats or t1 <= t0:
+        return (t - t0) / (t1 - t0)
+
+    m_beats = [b for b in beats if (t0 - 1e-4) <= b < (t1 - 1e-4)]
+    if len(m_beats) <= 1:
+        return (t - t0) / (t1 - t0)
+
+    N = len(m_beats)
+    pts = [(m_beats[k], k / N) for k in range(N)]
+    pts.append((t1, 1.0))
+    if pts[0][0] > t0 + 1e-4:
+        pts.insert(0, (t0, 0.0))
+    else:
+        pts[0] = (t0, 0.0)
+
+    for k in range(len(pts) - 1):
+        ta, fa = pts[k]
+        tb, fb = pts[k + 1]
+        if ta <= t < tb:
+            sub = (t - ta) / max(1e-5, tb - ta)
+            return fa + sub * (fb - fa)
+    return 1.0
+
+
 class OSMDSystemItem:
     """Represents a rendered staff system slice from OSMD with measure timing."""
     def __init__(self, system_index: int, surface: pygame.Surface, start_t: float, end_t: float,
                  start_bar: int, end_bar: int,
                  staff_top: int, staff_bottom: int,
-                 measures: Optional[List[dict]] = None):
+                 measures: Optional[List[dict]] = None,
+                 first_measure_num: int = 1):
         self.system_index = system_index
         self.surface = surface
         self.start_t = start_t
@@ -2101,8 +2158,9 @@ class OSMDSystemItem:
         self.staff_top = staff_top
         self.staff_bottom = staff_bottom
         self.measures = measures or []
+        self.first_measure_num = first_measure_num
 
-    def x_for_time(self, t: float, song) -> float:
+    def x_for_time(self, t: float, song, repeat_order: Optional[List[int]] = None) -> float:
         bars = getattr(song, 'bar_times', []) if song else []
         measures = self.measures
 
@@ -2111,69 +2169,147 @@ class OSMDSystemItem:
             sw = self.surface.get_width()
             return 50 + frac * (sw - 100)
 
+        # Default start x if t is before start_t
+        first_entry_x = (measures[0].get('entries')[0]['x']
+                         if measures and measures[0].get('entries')
+                         else (measures[0]['x'] if measures else 50))
+        first_m_x = measures[0]['x'] if measures else 50
+
         if not bars:
             frac = max(0.0, min(1.0, (t - self.start_t) / self.duration))
-            first_x = measures[0]['x']
             last_x = measures[-1]['x'] + measures[-1]['w']
-            return first_x + frac * (last_x - first_x)
+            return first_entry_x + frac * (last_x - first_entry_x)
 
-        # Build a list of (t_start, t_end, x_start, x_end) segments from measure data.
-        # The first measure on each system has its x shifted by the clef/key area.
-        # We normalise by treating the first measure's x as the "content start".
-        segs = []
+        total_dur = getattr(song, 'duration', 10.0)
+
+        # Smooth lead-in before bars[0]: move from measure start line to first notehead
+        if t < bars[0]:
+            t_lead = min(0.0, bars[0] - 1.5)
+            frac = max(0.0, min(1.0, (t - t_lead) / max(0.001, bars[0] - t_lead)))
+            return first_m_x + frac * (first_entry_x - first_m_x)
+
+        # Determine played measure index play_idx
+        play_idx = bisect.bisect_right(bars, t) - 1
+        if repeat_order:
+            play_idx = max(0, min(len(repeat_order) - 1, play_idx))
+            target_score_idx = repeat_order[play_idx]
+        else:
+            play_idx = max(0, min(len(bars) - 1, play_idx))
+            target_score_idx = play_idx
+
+        t0 = bars[play_idx]
+        t1 = bars[play_idx + 1] if play_idx + 1 < len(bars) else total_dur
+
+        # Match measure in this system
         for m in measures:
-            bar_idx = m['number'] - 1
-            if 0 <= bar_idx < len(bars):
-                t0 = bars[bar_idx]
-                t1 = bars[bar_idx + 1] if bar_idx + 1 < len(bars) else (getattr(song, 'duration', t0 + 2.0))
-                segs.append((t0, t1, m['x'], m['x'] + m['w']))
+            m_score_idx = m.get('score_idx', m.get('number', 0) - self.first_measure_num)
+            if m_score_idx == target_score_idx:
+                entries = m.get('entries', [])
+                if not entries:
+                    frac = _map_measure_time_to_frac(song, t0, t1, t)
+                    return m['x'] + frac * m['w']
 
-        if not segs:
-            frac = max(0.0, min(1.0, (t - self.start_t) / self.duration))
-            first_x = measures[0]['x']
-            last_x = measures[-1]['x'] + measures[-1]['w']
-            return first_x + frac * (last_x - first_x)
+                abs_ts = m.get('absTs', 0.0)
+                dur_ts = max(0.0001, m.get('dur', 1.0))
+                pts = []
+                for e in entries:
+                    frac_e = max(0.0, min(1.0, (e['ts'] - abs_ts) / dur_ts))
+                    t_e = _map_measure_frac_to_time(song, t0, t1, frac_e)
+                    pts.append((t_e, e['x']))
 
-        # Find the segment that contains t (use strict upper bound to avoid
-        # cursor landing at wrong position when t equals the next bar's start).
-        for t0, t1, x0, x1 in segs:
-            if t0 <= t < t1:
-                frac = (t - t0) / max(0.001, t1 - t0)
-                return x0 + frac * (x1 - x0)
+                if pts[0][0] > t0 + 0.001:
+                    pts.insert(0, (t0, pts[0][1]))
+                else:
+                    pts[0] = (t0, pts[0][1])
+                pts.append((t1, m['x'] + m['w']))
 
-        # t is before the first segment or after the last one.
-        if t <= segs[0][0]:
-            return segs[0][2]
-        return segs[-1][3]
+                for k in range(len(pts) - 1):
+                    ta, xa = pts[k]
+                    tb, xb = pts[k + 1]
+                    if ta <= t < tb:
+                        frac = (t - ta) / max(0.0001, tb - ta)
+                        return xa + frac * (xb - xa)
+                return pts[-1][1]
 
-    def time_for_x(self, x_in_crop: float, song) -> float:
+        # Measure not in this system: check whether it is before or after
+        sys_first_idx = measures[0].get('score_idx', measures[0].get('number', 0) - self.first_measure_num)
+        if target_score_idx < sys_first_idx:
+            return measures[0]['x']
+        return measures[-1]['x'] + measures[-1]['w']
+
+    def time_for_x(self, x_in_crop: float, song, repeat_order: Optional[List[int]] = None, current_t: float = 0.0) -> float:
         bars = getattr(song, 'bar_times', []) if song else []
         measures = self.measures
         if not measures or not bars:
             return self.start_t
 
-        # Build segments: (x_start, x_end, t_start, t_end)
-        segs = []
-        for m in measures:
-            bar_idx = m['number'] - 1
-            if 0 <= bar_idx < len(bars):
-                mx = m['x']
-                mw = max(1.0, m['w'])
-                t0 = bars[bar_idx]
-                t1 = bars[bar_idx + 1] if bar_idx + 1 < len(bars) else (getattr(song, 'duration', t0 + 2.0))
-                segs.append((mx, mx + mw, t0, t1))
+        total_dur = getattr(song, 'duration', 10.0)
 
-        if not segs:
+        def get_play_idx_candidates(m_score_idx: int) -> List[int]:
+            if repeat_order:
+                candidates = [p for p, sm in enumerate(repeat_order) if sm == m_score_idx]
+                if candidates:
+                    return candidates
+            if 0 <= m_score_idx < len(bars):
+                return [m_score_idx]
+            return []
+
+        # Check through measure segments
+        for m in measures:
+            mx = m['x']
+            mw = max(1.0, m['w'])
+            if mx <= x_in_crop < mx + mw:
+                m_score_idx = m.get('score_idx', m.get('number', 0) - self.first_measure_num)
+                candidates = get_play_idx_candidates(m_score_idx)
+                if not candidates:
+                    continue
+                bar_idx = min(candidates, key=lambda idx: abs(bars[idx] - current_t))
+                t0 = bars[bar_idx]
+                t1 = bars[bar_idx + 1] if bar_idx + 1 < len(bars) else total_dur
+
+                entries = m.get('entries', [])
+                if entries:
+                    abs_ts = m.get('absTs', 0.0)
+                    dur_ts = max(0.0001, m.get('dur', 1.0))
+                    pts = []
+                    for e in entries:
+                        frac_e = max(0.0, min(1.0, (e['ts'] - abs_ts) / dur_ts))
+                        t_e = _map_measure_frac_to_time(song, t0, t1, frac_e)
+                        pts.append((t_e, e['x']))
+                    if pts[0][0] > t0 + 0.001:
+                        pts.insert(0, (t0, pts[0][1]))
+                    else:
+                        pts[0] = (t0, pts[0][1])
+                    pts.append((t1, mx + mw))
+
+                    for k in range(len(pts) - 1):
+                        ta, xa = pts[k]
+                        tb, xb = pts[k + 1]
+                        min_x, max_x = min(xa, xb), max(xa, xb)
+                        if min_x <= x_in_crop < max_x:
+                            frac = (x_in_crop - xa) / max(0.001, xb - xa)
+                            return ta + frac * (tb - ta)
+                else:
+                    frac = (x_in_crop - mx) / mw
+                    return _map_measure_frac_to_time(song, t0, t1, frac)
+
+        first_entry_x = (measures[0].get('entries')[0]['x']
+                         if measures and measures[0].get('entries')
+                         else measures[0]['x'])
+        if x_in_crop < first_entry_x:
+            m_score_idx = measures[0].get('score_idx', measures[0].get('number', 0) - self.first_measure_num)
+            cands = get_play_idx_candidates(m_score_idx)
+            if cands:
+                b0 = min(cands, key=lambda idx: abs(bars[idx] - current_t))
+                return bars[b0]
             return self.start_t
 
-        for x0, x1, t0, t1 in segs:
-            if x0 <= x_in_crop < x1:
-                frac = (x_in_crop - x0) / max(0.001, x1 - x0)
-                return t0 + frac * (t1 - t0)
-
-        if x_in_crop < segs[0][0]:
-            return segs[0][2]
-        return segs[-1][3]
+        m_last_score_idx = measures[-1].get('score_idx', measures[-1].get('number', 0) - self.first_measure_num)
+        cands = get_play_idx_candidates(m_last_score_idx)
+        if cands:
+            b_last = min(cands, key=lambda idx: abs(bars[idx] - current_t))
+            return bars[b_last]
+        return self.end_t
 
 
 def _extract_mxl_content(mxl_path: str) -> Optional[str]:
@@ -2218,7 +2354,13 @@ class StaffView:
         self.osmd_systems: List[OSMDSystemItem] = []
         self.osmd_loading: bool = False
         self.osmd_error: Optional[str] = None
+        self.osmd_repeat_order: Optional[List[int]] = None
+        self.osmd_first_measure_num: int = 1
+        self._osmd_lock = threading.Lock()
+        self._osmd_request_id: int = 0
         self._osmd_thread: Optional[threading.Thread] = None
+        self._osmd_render_width: int = 1400
+        self._osmd_missed_score_idxs: set = set()
         self._scaled_sys_cache = None
 
         self._cached_static_surf: Optional[pygame.Surface] = None
@@ -2239,8 +2381,11 @@ class StaffView:
     def reload_osmd(self):
         """Force re-render OSMD sheet music."""
         if self.song:
-            self.osmd_systems = []
-            self._scaled_sys_cache = None
+            with self._osmd_lock:
+                self.osmd_systems = []
+                self.osmd_repeat_order = None
+                self._scaled_sys_cache = None
+                self._osmd_request_id += 1
             self._prepare_osmd(self.song)
 
     def set_song(self, song, target_dur: float = 10.0, scale: float = 1.0):
@@ -2250,8 +2395,11 @@ class StaffView:
         self.systems = build_systems(song, self.target_dur)
         self._system_starts = [sys.start_t for sys in self.systems]
         self.clear_cache()
-        self.osmd_systems = []
-        self._scaled_sys_cache = None
+        with self._osmd_lock:
+            self.osmd_systems = []
+            self.osmd_repeat_order = None
+            self._scaled_sys_cache = None
+            self._osmd_request_id += 1
         if OSMD_AVAILABLE and song:
             self._prepare_osmd(song)
 
@@ -2288,52 +2436,64 @@ class StaffView:
                         if content:
                             return content
 
+        # For pure MIDI files without companion MusicXML, generate clean MusicXML in-memory
+        # preserving exact bar boundaries, tempo, time signature and note hands.
         try:
-            import normalize_piano_musicxml as N
-            clean = N.normalize(song.notes)
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False, encoding='utf-8') as f:
-                tmp_path = f.name
-            try:
-                N.write_musicxml(tmp_path, clean)
-                with open(tmp_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                return content
-            finally:
-                if os.path.exists(tmp_path):
-                    try:
-                        os.remove(tmp_path)
-                    except Exception:
-                        pass
+            from midi_to_musicxml import song_to_musicxml
+            return song_to_musicxml(song)
         except Exception as e:
-            print(f"[OSMD] Failed to generate MusicXML: {e}")
+            print(f"[OSMD] Failed to convert MIDI to MusicXML: {e}")
             return None
 
-    def _prepare_osmd(self, song):
+    def _prepare_osmd(self, song, target_width: Optional[int] = None):
         """Render OSMD score in background thread and extract systems."""
         if not OSMD_AVAILABLE or song is None or not getattr(song, 'notes', None):
+            with self._osmd_lock:
+                self.use_osmd = False
+                self.osmd_loading = False
             return
         if os.environ.get("PYTEST_CURRENT_TEST"):
+            with self._osmd_lock:
+                self.use_osmd = False
+                self.osmd_loading = False
             return
 
-        if getattr(self, '_loading_song', None) == song and self.osmd_loading:
+        xml_content = self._get_musicxml_content(song)
+        if not xml_content:
+            with self._osmd_lock:
+                self.use_osmd = False
+                self.osmd_loading = False
+                self.osmd_systems = []
             return
-        self._loading_song = song
-        self.osmd_loading = True
-        self.osmd_error = None
+
+        try:
+            from musicxml_repeats import get_musicxml_repeat_order
+            repeat_order = get_musicxml_repeat_order(xml_content)
+        except Exception:
+            repeat_order = None
+
+        with self._osmd_lock:
+            self._osmd_request_id += 1
+            my_req_id = self._osmd_request_id
+            self._loading_song = song
+            self.use_osmd = True
+            self.osmd_loading = True
+            self.osmd_error = None
 
         def _task():
             try:
-                xml_content = self._get_musicxml_content(song)
-                if not xml_content:
-                    self.osmd_error = "Không có MusicXML"
-                    self.osmd_loading = False
-                    return
-
                 import osmd_render
-                full_surf, systems_info = osmd_render.render_full_score(xml_content, width=1400)
+                disp = pygame.display.get_surface()
+                dw = disp.get_width() if disp else 1400
+                render_w = target_width or max(1200, min(2400, dw))
+                self._osmd_render_width = render_w
+
+                full_surf, systems_info = osmd_render.render_full_score(xml_content, width=render_w)
                 if not systems_info:
-                    self.osmd_error = "OSMD render không tạo được system"
-                    self.osmd_loading = False
+                    with self._osmd_lock:
+                        if my_req_id == self._osmd_request_id:
+                            self.osmd_error = "OSMD render không tạo được system"
+                            self.osmd_loading = False
                     return
 
                 bars = getattr(song, 'bar_times', [])
@@ -2341,6 +2501,25 @@ class StaffView:
                 num_systems = len(systems_info)
                 new_systems = []
                 full_w, full_h = full_surf.get_size()
+
+                all_m_nums = [m['number'] for info in systems_info for m in info.get('measures', [])]
+                first_measure_num = min(all_m_nums) if all_m_nums else 1
+
+                # Walk all measures in sequential score order and assign score_idx (0, 1, 2, ...)
+                score_m_counter = 0
+                for info in systems_info:
+                    for m in info.get('measures', []):
+                        m['score_idx'] = score_m_counter
+                        score_m_counter += 1
+
+                # Safety check: OSMD measure count vs bar_times length.
+                # bar_times has N+1 entries for N played measures.
+                osmd_measure_count = score_m_counter
+                expected_bar_count = len(bars)
+                if bars and abs(osmd_measure_count - (expected_bar_count - 1)) > 1:
+                    print(f"[OSMD] Note: OSMD has {osmd_measure_count} written measures, "
+                          f"bar_times has {expected_bar_count - 1} bars. "
+                          f"(Normal for pieces with repeats/voltas).")
 
                 for i, info in enumerate(systems_info):
                     s_idx = info['systemIndex']
@@ -2374,14 +2553,18 @@ class StaffView:
                     staff_bottom_in_crop = min(crop_h, int(staff_max_y) - crop_y)
 
                     if bars:
-                        st_idx = max(0, info['startMeasure'] - 1)
-                        start_t = bars[st_idx] if st_idx < len(bars) else 0.0
+                        sys_first_m = info['measures'][0] if info.get('measures') else None
+                        st_idx = sys_first_m.get('score_idx', max(0, info['startMeasure'] - first_measure_num)) if sys_first_m else max(0, info['startMeasure'] - first_measure_num)
+                        st_idx = max(0, min(st_idx, len(bars) - 1))
+                        start_t = bars[st_idx]
+
                         if i + 1 < num_systems:
-                            next_st = max(0, systems_info[i + 1]['startMeasure'] - 1)
-                            end_t = bars[next_st] if next_st < len(bars) else total_dur
+                            next_first_m = systems_info[i + 1]['measures'][0] if systems_info[i + 1].get('measures') else None
+                            next_st = next_first_m.get('score_idx', max(0, systems_info[i + 1]['startMeasure'] - first_measure_num)) if next_first_m else max(0, systems_info[i + 1]['startMeasure'] - first_measure_num)
+                            next_st = max(0, min(next_st, len(bars) - 1))
+                            end_t = bars[next_st] if next_st > st_idx else total_dur
                         else:
-                            end_idx = info['endMeasure']
-                            end_t = bars[end_idx] if end_idx < len(bars) else total_dur
+                            end_t = total_dur
                     else:
                         avg_dur = total_dur / max(1, num_systems)
                         start_t = s_idx * avg_dur
@@ -2394,31 +2577,83 @@ class StaffView:
                         s_idx, sub, start_t, end_t,
                         info['startMeasure'], info['endMeasure'],
                         staff_top_in_crop, staff_bottom_in_crop,
-                        info.get('measures', [])
+                        info.get('measures', []),
+                        first_measure_num=first_measure_num
                     ))
 
-                self.osmd_systems = new_systems
-                self.osmd_loading = False
-                print(f"[OSMD] Successfully loaded {len(new_systems)} systems into app")
+                # Guarantee continuous time partitions across systems (zero gaps between systems)
+                for k, sys_item in enumerate(new_systems):
+                    if k == 0:
+                        sys_item.start_t = min(0.0, sys_item.start_t)
+                    if k + 1 < len(new_systems):
+                        sys_item.end_t = new_systems[k + 1].start_t
+                    else:
+                        sys_item.end_t = max(total_dur + 5.0, sys_item.start_t + 10.0)
+                    sys_item.duration = max(0.001, sys_item.end_t - sys_item.start_t)
+
+                with self._osmd_lock:
+                    if my_req_id == self._osmd_request_id:
+                        self.osmd_systems = new_systems
+                        self.osmd_repeat_order = repeat_order
+                        self.osmd_first_measure_num = first_measure_num
+                        self.osmd_loading = False
+                        self.osmd_error = None
+                        print(f"[OSMD] Successfully loaded {len(new_systems)} systems into app (width={render_w})")
             except Exception as e:
                 import traceback
                 traceback.print_exc()
-                self.osmd_error = str(e)
-                self.osmd_loading = False
+                with self._osmd_lock:
+                    if my_req_id == self._osmd_request_id:
+                        self.osmd_error = str(e)
+                        self.osmd_loading = False
 
         self._osmd_thread = threading.Thread(target=_task, daemon=True)
         self._osmd_thread.start()
 
     def osmd_system_for_time(self, t: float) -> Optional[OSMDSystemItem]:
         """Return the active OSMD system for playback time t."""
-        if not self.osmd_systems:
+        with self._osmd_lock:
+            systems = list(self.osmd_systems)
+            repeat_order = self.osmd_repeat_order
+            first_m_num = self.osmd_first_measure_num
+
+        if not systems:
             return None
-        for sys in self.osmd_systems:
-            if sys.start_t <= t < sys.end_t:
-                return sys
-        if t < self.osmd_systems[0].start_t:
-            return self.osmd_systems[0]
-        return self.osmd_systems[-1]
+
+        bars = getattr(self.song, 'bar_times', []) if self.song else []
+        target_score_idx = -1
+        if bars:
+            if t < bars[0]:
+                play_idx = 0
+            else:
+                play_idx = bisect.bisect_right(bars, t) - 1
+                max_p = (len(repeat_order) - 1) if repeat_order else (len(bars) - 1)
+                play_idx = max(0, min(max_p, play_idx))
+
+            target_score_idx = repeat_order[play_idx] if (repeat_order and play_idx < len(repeat_order)) else play_idx
+
+            for sys in systems:
+                for m in sys.measures:
+                    m_s_idx = m.get('score_idx', m.get('number', 0) - first_m_num)
+                    if m_s_idx == target_score_idx:
+                        return sys
+
+            # score_idx lookup missed — log warning once per unique missed index
+            _missed = getattr(self, '_osmd_missed_score_idxs', None)
+            if _missed is None:
+                _missed = set()
+                self._osmd_missed_score_idxs = _missed
+            if target_score_idx not in _missed:
+                _missed.add(target_score_idx)
+                print(f"[OSMD] score_idx={target_score_idx} not found in any system "
+                      f"(t={t:.3f}s, play_idx={play_idx}). "
+                      f"Falling back to time-based lookup.")
+
+        # Continuous time-based fallback: bisect on sys.start_t
+        sys_starts = [s.start_t for s in systems]
+        idx = bisect.bisect_right(sys_starts, t) - 1
+        idx = max(0, min(len(systems) - 1, idx))
+        return systems[idx]
 
     def clear_cache(self):
         """Forget the system's cached paper: the next draw engraves it again.
@@ -3127,14 +3362,19 @@ class StaffView:
         """
         The song time under screen x on the system drawn at time t.
         """
-        if self.use_osmd and self.osmd_systems:
+        with self._osmd_lock:
+            use_osmd = self.use_osmd
+            has_systems = bool(self.osmd_systems)
+            repeat_order = self.osmd_repeat_order
+
+        if use_osmd and has_systems:
             sys_item = self.osmd_system_for_time(t)
             if sys_item is not None:
                 sw, sh = sys_item.surface.get_size()
                 scale = min(staff_rect.w / max(1, sw), staff_rect.h / max(1, sh))
                 dest_x = (staff_rect.w - int(sw * scale)) // 2
                 cx_in_crop = (x - staff_rect.x - dest_x) / max(0.0001, scale)
-                return sys_item.time_for_x(cx_in_crop, self.song)
+                return sys_item.time_for_x(cx_in_crop, self.song, repeat_order=repeat_order, current_t=t)
 
         sys = self.system_for_time(t) if (self.song and self.systems) else None
         if sys is None:
@@ -3171,7 +3411,12 @@ class StaffView:
         staff_surf = self._scratch
         staff_surf.fill((255, 255, 255))
 
-        if self.use_osmd and self.osmd_systems:
+        with self._osmd_lock:
+            use_osmd = self.use_osmd
+            has_systems = bool(self.osmd_systems)
+            repeat_order = self.osmd_repeat_order
+
+        if use_osmd and has_systems:
             osmd_sys = self.osmd_system_for_time(t)
             if osmd_sys is not None:
                 sw, sh = osmd_sys.surface.get_size()
@@ -3202,7 +3447,7 @@ class StaffView:
                 staff_surf.blit(scaled_img, (dest_x, dest_y))
 
                 # Smooth cursor line mapped to measures
-                cx_in_crop = osmd_sys.x_for_time(t, self.song)
+                cx_in_crop = osmd_sys.x_for_time(t, self.song, repeat_order=repeat_order)
                 cx = dest_x + int(cx_in_crop * scale)
 
                 if staff_h > 0:

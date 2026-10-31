@@ -24,17 +24,36 @@ def _escape_xml_for_js(xml: str) -> str:
     return xml.replace('\\', '\\\\').replace('`', '\\`').replace('${', '\\${')
 
 
+def _get_osmd_script_tag() -> str:
+    """Return <script> tag for OSMD. Prefers local copy to allow offline rendering."""
+    base_dir = Path(__file__).resolve().parent
+    candidates = [
+        base_dir / "osmd_static" / "opensheetmusicdisplay.min.js",
+        base_dir / "opensheetmusicdisplay.min.js",
+    ]
+    for p in candidates:
+        if p.is_file():
+            try:
+                content = p.read_text(encoding="utf-8")
+                if content:
+                    return f"<script>{content}</script>"
+            except Exception:
+                pass
+    return '<script src="https://cdn.jsdelivr.net/npm/opensheetmusicdisplay@1.8.9/build/opensheetmusicdisplay.min.js"></script>'
+
+
 def _create_render_html(xml_content: str, width: int = 1400) -> str:
     """
     Create an HTML page that loads OSMD and renders the given MusicXML
     with generous vertical spacing between systems.
     """
     escaped_xml = _escape_xml_for_js(xml_content)
+    osmd_script = _get_osmd_script_tag()
     return f"""<!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8">
-  <script src="https://cdn.jsdelivr.net/npm/opensheetmusicdisplay@1.8.9/build/opensheetmusicdisplay.min.js"></script>
+  {osmd_script}
   <style>
     body {{ margin: 0; padding: 0; background: #ffffff; }}
     #score {{ width: {width}px; }}
@@ -183,16 +202,38 @@ class OSMDRenderer:
                     let endMeasure = -1;
                     const measures = [];
                     if (staffLines && staffLines.length > 0) {
-                        const sysMeasures = staffLines[0].Measures;
-                        for (let m of sysMeasures) {
-                            if (m.MeasureNumber) {
-                                startMeasure = Math.min(startMeasure, m.MeasureNumber);
-                                endMeasure = Math.max(endMeasure, m.MeasureNumber);
-                                const mBox = m.PositionAndShape;
+                        const numMeasures = staffLines[0].Measures.length;
+                        for (let mIdx = 0; mIdx < numMeasures; mIdx++) {
+                            const m0 = staffLines[0].Measures[mIdx];
+                            const mNum = m0.MeasureNumber;
+                            if (mNum !== undefined && mNum !== null) {
+                                startMeasure = Math.min(startMeasure, mNum);
+                                endMeasure = Math.max(endMeasure, mNum);
+                                const sm = m0.parentSourceMeasure;
+                                const mBox = m0.PositionAndShape;
+                                
+                                const entriesMap = new Map();
+                                for (let sl of staffLines) {
+                                    if (sl.Measures && sl.Measures[mIdx] && sl.Measures[mIdx].staffEntries) {
+                                        for (let se of sl.Measures[mIdx].staffEntries) {
+                                            const ts = se.getAbsoluteTimestamp().RealValue;
+                                            const x = se.PositionAndShape.AbsolutePosition.x * 10;
+                                            if (!entriesMap.has(ts) || x < entriesMap.get(ts)) {
+                                                entriesMap.set(ts, x);
+                                            }
+                                        }
+                                    }
+                                }
+                                const sortedTs = Array.from(entriesMap.keys()).sort((a, b) => a - b);
+                                const entries = sortedTs.map(ts => ({ ts: ts, x: entriesMap.get(ts) }));
+
                                 measures.push({
-                                    number: m.MeasureNumber,
+                                    number: mNum,
                                     x: mBox ? mBox.AbsolutePosition.x * 10 : 0,
-                                    w: mBox ? mBox.Size.width * 10 : 0
+                                    w: mBox ? mBox.Size.width * 10 : 0,
+                                    absTs: sm && sm.AbsoluteTimestamp ? sm.AbsoluteTimestamp.RealValue : 0,
+                                    dur: sm && sm.Duration ? sm.Duration.RealValue : 1.0,
+                                    entries: entries
                                 });
                             }
                         }
@@ -261,7 +302,7 @@ def get_renderer() -> OSMDRenderer:
 
 def start_renderer():
     """Start the OSMD renderer."""
-    get_renderer().start()
+    get_renderer()
 
 
 def stop_renderer():
