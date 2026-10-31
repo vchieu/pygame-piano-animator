@@ -17,6 +17,9 @@ from __future__ import annotations
 
 import bisect
 import math
+import os
+import tempfile
+import threading
 from collections import namedtuple
 from typing import List, Optional, Tuple
 
@@ -27,6 +30,12 @@ from common import (ACCENT, BAR_BG, BAR_LINE, BG, HAND_COLORS, PANEL_EDGE,
 from midi_loader import LEFT, PITCH_MAP, RIGHT, Note, key_alterations
 import notation
 from notation import note_shape
+
+try:
+    import osmd_render
+    OSMD_AVAILABLE = True
+except Exception:
+    OSMD_AVAILABLE = False
 
 CLEF_TREBLE = "treble"
 CLEF_BASS = "bass"
@@ -2076,14 +2085,99 @@ def draw_pedal_brackets(surf: pygame.Surface, spans: List[Tuple[float, float]],
                 pygame.draw.line(surf, color, (round(x1), py), (round(x1), round(py - tick_h)), line_w)
 
 
+class OSMDSystemItem:
+    """Represents a rendered staff system slice from OSMD with measure timing."""
+    def __init__(self, system_index: int, surface: pygame.Surface, start_t: float, end_t: float,
+                 start_bar: int, end_bar: int,
+                 staff_top: int, staff_bottom: int,
+                 measures: Optional[List[dict]] = None):
+        self.system_index = system_index
+        self.surface = surface
+        self.start_t = start_t
+        self.end_t = end_t
+        self.duration = max(0.001, end_t - start_t)
+        self.start_bar = start_bar
+        self.end_bar = end_bar
+        self.staff_top = staff_top
+        self.staff_bottom = staff_bottom
+        self.measures = measures or []
+
+    def x_for_time(self, t: float, song) -> float:
+        bars = getattr(song, 'bar_times', []) if song else []
+        if not self.measures or not bars:
+            frac = max(0.0, min(1.0, (t - self.start_t) / self.duration))
+            first_x = self.measures[0]['x'] if self.measures else 50
+            last_x = (self.measures[-1]['x'] + self.measures[-1]['w']) if self.measures else (self.surface.get_width() - 50)
+            return first_x + frac * (last_x - first_x)
+
+        for m in self.measures:
+            bar_idx = m['number'] - 1
+            if 0 <= bar_idx < len(bars):
+                t0 = bars[bar_idx]
+                if bar_idx + 1 < len(bars):
+                    t1 = bars[bar_idx + 1]
+                else:
+                    t1 = song.duration if song else (t0 + 2.0)
+                if t0 <= t <= t1:
+                    frac = (t - t0) / max(0.001, t1 - t0)
+                    return m['x'] + frac * m['w']
+
+        if t < self.start_t:
+            return self.measures[0]['x']
+        return self.measures[-1]['x'] + self.measures[-1]['w']
+
+    def time_for_x(self, x_in_crop: float, song) -> float:
+        bars = getattr(song, 'bar_times', []) if song else []
+        if not self.measures or not bars:
+            return self.start_t
+        for m in self.measures:
+            mx = m['x']
+            mw = max(1.0, m['w'])
+            if mx <= x_in_crop <= mx + mw:
+                bar_idx = m['number'] - 1
+                if 0 <= bar_idx < len(bars):
+                    t0 = bars[bar_idx]
+                    t1 = bars[bar_idx + 1] if bar_idx + 1 < len(bars) else (song.duration if song else t0 + 2.0)
+                    frac = (x_in_crop - mx) / mw
+                    return t0 + frac * (t1 - t0)
+        if x_in_crop < self.measures[0]['x']:
+            b0 = max(0, self.measures[0]['number'] - 1)
+            return bars[b0] if b0 < len(bars) else self.start_t
+        b_last = max(0, self.measures[-1]['number'] - 1)
+        return bars[b_last] if b_last < len(bars) else self.end_t
+
+
+def _extract_mxl_content(mxl_path: str) -> Optional[str]:
+    import zipfile
+    import xml.etree.ElementTree as ET
+    try:
+        with zipfile.ZipFile(mxl_path) as z:
+            rootfile_path = None
+            if "META-INF/container.xml" in z.namelist():
+                try:
+                    tree = ET.fromstring(z.read("META-INF/container.xml"))
+                    for rf in tree.iter("rootfile"):
+                        rootfile_path = rf.attrib.get("full-path")
+                        if rootfile_path:
+                            break
+                except Exception:
+                    pass
+            if not rootfile_path:
+                for name in z.namelist():
+                    if name.endswith(".xml") and not name.startswith("META-INF/"):
+                        rootfile_path = name
+                        break
+            if rootfile_path and rootfile_path in z.namelist():
+                return z.read(rootfile_path).decode("utf-8")
+    except Exception:
+        pass
+    return None
+
+
 class StaffView:
     """
     Renders a Grand Staff sheet music system with dynamic cursor and paging.
-    Supports clean paper white background, custom opacity, and accurate note values.
-
-    Zoom: `target_dur` is how many seconds of the song share one system (smaller = the
-    notes spread out and zoom in), `scale` how big the staff itself is drawn (smaller
-    leaves more room above and below for the notes that reach past the staves).
+    Uses OSMD (OpenSheetMusicDisplay) for beautiful engraving.
     """
     def __init__(self, song=None, target_dur: float = 10.0, scale: float = 1.0):
         self.song = None
@@ -2091,14 +2185,34 @@ class StaffView:
         self._system_starts: List[float] = []
         self.target_dur = clamp_target_dur(target_dur)
         self.scale = clamp_scale(scale)
+        self.use_osmd: bool = True
+        self.osmd_systems: List[OSMDSystemItem] = []
+        self.osmd_loading: bool = False
+        self.osmd_error: Optional[str] = None
+        self._osmd_thread: Optional[threading.Thread] = None
+        self._scaled_sys_cache = None
+
         self._cached_static_surf: Optional[pygame.Surface] = None
         self._cached_heads: List[tuple] = []
         self._cached_rolled: List[tuple] = []
         self._cached_geo = None
         self._cached_key: Optional[tuple] = None
-        self._scratch: Optional[pygame.Surface] = None   # (the paper plus the overlays, one size)
+        self._scratch: Optional[pygame.Surface] = None
         if song is not None:
             self.set_song(song, target_dur=self.target_dur, scale=self.scale)
+
+    def load_osmd(self):
+        """Prepare OSMD sheet music."""
+        self.use_osmd = True
+        if self.song:
+            self._prepare_osmd(self.song)
+
+    def reload_osmd(self):
+        """Force re-render OSMD sheet music."""
+        if self.song:
+            self.osmd_systems = []
+            self._scaled_sys_cache = None
+            self._prepare_osmd(self.song)
 
     def set_song(self, song, target_dur: float = 10.0, scale: float = 1.0):
         self.target_dur = clamp_target_dur(target_dur)
@@ -2107,6 +2221,175 @@ class StaffView:
         self.systems = build_systems(song, self.target_dur)
         self._system_starts = [sys.start_t for sys in self.systems]
         self.clear_cache()
+        self.osmd_systems = []
+        self._scaled_sys_cache = None
+        if OSMD_AVAILABLE and song:
+            self._prepare_osmd(song)
+
+    def _get_musicxml_content(self, song) -> Optional[str]:
+        if song is None:
+            return None
+        song_path = getattr(song, 'path', None)
+        if song_path and os.path.exists(song_path):
+            ext = os.path.splitext(song_path)[1].lower()
+            if ext in ('.xml', '.musicxml'):
+                try:
+                    with open(song_path, 'r', encoding='utf-8') as f:
+                        return f.read()
+                except Exception:
+                    pass
+            elif ext == '.mxl':
+                content = _extract_mxl_content(song_path)
+                if content:
+                    return content
+            elif ext in ('.mid', '.midi'):
+                song_dir = os.path.dirname(song_path)
+                base = os.path.splitext(os.path.basename(song_path))[0]
+                for cand_ext in ('.mxl', '.xml', '.musicxml'):
+                    cand_path = os.path.join(song_dir, base + cand_ext)
+                    if os.path.exists(cand_path):
+                        if cand_ext == '.mxl':
+                            content = _extract_mxl_content(cand_path)
+                        else:
+                            try:
+                                with open(cand_path, 'r', encoding='utf-8') as f:
+                                    content = f.read()
+                            except Exception:
+                                content = None
+                        if content:
+                            return content
+
+        try:
+            import normalize_piano_musicxml as N
+            clean = N.normalize(song.notes)
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False, encoding='utf-8') as f:
+                tmp_path = f.name
+            try:
+                N.write_musicxml(tmp_path, clean)
+                with open(tmp_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                return content
+            finally:
+                if os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"[OSMD] Failed to generate MusicXML: {e}")
+            return None
+
+    def _prepare_osmd(self, song):
+        """Render OSMD score in background thread and extract systems."""
+        if not OSMD_AVAILABLE or song is None or not getattr(song, 'notes', None):
+            return
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            return
+
+        if getattr(self, '_loading_song', None) == song and self.osmd_loading:
+            return
+        self._loading_song = song
+        self.osmd_loading = True
+        self.osmd_error = None
+
+        def _task():
+            try:
+                xml_content = self._get_musicxml_content(song)
+                if not xml_content:
+                    self.osmd_error = "Không có MusicXML"
+                    self.osmd_loading = False
+                    return
+
+                import osmd_render
+                full_surf, systems_info = osmd_render.render_full_score(xml_content, width=1400)
+                if not systems_info:
+                    self.osmd_error = "OSMD render không tạo được system"
+                    self.osmd_loading = False
+                    return
+
+                bars = getattr(song, 'bar_times', [])
+                total_dur = getattr(song, 'duration', 10.0)
+                num_systems = len(systems_info)
+                new_systems = []
+                full_w, full_h = full_surf.get_size()
+
+                for i, info in enumerate(systems_info):
+                    s_idx = info['systemIndex']
+                    staff_min_y = info.get('staffLinesMinY', info['y'])
+                    staff_max_y = info.get('staffLinesMaxY', info['y'] + info['h'])
+                    pad_top = 65
+                    pad_bot = 35
+                    crop_y = max(0, int(staff_min_y - pad_top))
+
+                    if i + 1 < num_systems:
+                        next_staff_min_y = systems_info[i + 1].get('staffLinesMinY', None)
+                        if next_staff_min_y is not None:
+                            max_crop_bottom = min(int(staff_max_y + pad_bot), int(next_staff_min_y - 45))
+                        else:
+                            max_crop_bottom = int(staff_max_y + pad_bot)
+                    else:
+                        max_crop_bottom = min(full_h, int(staff_max_y + pad_bot))
+
+                    crop_h = max_crop_bottom - crop_y
+                    if crop_h <= 10:
+                        crop_h = max(20, int(info['h']) + pad_top + pad_bot)
+                    if crop_y + crop_h > full_h:
+                        crop_h = full_h - crop_y
+                    if crop_h <= 0:
+                        continue
+
+                    rect = pygame.Rect(0, crop_y, full_w, crop_h)
+                    sub = full_surf.subsurface(rect).copy()
+
+                    staff_top_in_crop = max(0, int(staff_min_y) - crop_y)
+                    staff_bottom_in_crop = min(crop_h, int(staff_max_y) - crop_y)
+
+                    if bars:
+                        st_idx = max(0, info['startMeasure'] - 1)
+                        start_t = bars[st_idx] if st_idx < len(bars) else 0.0
+                        if i + 1 < num_systems:
+                            next_st = max(0, systems_info[i + 1]['startMeasure'] - 1)
+                            end_t = bars[next_st] if next_st < len(bars) else total_dur
+                        else:
+                            end_idx = info['endMeasure']
+                            end_t = bars[end_idx] if end_idx < len(bars) else total_dur
+                    else:
+                        avg_dur = total_dur / max(1, num_systems)
+                        start_t = s_idx * avg_dur
+                        end_t = (s_idx + 1) * avg_dur
+
+                    if end_t <= start_t:
+                        end_t = start_t + 2.0
+
+                    new_systems.append(OSMDSystemItem(
+                        s_idx, sub, start_t, end_t,
+                        info['startMeasure'], info['endMeasure'],
+                        staff_top_in_crop, staff_bottom_in_crop,
+                        info.get('measures', [])
+                    ))
+
+                self.osmd_systems = new_systems
+                self.osmd_loading = False
+                print(f"[OSMD] Successfully loaded {len(new_systems)} systems into app")
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                self.osmd_error = str(e)
+                self.osmd_loading = False
+
+        self._osmd_thread = threading.Thread(target=_task, daemon=True)
+        self._osmd_thread.start()
+
+    def osmd_system_for_time(self, t: float) -> Optional[OSMDSystemItem]:
+        """Return the active OSMD system for playback time t."""
+        if not self.osmd_systems:
+            return None
+        for sys in self.osmd_systems:
+            if sys.start_t <= t < sys.end_t:
+                return sys
+        if t < self.osmd_systems[0].start_t:
+            return self.osmd_systems[0]
+        return self.osmd_systems[-1]
 
     def clear_cache(self):
         """Forget the system's cached paper: the next draw engraves it again.
@@ -2120,6 +2403,8 @@ class StaffView:
         self._cached_rolled = []
         self._cached_geo = None
         self._cached_key = None
+    
+    # No OSMD rendering - using manual rendering only
 
     def system_for_time(self, t: float) -> Optional[StaffSystem]:
         """Return the active system for playback time t."""
@@ -2811,13 +3096,17 @@ class StaffView:
 
     def time_at_x(self, x: float, staff_rect: pygame.Rect, t: float) -> float:
         """
-        The song time under screen x on the system drawn at time t (the inverse of `cursor_x`).
-
-        A click on the paper lands on the nearest note or beat of that system, so playback
-        starts on the note the click is pointing at instead of a hair before or after it;
-        a click out in the empty space keeps its own place. The click never jumps to another
-        system: it is the one on the page that answers.
+        The song time under screen x on the system drawn at time t.
         """
+        if self.use_osmd and self.osmd_systems:
+            sys_item = self.osmd_system_for_time(t)
+            if sys_item is not None:
+                sw, sh = sys_item.surface.get_size()
+                scale = min(staff_rect.w / max(1, sw), staff_rect.h / max(1, sh))
+                dest_x = (staff_rect.w - int(sw * scale)) // 2
+                cx_in_crop = (x - staff_rect.x - dest_x) / max(0.0001, scale)
+                return sys_item.time_for_x(cx_in_crop, self.song)
+
         sys = self.system_for_time(t) if (self.song and self.systems) else None
         if sys is None:
             return 0.0
@@ -2826,7 +3115,6 @@ class StaffView:
         frac = min(1.0, max(0.0, (x - staff_rect.x - geo.margin_left) / span))
         when = sys.start_t + frac * sys.duration
 
-        # The places worth landing on: where a note starts, and where a beat falls.
         places = [n.start for n in sys.notes if sys.start_t - 1e-9 <= n.start < sys.end_t]
         beats = getattr(self.song, "beat_times", None) or []
         lo = bisect.bisect_left(beats, sys.start_t - 1e-9)
@@ -2834,18 +3122,14 @@ class StaffView:
         places.extend(beats[lo:hi])
         if places:
             best = min(places, key=lambda p: abs(p - when))
-            # snap only when the click is close enough to mean that place: 12 px of time
             if abs(best - when) <= sys.duration / span * 12:
                 when = best
         return max(0.0, when)
 
     def draw(self, surf: pygame.Surface, staff_rect: pygame.Rect, t: float, active_notes: Optional[list] = None, opacity: float = 1.0):
         """
-        Draw the sheet music: the system's cached paper, the notes that are sounding, the cursor.
-
-        The paper (lines, clefs, signatures, every notehead, stem, beam and tie) is rendered
-        once per system by `_render_static_system_surf` and cached, so a frame here costs one
-        blit plus the few ellipses of the notes being heard - not a whole engraving pass.
+        Draw the sheet music: OSMD rendered score with synchronized playback cursor,
+        or native fallback.
         """
         if staff_rect.h <= 0 or staff_rect.w <= 0:
             return
@@ -2853,21 +3137,108 @@ class StaffView:
         opacity = max(0.0, min(1.0, opacity))
         local_rect = pygame.Rect(0, 0, staff_rect.w, staff_rect.h)
 
+        if self._scratch is None or self._scratch.get_size() != local_rect.size:
+            self._scratch = pygame.Surface(local_rect.size)
+        staff_surf = self._scratch
+        staff_surf.fill((255, 255, 255))
+
+        if self.use_osmd and self.osmd_systems:
+            osmd_sys = self.osmd_system_for_time(t)
+            if osmd_sys is not None:
+                sw, sh = osmd_sys.surface.get_size()
+                scale = min(local_rect.w / max(1, sw), (local_rect.h - 8) / max(1, sh))
+                scaled_w = int(sw * scale)
+                scaled_h = int(sh * scale)
+                dest_x = (local_rect.w - scaled_w) // 2
+
+                staff_h = osmd_sys.staff_bottom - osmd_sys.staff_top
+                if staff_h > 0:
+                    scaled_staff_h = int(staff_h * scale)
+                    # Center the grand staff vertically with slight upward shift to avoid bottom divider and give treble notes headroom
+                    dest_y = (local_rect.h - scaled_staff_h) // 2 - int(osmd_sys.staff_top * scale) - int(6 * scale)
+                else:
+                    dest_y = (local_rect.h - scaled_h) // 2
+
+                if scaled_h <= local_rect.h:
+                    dest_y = max(2, min(dest_y, local_rect.h - scaled_h - 2))
+
+                # Cache scaled system surface to keep 60 FPS ultra-fast
+                cache_key = (id(osmd_sys), scaled_w, scaled_h)
+                if self._scaled_sys_cache is None or self._scaled_sys_cache[0] != cache_key:
+                    scaled_img = pygame.transform.smoothscale(osmd_sys.surface, (scaled_w, scaled_h))
+                    self._scaled_sys_cache = (cache_key, scaled_img)
+                else:
+                    scaled_img = self._scaled_sys_cache[1]
+
+                staff_surf.blit(scaled_img, (dest_x, dest_y))
+
+                # Smooth cursor line mapped to measures
+                cx_in_crop = osmd_sys.x_for_time(t, self.song)
+                cx = dest_x + int(cx_in_crop * scale)
+
+                if staff_h > 0:
+                    cy_top = dest_y + int(osmd_sys.staff_top * scale) - 6
+                    cy_bot = dest_y + int(osmd_sys.staff_bottom * scale) + 6
+                else:
+                    cy_top = dest_y + 10
+                    cy_bot = dest_y + scaled_h - 10
+
+                ch = max(10, cy_bot - cy_top)
+                glow_surf = pygame.Surface((8, ch), pygame.SRCALPHA)
+                glow_surf.fill((*CURSOR_COLOR, 45))
+                staff_surf.blit(glow_surf, (cx - 4, cy_top))
+                pygame.draw.line(staff_surf, CURSOR_COLOR, (cx, cy_top), (cx, cy_bot), 2)
+                tri_top = [(cx - 4, cy_top - 4), (cx + 4, cy_top - 4), (cx, cy_top + 2)]
+                tri_bot = [(cx - 4, cy_bot + 4), (cx + 4, cy_bot + 4), (cx, cy_bot - 2)]
+                pygame.draw.polygon(staff_surf, CURSOR_COLOR, tri_top)
+                pygame.draw.polygon(staff_surf, CURSOR_COLOR, tri_bot)
+
+                if opacity < 0.999:
+                    staff_surf.set_alpha(max(0, min(255, int(round(opacity * 255)))))
+                else:
+                    staff_surf.set_alpha(None)
+                surf.blit(staff_surf, staff_rect.topleft)
+                pygame.draw.line(surf, PANEL_EDGE, (staff_rect.left, staff_rect.bottom - 1),
+                                 (staff_rect.right, staff_rect.bottom - 1), 1)
+                return
+
+        elif self.use_osmd and self.osmd_loading:
+            text = "Đang tạo khuôn nhạc OSMD..."
+            try:
+                fnt = ui_font(15)
+                rendered = fnt.render(text, True, TEXT_DIM)
+                staff_surf.blit(rendered, ((local_rect.w - rendered.get_width()) // 2,
+                                           (local_rect.h - rendered.get_height()) // 2))
+            except Exception:
+                pass
+            surf.blit(staff_surf, staff_rect.topleft)
+            pygame.draw.line(surf, PANEL_EDGE, (staff_rect.left, staff_rect.bottom - 1),
+                             (staff_rect.right, staff_rect.bottom - 1), 1)
+            return
+
+        elif self.use_osmd and self.osmd_error and not self.systems:
+            text = f"Lỗi OSMD: {self.osmd_error}"
+            try:
+                fnt = ui_font(13)
+                rendered = fnt.render(text, True, (200, 80, 80))
+                staff_surf.blit(rendered, ((local_rect.w - rendered.get_width()) // 2,
+                                           (local_rect.h - rendered.get_height()) // 2))
+            except Exception:
+                pass
+            surf.blit(staff_surf, staff_rect.topleft)
+            pygame.draw.line(surf, PANEL_EDGE, (staff_rect.left, staff_rect.bottom - 1),
+                             (staff_rect.right, staff_rect.bottom - 1), 1)
+            return
+
+        # Native staff fallback
         sys = self.system_for_time(t) if (self.song and self.systems) else None
 
-        # The paper is the same on every frame of a system: draw it again only when the
-        # system, the panel's size or the zoom changed.
         key = (id(sys), local_rect.w, local_rect.h, self.scale, self.target_dur, id(self.song))
         if self._cached_key != key or self._cached_static_surf is None:
             self._cached_static_surf, self._cached_heads, self._cached_rolled, self._cached_geo = \
                 self._render_static_system_surf(sys, local_rect)
             self._cached_key = key
 
-        # One reusable surface the size of the panel: the paper is blitted into it and the
-        # moving parts drawn on top, so a frame never allocates (and never copies) a surface.
-        if self._scratch is None or self._scratch.get_size() != local_rect.size:
-            self._scratch = pygame.Surface(local_rect.size)
-        staff_surf = self._scratch
         staff_surf.blit(self._cached_static_surf, (0, 0))
 
         if self.song and self.systems and sys is not None:
@@ -2875,7 +3246,6 @@ class StaffView:
             s = geo.s
             active_ids = {id(n) for n in active_notes} if active_notes is not None else set()
 
-            # 8. What moves: the notes being heard (lighter ink and a ring), then the cursor.
             for n, hx, hy, half_w, half_h, pad, light in self._cached_heads:
                 if (id(n) in active_ids) or (n.start <= t < n.end):
                     light(staff_surf)
@@ -2883,40 +3253,31 @@ class StaffView:
                                        round(2 * half_w + 2 * pad), round(2 * half_h + 2 * pad))
                     pygame.draw.ellipse(staff_surf, CURSOR_COLOR, halo, 2)
 
-            # A rolled chord being swept is marked in the cursor's red, as it was before
-            # the paper was cached (the wave itself lives on the cached surface in grey).
             for chord, wx, wy0, wy1 in self._cached_rolled:
                 if any((id(n) in active_ids) or (n.start <= t < n.end) for n in chord):
                     draw_arpeggio_wavy_line(staff_surf, wx, wy0, wy1, s, CURSOR_COLOR)
 
-            treble_top = round(geo.treble_mid_y - 2 * s)
-            bass_bot = round(geo.bass_mid_y + 2 * s)
+            treble_top = round(geo.treble_mid_y - 2 * s) if geo else 40
+            bass_bot = round(geo.bass_mid_y + 2 * s) if geo else local_rect.h - 40
+
             cx = round(self.cursor_x(t, local_rect, geo.margin_left, geo.usable_w))
             cy_top = round(treble_top - s * 0.8)
             cy_bot = round(bass_bot + s * 0.8)
             ch = cy_bot - cy_top
 
-            # Translucent cursor glow band
             glow_surf = pygame.Surface((8, ch), pygame.SRCALPHA)
             glow_surf.fill((*CURSOR_COLOR, 50))
             staff_surf.blit(glow_surf, (cx - 4, cy_top))
-
-            # Main cursor line
             pygame.draw.line(staff_surf, CURSOR_COLOR, (cx, cy_top), (cx, cy_bot), 2)
-
-            # Cursor triangles at top and bottom
             tri_top = [(cx - 4, cy_top - 3), (cx + 4, cy_top - 3), (cx, cy_top + 3)]
             tri_bot = [(cx - 4, cy_bot + 3), (cx + 4, cy_bot + 3), (cx, cy_bot - 3)]
             pygame.draw.polygon(staff_surf, CURSOR_COLOR, tri_top)
             pygame.draw.polygon(staff_surf, CURSOR_COLOR, tri_bot)
 
-        # Blit staff_surf with requested opacity (set_alpha(None) keeps the opaque blit fast)
         if opacity < 0.999:
             staff_surf.set_alpha(max(0, min(255, int(round(opacity * 255)))))
         else:
             staff_surf.set_alpha(None)
         surf.blit(staff_surf, staff_rect.topleft)
-
-        # Panel edge border
         pygame.draw.line(surf, PANEL_EDGE, (staff_rect.left, staff_rect.bottom - 1),
                          (staff_rect.right, staff_rect.bottom - 1), 1)

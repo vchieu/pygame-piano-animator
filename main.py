@@ -176,7 +176,7 @@ class Visualizer(Transport):
                 dur, sc = 10.0, 1.0
             self.staff_target_dur = clamp_target_dur(dur)
             self.staff_scale = clamp_scale(sc)
-        self.staff_view = StaffView(song, target_dur=self.staff_target_dur, scale=self.staff_scale)
+        self.staff_view = StaffView(target_dur=self.staff_target_dur, scale=self.staff_scale)
         self.staff_rect = pygame.Rect(0, 0, 0, 0)
         self.staff_reset_button = pygame.Rect(0, 0, 0, 0)
         self._last_staff_click = 0
@@ -360,9 +360,14 @@ class Visualizer(Transport):
             elif k in (pygame.K_HOME, pygame.K_r):
                 self.seek(-LEAD_IN)
             elif k == pygame.K_o:
-                path = pick_file()
-                if path:
-                    return ("open", path)
+                if event.mod & pygame.KMOD_SHIFT:
+                    if hasattr(self, "staff_view") and self.song:
+                        self.staff_view.reload_osmd()
+                        self.message = "Đang tạo lại khuôn nhạc OSMD..."
+                else:
+                    path = pick_file()
+                    if path:
+                        return ("open", path)
         elif event.type == pygame.MOUSEWHEEL:
             over_staff = self.staff_rect.h > 0 and self.staff_rect.collidepoint(
                 getattr(event, "pos", None) or pygame.mouse.get_pos())
@@ -640,6 +645,7 @@ class Visualizer(Transport):
         elif self.audio and held:
             dt = 0.0                                # held while the recording is moved, or the song scrubbed
         Transport.update(self, dt)
+
         if self.audio:
             if self.paused:
                 self.audio.stop()
@@ -1927,6 +1933,7 @@ if __name__ == "__main__":
     multiprocessing.freeze_support()            # (the soundfont player's process, compiled: sf_synth)
     if paths.COMPILED and _no_console():
         _log_to_file()
+    
     try:
         main()
     except SystemExit:
@@ -1934,3 +1941,9 @@ if __name__ == "__main__":
     except Exception:
         _report_crash()
         sys.exit(1)
+    finally:
+        try:
+            import osmd_render
+            osmd_render.stop_renderer()
+        except Exception:
+            pass
