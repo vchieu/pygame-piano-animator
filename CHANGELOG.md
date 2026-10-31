@@ -43,6 +43,12 @@ v20YY.MM.DD.HHMM). Newest first.
 - The beat grid every measure is drawn against now runs unbroken across bar lines, so a bar no longer reads as if
   it did not fill its beats and a written half note stays a half note; and a score's rounding error no longer ends
   a note early where a repeated key merely touches the one before it.
+- The sheet music is engraved once per system and kept as an image, and each frame just shows that image and moves
+  the cursor over it (with the ring around the notes being heard): a frame went from about 22-28 ms to 0.7 ms, and
+  only turning the page still pays for a full engraving.
+- Click the sheet music to play from that point: the click lands on the nearest note or beat of the system on the
+  page and playback starts there (a click while playing just moves there). A double click on the paper still
+  resets the zoom, and its bottom edge still drags the panel's height.
 
 ## v26.1.20 - Video export, hands on top of each other
 - Export a performance to an .mp4 from the button under the player's progress bar: choose whether the progress

@@ -151,7 +151,10 @@ Detailed design notes, kept up to date as features were added. Start with `CLAUD
   `Visualizer._draw_controls`): speed, view, "sound on / off" (a click mutes and unmutes, as M) and the volume
   (`controls_rect`, `CONTROLS_H` 30). Under them an arrow-keys button (`common.draw_arrow_keys`,
   `keys_button`) shows or hides the key controls with what each does (`_key_controls`, `keys_rect`; shown or
-  not kept in settings.json, "player_keys", hidden at first). Clicks on the panels never seek. Each control
+  not kept in settings.json, "player_keys", hidden at first). Clicks on the panels never seek;
+  a click on the sheet music does - it seeks to the note under the click and, when paused,
+  starts playing there (`Visualizer.seek_on_staff`, `STAFF_CLICK_PLAYS`; see the staff's
+  click-to-play note under Notation). Each control
   has a tooltip on hover (`_top_items`, `common.draw_tooltip`).
 - Finger numbers on the falling notes: bold, `FINGER_PX_MAX` 17 px (13 before) or as big as fits the narrowest
   notes (`_finger_size`: a black key's lane), smaller on a note too short for it (down to `FINGER_PX_MIN` 11),
@@ -623,7 +626,7 @@ fast removes about a third of them: most are leaps of a few tens of milliseconds
   the clefs and the time signature is pushed right (`max(left_x + 4.6 s, …)`) rather than run
   into them at the smallest staff sizes. Both painters return False with no font and draw
   nothing: `staff.draw_treble_clef` / `draw_bass_clef` then draw the hand-drawn polylines they
-  always had, and `StaffView.draw` falls back to the UI font's "4"/"4". The time signature is
+  always had, and `StaffView._render_static_system_surf` falls back to the UI font's "4"/"4". The time signature is
   still a hardcoded 4/4 - the app has no meter model; only its drawing changed.
 - **The key signature is drawn at the head of each system, and it silences the sharps it
   covers** (2026-10-22). `Khong-mon-dang-ho-doi.mxl` declares four sharps (F♯ C♯ G♯ D♯) and
@@ -738,8 +741,9 @@ fast removes about a third of them: most are leaps of a few tens of milliseconds
     over only when that is the better of the two. `compute_notes_info` keeps notes on one
     staff far enough apart that this rarely bites - it is for where it does not, the two hands'
     notes drawn together with the clash offsets out of room at the end of a system.
-  - **Cost** (the staff is redrawn every frame, and a beam is scored at several candidate
-    heights): the notehead boxes go through `NoteHeads`, sorted by their left edge, and
+  - **Cost** (a beam is scored at several candidate heights while the system is
+    engraved - once, not every frame: see "the paper is engraved once and cached" below):
+    the notehead boxes go through `NoteHeads`, sorted by their left edge, and
     `near(x0, x1)` hands back only the few a stem or a bar at those x could reach - a walk
     over the whole system per candidate was 4x the frame's draw time. `group_beams` also runs
     before the chord loop, so a beamed chord (whose stems its group settles anyway) is not
@@ -795,7 +799,8 @@ fast removes about a third of them: most are leaps of a few tens of milliseconds
   its **onset**, so a crossing note was drawn at full length inside one measure - measure 2
   of `50-nam-ve-sau` showed a half note reaching 1.87 beats into measure 3.
   - `staff.split_at_bar_lines(notes, bar_times) -> (pieces, ties)` does the cut once, in
-    `StaffView.draw`'s active-system block, before `compute_notes_info`. A note becomes
+    `StaffView._render_static_system_surf` (the once-per-system engraving), before
+    `compute_notes_info`. A note becomes
     itself when no bar time lies strictly inside it, or one piece per span `[start, b1],
     [b1, b2], ..., [bk, end]` when it does; each piece after the first is tied to the one
     before it and `ties` pairs them. The pieces are `Note`s too (same frozen dataclass,
@@ -817,9 +822,43 @@ fast removes about a third of them: most are leaps of a few tens of milliseconds
     :3223-3256; style defaults styledef.cpp:616-619, 635-636). A tie shorter than
     `MIN_TIE_LENGTH_SP` (1.0 sp) is drawn flat. `notation.draw_tie(surf, sp, x0, x1, y, up,
     color)` is polygons only, so it needs no music font and has no fallback path of its own.
-    `StaffView.draw` places each tie **opposite the stem** (MuseScore ties a single note
+    `StaffView._render_static_system_surf` places each tie **opposite the stem** (MuseScore ties a single note
     `!chord->up()`, slurtielayout.cpp:3086) at the notehead's outer edge, after the note
     loop so the crescent reads over the ink.
+- **The system's paper is engraved once and cached; a frame only moves the cursor** (2026-10-31).
+  `StaffView.draw` used to engrave the whole system on every frame - the split at the bar lines,
+  `compute_notes_info`, the beams, every notehead, stem, tie and pedal bracket. That was
+  ~22-28 ms a frame for `50-nam-ve-sau` at 1400 px wide. Now
+  `StaffView._render_static_system_surf(sys, local_rect)` draws everything that does not move
+  while the cursor crosses the page, once, into a surface of the panel's size; it also hands back
+  what `draw` needs to animate it: `heads` (one `(note, x, y, half_w, half_h, pad, light)`
+  per notehead - where a sounding note's ring goes, and `light`, a closure that redraws
+  that very note in the sounding colour, as the old per-frame pass did), `rolled` (the
+  rolled chords, so the wavy line can turn red while the chord is swept) and the `geo` it
+  drew with.
+  - `draw` keeps that surface in `_cached_static_surf` under the key `(id(sys), w, h, self.scale,
+    self.target_dur, id(self.song))` - the system on the page, the panel's size and the zoom are
+    the only things that make a different paper. `clear_cache()` drops it (`set_song` calls it),
+    which a test that wants to engrave the same system again does explicitly.
+  - A frame blits the paper into a reusable scratch surface the panel's size (no per-frame
+    `Surface.copy`, no allocation), redraws the sounding notes in the sounding colour, rings
+    them, marks a swept chord's wave red and draws the cursor, then blits that to the screen
+    with the panel's opacity (`set_alpha(None)` when opaque keeps that blit on the fast
+    path). Measured: 1.7 -> 0.7 ms median a frame, max 1.4; the first frame of a system
+    still pays the engraving (~22 ms), so a page turn is the one slow frame (the page is
+    not prefetched).
+  - The rings and the swept chord test `id(note)` against `active_notes` and fall back to
+    `note.start <= t < note.end`: the pieces `split_at_bar_lines` makes are new objects, so a
+    note cut at a bar is found by its times, not its identity.
+- **A click on the sheet music plays from the note under it** (2026-10-31, the gesture of the
+  musicxml-piano-normalizer's web score). `StaffView.time_at_x(x, staff_rect, t)` is
+  `cursor_x`'s inverse for the system on the page: the song time under screen `x`, snapped to
+  the nearest note start or beat within 12 px worth of that system's time, and never leaving
+  the system (a click on the paper answers with the paper's own music, not the next page's).
+  `Visualizer.seek_on_staff` seeks there; with `STAFF_CLICK_PLAYS` True it also starts playing
+  when paused (a click while playing just moves there). A click on the panel's bottom edge
+  still drags its height, the reset button still resets the zoom, and a double click on the
+  paper still resets it too (its first click has already seeked by then).
 - The hand colours (`HAND_COLORS`) are still the note colour. Tests: `tests/test_notation.py`
   (metrics, the codepoint table, the glyph cache, every glyph at four sizes, the painter's
   geometry, the clef and time-signature painters, the no-font fallback) and `tests/test_staff.py`
@@ -830,7 +869,9 @@ fast removes about a third of them: most are leaps of a few tens of milliseconds
   own scoring, a note keeping `noteBarDistance` off the bar lines and the bar line being drawn
   where its beat is, the key signature drawn at the head with the time signature and the first
   note moving right of it and the sharps it covers left off the notes, a crowded measure
-  squeezed back inside its bar lines without closing its notes up).
+  squeezed back inside its bar lines without closing its notes up, the paper engraved once
+  and again only after `clear_cache` or a zoom, a click landing on the system's own note or
+  beat).
 - The grand staff's two staves stand `BASE_MID_GAP_SP` (6 sp) apart, and spread further
   when the hands' ink would crowd or collide in the gap (`StaffView.staff_geometry`,
   `vertical_extents`). A spread that no longer fits the panel shrinks that one system

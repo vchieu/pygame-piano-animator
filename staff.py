@@ -2091,6 +2091,12 @@ class StaffView:
         self._system_starts: List[float] = []
         self.target_dur = clamp_target_dur(target_dur)
         self.scale = clamp_scale(scale)
+        self._cached_static_surf: Optional[pygame.Surface] = None
+        self._cached_heads: List[tuple] = []
+        self._cached_rolled: List[tuple] = []
+        self._cached_geo = None
+        self._cached_key: Optional[tuple] = None
+        self._scratch: Optional[pygame.Surface] = None   # (the paper plus the overlays, one size)
         if song is not None:
             self.set_song(song, target_dur=self.target_dur, scale=self.scale)
 
@@ -2100,6 +2106,20 @@ class StaffView:
         self.song = song
         self.systems = build_systems(song, self.target_dur)
         self._system_starts = [sys.start_t for sys in self.systems]
+        self.clear_cache()
+
+    def clear_cache(self):
+        """Forget the system's cached paper: the next draw engraves it again.
+
+        `draw` keeps the static surface of the system on the page (see
+        `_render_static_system_surf`), so anything that changes what the paper looks like
+        without touching the system, the panel's size or the zoom calls this.
+        """
+        self._cached_static_surf = None
+        self._cached_heads = []
+        self._cached_rolled = []
+        self._cached_geo = None
+        self._cached_key = None
 
     def system_for_time(self, t: float) -> Optional[StaffSystem]:
         """Return the active system for playback time t."""
@@ -2232,22 +2252,27 @@ class StaffView:
         margin_left = header_margin(STAFF_LEFT_X, s, self._key_fifths(sys))
         return margin_left, rect.w - margin_left - MARGIN_RIGHT
 
-    def draw(self, surf: pygame.Surface, staff_rect: pygame.Rect, t: float, active_notes: Optional[list] = None, opacity: float = 1.0):
-        """Draw the sheet music Grand Staff, active system notes, and playback cursor."""
-        if staff_rect.h <= 0 or staff_rect.w <= 0:
-            return
+    def _render_static_system_surf(self, sys, local_rect: pygame.Rect):
+        """
+        Draw the system's paper once: everything that does not move while the cursor crosses it.
 
-        opacity = max(0.0, min(1.0, opacity))
+        The staff lines, the clefs, the key and time signatures, the bar lines and measure
+        numbers, every notehead with its stem, flags, beams, ties, brackets and the pedal line
+        are the same on every frame of a system, so they are drawn here and cached. `draw` then
+        blits this surface and adds only what moves: the sounding notes' halo and the cursor.
 
-        # Render staff offscreen to handle transparency cleanly
-        staff_surf = pygame.Surface(staff_rect.size)
+        Returns `(surface, heads, rolled, geo)`: the finished paper, one `(note, x, y,
+        half_w, half_h, pad, light)` per notehead (where the halo goes, and a callable
+        that redraws the note in the sounding colour), the rolled chords as
+        `(notes, x, y_top, y_bot)` so a chord being swept can be marked in the cursor's
+        red, and the geometry the paper was drawn with (so `draw` need not work it out
+        again).
+        """
+        staff_surf = pygame.Surface(local_rect.size)
         staff_surf.fill(STAFF_BG)
+        heads: List[tuple] = []
+        rolled_chords: List[tuple] = []
 
-        local_rect = pygame.Rect(0, 0, staff_rect.w, staff_rect.h)
-
-        # 2. Staff geometry: the user's zoom sets the size, the hands' ink decides how far
-        # apart the staves stand, and one system may shrink to fit its own spread.
-        sys = self.system_for_time(t) if (self.song and self.systems) else None
         geo = self.staff_geometry(sys, local_rect)
         s = geo.s
         treble_mid_y = geo.treble_mid_y
@@ -2311,498 +2336,585 @@ class StaffView:
                 staff_surf.blit(ts_num_img, ts_num_img.get_rect(center=(ts_x, round(ts_mid - s * 0.9))))
                 staff_surf.blit(ts_den_img, ts_den_img.get_rect(center=(ts_x, round(ts_mid + s * 0.9))))
 
-        if self.song and self.systems:
-            # 6. Active system
-            if sys is not None:
-                if usable_w > 10:
-                    # Measure bar lines
-                    num_font = ui_font(10)
-                    for m in sys.measures:
-                        if m.index > sys.measures[0].index:
-                            frac_bar = (m.start_t - sys.start_t) / sys.duration
-                            bx = round(local_rect.x + margin_left + frac_bar * usable_w)
-                            pygame.draw.line(staff_surf, BAR_LINE_COLOR, (bx, treble_top), (bx, bass_bot), 1)
-                            # Measure number at the top of the bar line
-                            num_surf = num_font.render(str(m.index + 1), True, MEASURE_NUM_COLOR)
-                            staff_surf.blit(num_surf, (bx + 3, treble_top - num_surf.get_height() - 1))
+        if self.song and self.systems and sys is not None and usable_w > 10:
+            # Measure bar lines
+            num_font = ui_font(10)
+            for m in sys.measures:
+                if m.index > sys.measures[0].index:
+                    frac_bar = (m.start_t - sys.start_t) / sys.duration
+                    bx = round(local_rect.x + margin_left + frac_bar * usable_w)
+                    pygame.draw.line(staff_surf, BAR_LINE_COLOR, (bx, treble_top), (bx, bass_bot), 1)
+                    # Measure number at the top of the bar line
+                    num_surf = num_font.render(str(m.index + 1), True, MEASURE_NUM_COLOR)
+                    staff_surf.blit(num_surf, (bx + 3, treble_top - num_surf.get_height() - 1))
 
-                    # System ending bar line
-                    sys_end_x = round(local_rect.x + margin_left + usable_w)
-                    is_song_end = (sys.index == len(self.systems) - 1)
-                    if is_song_end:
-                        pygame.draw.line(staff_surf, BAR_LINE_COLOR, (sys_end_x - 4, treble_top), (sys_end_x - 4, bass_bot), 1)
-                        pygame.draw.line(staff_surf, BAR_LINE_COLOR, (sys_end_x, treble_top), (sys_end_x, bass_bot), 3)
-                    else:
-                        pygame.draw.line(staff_surf, BAR_LINE_COLOR, (sys_end_x, treble_top), (sys_end_x, bass_bot), 1)
+            # System ending bar line
+            sys_end_x = round(local_rect.x + margin_left + usable_w)
+            is_song_end = (sys.index == len(self.systems) - 1)
+            if is_song_end:
+                pygame.draw.line(staff_surf, BAR_LINE_COLOR, (sys_end_x - 4, treble_top), (sys_end_x - 4, bass_bot), 1)
+                pygame.draw.line(staff_surf, BAR_LINE_COLOR, (sys_end_x, treble_top), (sys_end_x, bass_bot), 3)
+            else:
+                pygame.draw.line(staff_surf, BAR_LINE_COLOR, (sys_end_x, treble_top), (sys_end_x, bass_bot), 1)
 
-                    # 7. Draw Notes
-                    active_ids = {id(n) for n in active_notes} if active_notes is not None else set()
-                    nw = round(s * 0.75)
-                    nh = round(s * 0.52)
-                    stem_len = round(STEM_LEN_SPACES * s)
+            # 7. Draw Notes
+            nw = round(s * 0.75)
+            nh = round(s * 0.52)
+            stem_len = round(STEM_LEN_SPACES * s)
 
-                    # A note that runs past a bar line is cut at the bar and the pieces tied,
-                    # so no measure shows more ink than it holds. The split happens once, here:
-                    # everything below - layout, beams, brackets, the draw loop - works on the
-                    # pieces, never on the raw notes. `sys_ties` pairs the pieces to join.
-                    sys_pieces, sys_ties = split_at_bar_lines(
-                        sys.notes,
-                        getattr(self.song, "bar_times", []),
-                        getattr(self.song, "beat_times", None),
-                    )
-                    if getattr(self.song, "xml_ties", None):
-                        # The score's own ties. Each side is resolved on its own: when a
-                        # tie runs over a system break only one half is on this system,
-                        # and the draw loop then carries the tie out to the edge (or in
-                        # from it) instead of dropping the pair.
-                        def tie_piece(note, last):
-                            found = [p for p in sys_pieces
-                                     if p.pitch == note.pitch and p.track == note.track
-                                     and p.voice == note.voice
-                                     and p.start >= note.start - 1e-3 and p.end <= note.end + 1e-3
-                                     and sys.start_t - 1e-9 <= p.start < sys.end_t - 1e-9]
-                            if not found:
-                                return None
-                            return max(found, key=lambda p: p.start) if last \
-                                else min(found, key=lambda p: p.start)
-                        for l, r in self.song.xml_ties:
-                            l_piece = tie_piece(l, last=True)
-                            r_piece = tie_piece(r, last=False)
-                            if l_piece is None and r_piece is None:
-                                continue
-                            pair = (l_piece or l, r_piece or r)
-                            if pair not in sys_ties:
-                                sys_ties.append(pair)
-                    # Keep only the pieces that belong to this system (starting on or after
-                    # sys.start_t and before sys.end_t). A note crossing system boundaries is
-                    # split at the bar line; the head piece is rendered on the earlier system
-                    # and the tail piece opens the next system at its first bar line.
-                    kept = [p for p in sys_pieces if sys.start_t - 1e-9 <= p.start < sys.end_t - 1e-9]
-                    kept_ids = {id(p) for p in kept}
-                    sys_ties = [(l, r) for l, r in sys_ties
-                                if id(l) in kept_ids or id(r) in kept_ids]
-                    sys_pieces = kept
+            # A note that runs past a bar line is cut at the bar and the pieces tied,
+            # so no measure shows more ink than it holds. The split happens once, here:
+            # everything below - layout, beams, brackets, the draw loop - works on the
+            # pieces, never on the raw notes. `sys_ties` pairs the pieces to join.
+            sys_pieces, sys_ties = split_at_bar_lines(
+                sys.notes,
+                getattr(self.song, "bar_times", []),
+                getattr(self.song, "beat_times", None),
+            )
+            if getattr(self.song, "xml_ties", None):
+                # The score's own ties. Each side is resolved on its own: when a
+                # tie runs over a system break only one half is on this system,
+                # and the draw loop then carries the tie out to the edge (or in
+                # from it) instead of dropping the pair.
+                def tie_piece(note, last):
+                    found = [p for p in sys_pieces
+                             if p.pitch == note.pitch and p.track == note.track
+                             and p.voice == note.voice
+                             and p.start >= note.start - 1e-3 and p.end <= note.end + 1e-3
+                             and sys.start_t - 1e-9 <= p.start < sys.end_t - 1e-9]
+                    if not found:
+                        return None
+                    return max(found, key=lambda p: p.start) if last \
+                        else min(found, key=lambda p: p.start)
+                for l, r in self.song.xml_ties:
+                    l_piece = tie_piece(l, last=True)
+                    r_piece = tie_piece(r, last=False)
+                    if l_piece is None and r_piece is None:
+                        continue
+                    pair = (l_piece or l, r_piece or r)
+                    if pair not in sys_ties:
+                        sys_ties.append(pair)
+            # Keep only the pieces that belong to this system (starting on or after
+            # sys.start_t and before sys.end_t). A note crossing system boundaries is
+            # split at the bar line; the head piece is rendered on the earlier system
+            # and the tail piece opens the next system at its first bar line.
+            kept = [p for p in sys_pieces if sys.start_t - 1e-9 <= p.start < sys.end_t - 1e-9]
+            kept_ids = {id(p) for p in kept}
+            sys_ties = [(l, r) for l, r in sys_ties
+                        if id(l) in kept_ids or id(r) in kept_ids]
+            sys_pieces = kept
 
-                    # Which notes print an accidental: the key signature already covers
-                    # the notes it alters, and a sign holds for the rest of its measure.
-                    accidentals = plan_accidentals(
-                        sys_pieces,
-                        [m.start_t for m in sys.measures] + [sys.start_t + sys.duration],
-                        key_fifths)
+            # Which notes print an accidental: the key signature already covers
+            # the notes it alters, and a sign holds for the rest of its measure.
+            accidentals = plan_accidentals(
+                sys_pieces,
+                [m.start_t for m in sys.measures] + [sys.start_t + sys.duration],
+                key_fifths)
 
-                    notes_info = compute_notes_info(sys_pieces, sys.start_t, sys.duration, usable_w,
-                                                    margin_left, s, get_beat_duration(self.song),
-                                                    [m.start_t for m in sys.measures[1:]]
-                                                    + [sys.start_t + sys.duration],
-                                                    accidentals)
+            notes_info = compute_notes_info(sys_pieces, sys.start_t, sys.duration, usable_w,
+                                            margin_left, s, get_beat_duration(self.song),
+                                            [m.start_t for m in sys.measures[1:]]
+                                            + [sys.start_t + sys.duration],
+                                            accidentals)
 
-                    # Group the pieces into chords, the same way compute_notes_info did
-                    sorted_notes = sorted(sys_pieces, key=lambda n: (n.start, n.pitch))
-                    beat_len = get_beat_duration(self.song)
-                    time_clusters = group_chords(sorted_notes, beat_len)
+            # Group the pieces into chords, the same way compute_notes_info did
+            sorted_notes = sorted(sys_pieces, key=lambda n: (n.start, n.pitch))
+            beat_len = get_beat_duration(self.song)
+            time_clusters = group_chords(sorted_notes, beat_len)
 
-                    # Where every notehead sits. A stem or a beam is not allowed to run over
-                    # one of these that belongs to another chord - not even one on the other
-                    # staff, since a bar reaching out of one staff can cross the gap and
-                    # land on the other. MuseScore runs the same check (beamlayout.cpp,
-                    # checkBeamNoteOverlap) and moves the beam clear of the note; here it is
-                    # read before the chords are drawn, so a stem that would be printed on
-                    # another hand's note can be turned the other way as well.
-                    all_heads = []
-                    for n in sys_pieces:
-                        i = notes_info[id(n)]
-                        ny_ = note_y(i["step_draw"], i["clef"], treble_mid_y, bass_mid_y, s)
-                        hw = round(nw * 1.15) if printed_value(n, n.duration,
-                                                              get_beat_duration(self.song, n.start)) == WHOLE else nw
-                        all_heads.append((i["x"] - hw, i["x"] + hw, ny_ - nh, ny_ + nh, id(n)))
-                    heads = NoteHeads(all_heads)
+            # Where every notehead sits. A stem or a beam is not allowed to run over
+            # one of these that belongs to another chord - not even one on the other
+            # staff, since a bar reaching out of one staff can cross the gap and
+            # land on the other. MuseScore runs the same check (beamlayout.cpp,
+            # checkBeamNoteOverlap) and moves the beam clear of the note; here it is
+            # read before the chords are drawn, so a stem that would be printed on
+            # another hand's note can be turned the other way as well.
+            all_heads = []
+            for n in sys_pieces:
+                i = notes_info[id(n)]
+                ny_ = note_y(i["step_draw"], i["clef"], treble_mid_y, bass_mid_y, s)
+                hw = round(nw * 1.15) if printed_value(n, n.duration,
+                                                      get_beat_duration(self.song, n.start)) == WHOLE else nw
+                all_heads.append((i["x"] - hw, i["x"] + hw, ny_ - nh, ny_ + nh, id(n)))
+            heads_boxes = NoteHeads(all_heads)
 
-                    # Beaming: short notes of one hand on one staff are joined, but only the
-                    # ones that follow straight on from each other, and only a few at a
-                    # time. Notes that are a real step apart in the rhythm (a rest, a
-                    # longer note, a bar line) end the group, so no beam ever reaches
-                    # across notes that have nothing to do with each other. Grouped here,
-                    # before the chords: a beamed chord's stems are settled with its group,
-                    # so its own stem is not looked at twice.
-                    beamed_note_ids = set()
-                    measure_of = {}
-                    for m in sys.measures:
-                        for n in sys_pieces:
-                            if m.start_t <= n.start < m.end_t:
-                                measure_of[id(n)] = m
+            # Beaming: short notes of one hand on one staff are joined, but only the
+            # ones that follow straight on from each other, and only a few at a
+            # time. Notes that are a real step apart in the rhythm (a rest, a
+            # longer note, a bar line) end the group, so no beam ever reaches
+            # across notes that have nothing to do with each other. Grouped here,
+            # before the chords: a beamed chord's stems are settled with its group,
+            # so its own stem is not looked at twice.
+            beamed_note_ids = set()
+            measure_of = {}
+            for m in sys.measures:
+                for n in sys_pieces:
+                    if m.start_t <= n.start < m.end_t:
+                        measure_of[id(n)] = m
 
-                    beam_groups = group_beams(time_clusters, notes_info,
-                                              lambda st_: get_beat_duration(self.song, st_), measure_of)
-                    for bg in (g[1] for g in beam_groups):
-                        beamed_note_ids.update(id(n) for sub in bg for n in sub)
+            beam_groups = group_beams(time_clusters, notes_info,
+                                      lambda st_: get_beat_duration(self.song, st_), measure_of)
+            for bg in (g[1] for g in beam_groups):
+                beamed_note_ids.update(id(n) for sub in bg for n in sub)
 
-                    # Compute chord-level stem direction and y-bounds for each cluster
-                    for tc_idx, tc in enumerate(time_clusters):
-                        by_hc = {}
-                        for n in tc:
-                            c = notes_info[id(n)]["clef"]
-                            by_hc.setdefault((n.hand, c), []).append(n)
+            # Compute chord-level stem direction and y-bounds for each cluster
+            for tc_idx, tc in enumerate(time_clusters):
+                by_hc = {}
+                for n in tc:
+                    c = notes_info[id(n)]["clef"]
+                    by_hc.setdefault((n.hand, c), []).append(n)
 
-                        for (h, c), c_notes in by_hc.items():
-                            if not c_notes:
-                                continue
-                            mid_step = TREBLE_MID_STEP if c == CLEF_TREBLE else BASS_MID_STEP
-                            chord_stem_up = stem_up_for(
-                                [notes_info[id(n)]["step_draw"] for n in c_notes], mid_step)
+                for (h, c), c_notes in by_hc.items():
+                    if not c_notes:
+                        continue
+                    mid_step = TREBLE_MID_STEP if c == CLEF_TREBLE else BASS_MID_STEP
+                    chord_stem_up = stem_up_for(
+                        [notes_info[id(n)]["step_draw"] for n in c_notes], mid_step)
 
-                            ny_list = [note_y(notes_info[id(n)]["step_draw"], c, treble_mid_y, bass_mid_y, s) for n in c_notes]
-                            y_top = min(ny_list)
-                            y_bot = max(ny_list)
+                    ny_list = [note_y(notes_info[id(n)]["step_draw"], c, treble_mid_y, bass_mid_y, s) for n in c_notes]
+                    y_top = min(ny_list)
+                    y_bot = max(ny_list)
 
-                            # A stem 3.5 spaces long reaches well past its own notehead, and
-                            # where the notes around it are too close - the two hands'
-                            # notes drawn together, with the clash offsets out of room - it
-                            # runs across the other hand's. Turn it over when that happens
-                            # and the other side is clear, and only then, so a chord with
-                            # nothing in the way keeps the direction the engraver chose.
-                            # A beamed chord is settled with its group instead (below).
-                            if (printed_value(c_notes[0], c_notes[0].duration, beat_len) != WHOLE
-                                    and not any(id(n) in beamed_note_ids for n in c_notes)):
-                                own_c = {id(n) for n in c_notes}
-                                cx = notes_info[id(c_notes[0])]["x"]
-                                flags = max(printed_shape(n, n.duration, beat_len)[1]
-                                            for n in c_notes)
-                                near = heads.near(cx - nw - s, cx + nw + 2 * s)
-                                up_hit = place_stem(chord_stem_up, cx, y_top, y_bot,
-                                                   stem_len, flags, s, near, own_c)
-                                down_hit = place_stem(not chord_stem_up, cx, y_top, y_bot,
-                                                      stem_len, flags, s, near, own_c)
-                                if down_hit < up_hit:
-                                    chord_stem_up = not chord_stem_up
+                    # A stem 3.5 spaces long reaches well past its own notehead, and
+                    # where the notes around it are too close - the two hands'
+                    # notes drawn together, with the clash offsets out of room - it
+                    # runs across the other hand's. Turn it over when that happens
+                    # and the other side is clear, and only then, so a chord with
+                    # nothing in the way keeps the direction the engraver chose.
+                    # A beamed chord is settled with its group instead (below).
+                    if (printed_value(c_notes[0], c_notes[0].duration, beat_len) != WHOLE
+                            and not any(id(n) in beamed_note_ids for n in c_notes)):
+                        own_c = {id(n) for n in c_notes}
+                        cx = notes_info[id(c_notes[0])]["x"]
+                        flags = max(printed_shape(n, n.duration, beat_len)[1]
+                                    for n in c_notes)
+                        near = heads_boxes.near(cx - nw - s, cx + nw + 2 * s)
+                        up_hit = place_stem(chord_stem_up, cx, y_top, y_bot,
+                                            stem_len, flags, s, near, own_c)
+                        down_hit = place_stem(not chord_stem_up, cx, y_top, y_bot,
+                                              stem_len, flags, s, near, own_c)
+                        if down_hit < up_hit:
+                            chord_stem_up = not chord_stem_up
 
-                            for n in c_notes:
-                                info_n = notes_info[id(n)]
-                                info_n["chord_stem_up"] = chord_stem_up
-                                info_n["y_top"] = y_top
-                                info_n["y_bot"] = y_bot
-                                info_n["chord_size"] = len(c_notes)
-                                # the notes struck together on one staff share a single stem,
-                                # except a grace note - it keeps its own stem and its own
-                                # height, even in the rare cluster it shares with the main
-                                # note it leans on (group_chords split them by time)
-                                if info_n.get("grace"):
-                                    info_n["stem_key"] = (tc_idx, h, c, id(n))
-                                    my = note_y(info_n["step_draw"], c, treble_mid_y, bass_mid_y, s)
-                                    info_n["y_top"] = info_n["y_bot"] = my
-                                else:
-                                    info_n["stem_key"] = (tc_idx, h, c)
-
-                            # A rolled chord ("arpeggio") is written with its notes
-                            # slightly staggered - they are plucked or swept one after
-                            # another, not all together. That stagger is what marks it,
-                            # so a plain block chord of three or more notes is left alone.
-                            rolled = len(c_notes) >= 3 and (c_notes[-1].start - c_notes[0].start) >= 0.04 * beat_len
-                            if rolled:
-                                chord_x = min(notes_info[id(n)]["x"] for n in c_notes)
-                                arp_col = CURSOR_COLOR if any((id(n) in active_ids) or (n.start <= t < n.end)
-                                                              for n in c_notes) else (60, 60, 75)
-                                draw_arpeggio_wavy_line(staff_surf, chord_x - nw - round(s * 0.6),
-                                                        y_top - s * 0.4, y_bot + s * 0.4, s, arp_col)
-
-                    # Draw the beams: a bar along the stems, plus a second, shorter bar
-                    # inwards for the 16th notes of the run. The groups were decided above.
-                    for c, bg in beam_groups:
-                        notes_here = [n for sub in bg for n in sub]
-
-                        mid_step = TREBLE_MID_STEP if c == CLEF_TREBLE else BASS_MID_STEP
-                        default_up = stem_up_for(
-                            {notes_info[id(n)]["step_draw"] for n in notes_here}, mid_step)
-
-                        # Where each chord's noteheads are, and whether it needs a second bar.
-                        stops = []
-                        for sub in bg:
-                            x = notes_info[id(sub[0])]["x"]
-                            y_top = min(notes_info[id(n)]["y_top"] for n in sub)
-                            y_bot = max(notes_info[id(n)]["y_bot"] for n in sub)
-                            is16 = any(printed_value(n, n.duration, get_beat_duration(self.song, n.start)) == SIXTEENTH
-                                       for n in sub)
-                            stops.append((x, y_top, y_bot, is16))
-
-                        # The bar is dead level, so it is the stems that give way. How far
-                        # it stands off the notes depends on how many bars are stacked: a
-                        # run of sixteenths carries a second bar under the first, and the
-                        # stem has to be long enough that the notehead never sits on them.
-                        bars = 2 if any(st[3] for st in stops) else 1
-                        reach = max(stem_len, round(min_stem_spaces(bars) * s))
-                        beam_w = max(2, round(BEAM_WIDTH_SPACES * s))
-                        gap = round(BEAM_STEP_SPACES * s)
-                        own = {id(n) for n in notes_here}
-
-                        # The engraver's direction first; turned over only if the bar it
-                        # puts there would run over another chord's notehead (the other
-                        # hand's, most of the time - see layout_beam).
-                        near = heads.near(min(st[0] for st in stops) - nw,
-                                          max(st[0] for st in stops) + nw)
-                        beam_stem_up, tip = layout_beam(stops, default_up, reach, beam_w,
-                                                        gap, nw, near, own, s,
-                                                        (local_rect.top, local_rect.bottom))
-
-                        outer, inner = [], []
-                        run = []
-                        for sub, (x, _y_top, _y_bot, is16) in zip(bg, stops):
-                            sx = round(x + nw - 1) if beam_stem_up else round(x - nw + 1)
-                            outer.append((sx, tip))
-                            for n in sub:
-                                notes_info[id(n)]["beam_stem_up"] = beam_stem_up
-                                notes_info[id(n)]["beam_tip_y"] = tip
-                            # the second bar covers only the stretch of 16th notes
-                            if is16:
-                                run.append((sx, tip))
-                            elif run:
-                                inner.append(run)
-                                run = []
-                        if run:
-                            inner.append(run)
-
-                        pygame.draw.lines(staff_surf, STEM_COLOR, False, outer, beam_w)
-                        # A run of sixteenths carries a second bar: it goes between the first
-                        # bar and the notes, so the stems run through it (MuseScore stacks
-                        # the beams inward, and `reach` already leaves room for the stack).
-                        off = gap if beam_stem_up else -gap
-                        for run in inner:
-                            shifted = [(x, y + off) for x, y in run]
-                            if len(run) >= 2:
-                                pygame.draw.lines(staff_surf, STEM_COLOR, False, shifted, beam_w)
-                            else:      # a lone 16th gets a short stub of its own
-                                x, y = shifted[0]
-                                pygame.draw.line(staff_surf, STEM_COLOR, (x - round(s * 0.6), y), (x, y), beam_w)
-
-                    # Grace runs are beamed together too, at graceNoteMag, and the whole
-                    # run carries one stroke through its beam instead of a stroke on every
-                    # stem - MuseScore's look for two flicked notes (BeamLayout::
-                    # beamGraceNotes, beamlayout.cpp:553-620). The notes join the beamed
-                    # set so they draw no flags of their own, and the beam's tip is their
-                    # stem's end.
-                    for _run, g_clusters in group_grace_beams(
-                            find_grace_runs(sorted_notes, beat_len), notes_info,
-                            lambda st_: get_beat_duration(self.song, st_)):
-                        g_notes = [n for c in g_clusters for n in c]
-                        mid_step = TREBLE_MID_STEP if notes_info[id(g_notes[0])]["clef"] == CLEF_TREBLE \
-                            else BASS_MID_STEP
-                        up = stem_up_for([notes_info[id(n)]["step_draw"] for n in g_notes], mid_step)
-
-                        g_stem_len = STEM_LEN_SPACES * s * notation.GRACE_MAG
-                        g_beam_w = max(2, round(BEAM_WIDTH_SPACES * s * notation.GRACE_MAG))
-                        tips = []
-                        for c in g_clusters:
-                            y_top = min(notes_info[id(n)]["y_top"] for n in c)
-                            y_bot = max(notes_info[id(n)]["y_bot"] for n in c)
-                            tip = round(y_top - g_stem_len) if up else round(y_bot + g_stem_len)
-                            tips.append((notes_info[id(c[0])]["x"], tip))
-                        # one level bar for the whole run - a grace run is a flick, it never
-                        # bothers with the stacked bars a slow run of sixteenths carries
-                        bar_y = round(sum(t for _x, t in tips) / len(tips))
-
-                        outer = []
-                        for c, (x, _tip) in zip(g_clusters, tips):
-                            sx = round(x + nw * notation.GRACE_MAG - 1) if up \
-                                else round(x - nw * notation.GRACE_MAG + 1)
-                            outer.append((sx, bar_y))
-                            for n in c:
-                                notes_info[id(n)]["beam_stem_up"] = up
-                                notes_info[id(n)]["beam_tip_y"] = bar_y
-                                beamed_note_ids.add(id(n))
-                        pygame.draw.lines(staff_surf, STEM_COLOR, False, outer, g_beam_w)
-                        notation.beam_slash(staff_surf, s * notation.GRACE_MAG,
-                                            outer[0][0], outer[-1][0], bar_y, up,
-                                            HAND_COLORS[g_notes[0].hand][0])
-
-                    # The 8va / 8vb brackets come after the stems: their line is kept off the
-                    # ink the group really draws, stems and beams included, so it has to know
-                    # which way each stem ended up pointing.
-                    draw_octave_brackets(staff_surf, notes_info, sys_pieces, treble_mid_y, bass_mid_y,
-                                         s, local_rect)
-
-                    # The tuplet brackets (3 over the line: a triplet) come after the stems
-                    # and beams for the same reason: the bracket stands on the side the
-                    # group's stems point to.
-                    draw_tuplet_brackets(staff_surf, notes_info, sys_pieces,
-                                         treble_mid_y, bass_mid_y, s, local_rect)
-
-                    # Draw individual notes - through notation.py, which draws Leland's
-                    # SMuFL glyphs at MuseScore's metrics (see docs/ARCHITECTURE.md)
-                    rendered_chord_stems = set()
-                    for n in sorted_notes:
-                        n_info = notes_info[id(n)]
-                        nx = n_info["x"]
-                        clef = n_info["clef"]
-                        step = n_info["step_draw"]
-                        accidental = accidentals.get(id(n))
-                        ny = note_y(step, clef, treble_mid_y, bass_mid_y, s)
-
-                        sounding = (id(n) in active_ids) or (n.start <= t < n.end)
-                        hand_col = HAND_COLORS.get(n.hand, HAND_COLORS[RIGHT])[0]
-
-                        # A grace note is drawn at graceNoteMag - the head, its accidental,
-                        # the stem and the stroke across it all shrink together, while the
-                        # note stays on its line (staff.py's layout gave it its place).
-                        is_grace = n_info.get("grace", False)
-                        g_s = s * notation.GRACE_MAG if is_grace else s
-
-                        if n.is_rest:
-                            notation.draw_rest(staff_surf, nx, ny, g_s, n_info.get("rest_type", "quarter"), hand_col)
-                            continue
-
-                        nh_g = round(g_s * 0.52)
-
-                        b_len = get_beat_duration(self.song, n.start)
-                        shape = printed_shape(n, n.duration, b_len)
-                        if is_grace:
-                            shape = (shape[0], 0, shape[2])   # the stroke replaces its flags
-                        head_half = notation.HEAD_BOX[shape[0]][2] * 0.5 * g_s
-
-                        # A sounding note keeps the red halo it had before (drawn under
-                        # the notehead, so it shows around it)
-                        if sounding:
-                            pad = max(2, round(g_s * 0.25))
-                            halo = pygame.Rect(round(nx - head_half - pad), round(ny - nh_g - pad),
-                                               round(2 * head_half + 2 * pad), round(2 * nh_g + 2 * pad))
-                            pygame.draw.ellipse(staff_surf, CURSOR_COLOR, halo, 2)
-
-                        # Ledger lines: MuseScore's thickness, reaching a ledgerLineLength
-                        # past the notehead on each side (ChordLayout::updateLedgerLines)
-                        ledger_col = line_color
-                        ext = notation.LEDGER_EXT_SP * g_s
-                        lx0, lx1 = nx - head_half - ext, nx + head_half + ext
-                        if clef == CLEF_TREBLE:
-                            if step <= 28:  # Middle C and below
-                                for st in range(28, step - 1, -2):
-                                    ly = round(treble_mid_y - (st - TREBLE_MID_STEP) * (s * 0.5))
-                                    notation.ledger_line(staff_surf, lx0, lx1, ly, s, ledger_col)
-                            elif step >= 40:  # A5 and above
-                                for st in range(40, step + 1, 2):
-                                    ly = round(treble_mid_y - (st - TREBLE_MID_STEP) * (s * 0.5))
-                                    notation.ledger_line(staff_surf, lx0, lx1, ly, s, ledger_col)
-                        else:  # Bass clef
-                            if step >= 28:  # Middle C and above
-                                for st in range(28, step + 1, 2):
-                                    ly = round(bass_mid_y - (st - BASS_MID_STEP) * (s * 0.5))
-                                    notation.ledger_line(staff_surf, lx0, lx1, ly, s, ledger_col)
-                            elif step <= 16:  # E2 and below
-                                for st in range(16, step - 1, -2):
-                                    ly = round(bass_mid_y - (st - BASS_MID_STEP) * (s * 0.5))
-                                    notation.ledger_line(staff_surf, lx0, lx1, ly, s, ledger_col)
-
-                        # Stem and flags
-                        stem_up = n_info.get("beam_stem_up", n_info.get("chord_stem_up", (step < TREBLE_MID_STEP if clef == CLEF_TREBLE else step < BASS_MID_STEP)))
-                        y_top = n_info.get("y_top", ny)
-                        y_bot = n_info.get("y_bot", ny)
-                        g_stem_len = round(STEM_LEN_SPACES * g_s) if is_grace else stem_len
-
-                        # One stem for the whole chord: notes struck together on one staff
-                        # share a single stem, all pointing the same way.
-                        stem_key = n_info.get("stem_key", (id(n), clef))
-                        stem = None
-                        if shape[0] != "whole" and stem_key not in rendered_chord_stems:
-                            rendered_chord_stems.add(stem_key)
-                            if stem_up:
-                                tip_y = n_info.get("beam_tip_y", round(y_top - g_stem_len))
-                                stem = (round(y_bot), tip_y)
-                            else:
-                                tip_y = n_info.get("beam_tip_y", round(y_bot + g_stem_len))
-                                stem = (round(y_top), tip_y)
-
-                        notation.draw_staff_note(staff_surf, nx, ny, g_s, shape, hand_col, stem_up,
-                                                 sounding, stem=stem,
-                                                 beamed=id(n) in beamed_note_ids,
-                                                 accidental=accidental, on_line=(step % 2 == 0),
-                                                 grace=is_grace)
-
-                    # Ties: after the noteheads, so the crescent reads over the ink, the way
-                    # MuseScore draws it (TDraw::draw(const TieSegment*), tdraw.cpp:3199).
-                    # The tie joins the two heads' facing edges and arches away from the
-                    # stems - MuseScore ties a single note opposite its chord's stem
-                    # (SlurTieLayout::computeUp, slurtielayout.cpp:3086: setUp(!chord->up())).
-                    #
-                    # A tie cut by the system's edge is drawn in full on both systems: the
-                    # earlier one carries it out to the closing bar line, the later one opens
-                    # it at the staff's left edge, so the break still reads as a tie instead
-                    # of a pair of stubs.
-                    limit = margin_left + usable_w
-                    for left, right in sys_ties:
-                        li = notes_info.get(id(left))
-                        ri = notes_info.get(id(right))
-                        if li is None and ri is None:
-                            continue
-                        if li is not None and ri is not None:
-                            if li["x"] >= limit or ri["x"] > limit:
-                                continue
-                            left_head = printed_shape(left, left.duration,
-                                                      get_beat_duration(self.song, left.start))[0]
-                            right_head = printed_shape(right, right.duration,
-                                                       get_beat_duration(self.song, right.start))[0]
-                            x0 = li["x"] + notation.HEAD_BOX[left_head][2] * 0.25 * s
-                            x1 = ri["x"] - notation.HEAD_BOX[right_head][2] * 0.25 * s
-                            ref_note, info_ref = left, li
-                        elif li is not None:
-                            # The tie leaves this system: run it to the closing bar line.
-                            if li["x"] >= limit:
-                                continue
-                            left_head = printed_shape(left, left.duration,
-                                                      get_beat_duration(self.song, left.start))[0]
-                            x0 = li["x"] + notation.HEAD_BOX[left_head][2] * 0.25 * s
-                            x1 = limit
-                            ref_note, info_ref = left, li
+                    for n in c_notes:
+                        info_n = notes_info[id(n)]
+                        info_n["chord_stem_up"] = chord_stem_up
+                        info_n["y_top"] = y_top
+                        info_n["y_bot"] = y_bot
+                        info_n["chord_size"] = len(c_notes)
+                        # the notes struck together on one staff share a single stem,
+                        # except a grace note - it keeps its own stem and its own
+                        # height, even in the rare cluster it shares with the main
+                        # note it leans on (group_chords split them by time)
+                        if info_n.get("grace"):
+                            info_n["stem_key"] = (tc_idx, h, c, id(n))
+                            my = note_y(info_n["step_draw"], c, treble_mid_y, bass_mid_y, s)
+                            info_n["y_top"] = info_n["y_bot"] = my
                         else:
-                            # The tie comes in from the break: open it at the staff's left
-                            # edge, before the clef and key, and land it on the first note.
-                            if ri["x"] > limit:
-                                continue
-                            right_head = printed_shape(right, right.duration,
-                                                       get_beat_duration(self.song, right.start))[0]
-                            x0 = left_x
-                            x1 = ri["x"] - notation.HEAD_BOX[right_head][2] * 0.25 * s
-                            ref_note, info_ref = right, ri
+                            info_n["stem_key"] = (tc_idx, h, c)
 
-                        up = not info_ref.get("beam_stem_up", info_ref.get("chord_stem_up", False))
-                        head = printed_shape(ref_note, ref_note.duration,
-                                             get_beat_duration(self.song, ref_note.start))[0]
-                        # The head's half height (HEAD_BOX is (left, top, right, bottom)) keeps
-                        # the crescent clear of the ink it leaves from.
-                        head_half_h = (notation.HEAD_BOX[head][1]
-                                       - notation.HEAD_BOX[head][3]) * 0.5 * s
-                        side = -1.0 if up else 1.0
-                        y = note_y(info_ref["step_draw"], info_ref["clef"], treble_mid_y, bass_mid_y, s) \
-                            + side * (head_half_h + notation.TIE_END_SP * s)
-                        col = HAND_COLORS.get(ref_note.hand, HAND_COLORS[RIGHT])[0]
-                        if x1 > x0:
-                            notation.draw_tie(staff_surf, s, x0, x1, y, up, col)
+                    # A rolled chord ("arpeggio") is written with its notes
+                    # slightly staggered - they are plucked or swept one after
+                    # another, not all together. That stagger is what marks it,
+                    # so a plain block chord of three or more notes is left alone.
+                    rolled = len(c_notes) >= 3 and (c_notes[-1].start - c_notes[0].start) >= 0.04 * beat_len
+                    if rolled:
+                        chord_x = min(notes_info[id(n)]["x"] for n in c_notes)
+                        draw_arpeggio_wavy_line(staff_surf, chord_x - nw - round(s * 0.6),
+                                                y_top - s * 0.4, y_bot + s * 0.4, s, (60, 60, 75))
+                        # kept so `draw` can turn it red while the chord sounds
+                        rolled_chords.append((tuple(c_notes), chord_x - nw - round(s * 0.6),
+                                              y_top - s * 0.4, y_bot + s * 0.4))
 
-                    # 7b. Pedal brackets: the geometry reserved room for them below the
-                    # lowest ink, so the line never sits on a note.
-                    if self._pedal_spans(sys):
-                        draw_pedal_brackets(staff_surf, self.song.pedal_spans, sys.start_t, sys.end_t,
-                                            lambda st_: local_rect.x + margin_left + (st_ - sys.start_t) / sys.duration * usable_w,
-                                            geo.pedal_y, s)
+            # Draw the beams: a bar along the stems, plus a second, shorter bar
+            # inwards for the 16th notes of the run. The groups were decided above.
+            for c, bg in beam_groups:
+                notes_here = [n for sub in bg for n in sub]
 
-                    # 8. Playback cursor
-                    cx = round(self.cursor_x(t, local_rect, margin_left, usable_w))
-                    cy_top = round(treble_top - s * 0.8)
-                    cy_bot = round(bass_bot + s * 0.8)
-                    ch = cy_bot - cy_top
+                mid_step = TREBLE_MID_STEP if c == CLEF_TREBLE else BASS_MID_STEP
+                default_up = stem_up_for(
+                    {notes_info[id(n)]["step_draw"] for n in notes_here}, mid_step)
 
-                    # Translucent cursor glow band
-                    glow_surf = pygame.Surface((8, ch), pygame.SRCALPHA)
-                    glow_surf.fill((*CURSOR_COLOR, 50))
-                    staff_surf.blit(glow_surf, (cx - 4, cy_top))
+                # Where each chord's noteheads are, and whether it needs a second bar.
+                stops = []
+                for sub in bg:
+                    x = notes_info[id(sub[0])]["x"]
+                    y_top = min(notes_info[id(n)]["y_top"] for n in sub)
+                    y_bot = max(notes_info[id(n)]["y_bot"] for n in sub)
+                    is16 = any(printed_value(n, n.duration, get_beat_duration(self.song, n.start)) == SIXTEENTH
+                               for n in sub)
+                    stops.append((x, y_top, y_bot, is16))
 
-                    # Main cursor line
-                    pygame.draw.line(staff_surf, CURSOR_COLOR, (cx, cy_top), (cx, cy_bot), 2)
+                # The bar is dead level, so it is the stems that give way. How far
+                # it stands off the notes depends on how many bars are stacked: a
+                # run of sixteenths carries a second bar under the first, and the
+                # stem has to be long enough that the notehead never sits on them.
+                bars = 2 if any(st[3] for st in stops) else 1
+                reach = max(stem_len, round(min_stem_spaces(bars) * s))
+                beam_w = max(2, round(BEAM_WIDTH_SPACES * s))
+                gap = round(BEAM_STEP_SPACES * s)
+                own = {id(n) for n in notes_here}
 
-                    # Cursor triangles at top and bottom
-                    tri_top = [(cx - 4, cy_top - 3), (cx + 4, cy_top - 3), (cx, cy_top + 3)]
-                    tri_bot = [(cx - 4, cy_bot + 3), (cx + 4, cy_bot + 3), (cx, cy_bot - 3)]
-                    pygame.draw.polygon(staff_surf, CURSOR_COLOR, tri_top)
-                    pygame.draw.polygon(staff_surf, CURSOR_COLOR, tri_bot)
+                # The engraver's direction first; turned over only if the bar it
+                # puts there would run over another chord's notehead (the other
+                # hand's, most of the time - see layout_beam).
+                near = heads_boxes.near(min(st[0] for st in stops) - nw,
+                                        max(st[0] for st in stops) + nw)
+                beam_stem_up, tip = layout_beam(stops, default_up, reach, beam_w,
+                                                gap, nw, near, own, s,
+                                                (local_rect.top, local_rect.bottom))
 
-        # Blit staff_surf with requested opacity
+                outer, inner = [], []
+                run = []
+                for sub, (x, _y_top, _y_bot, is16) in zip(bg, stops):
+                    sx = round(x + nw - 1) if beam_stem_up else round(x - nw + 1)
+                    outer.append((sx, tip))
+                    for n in sub:
+                        notes_info[id(n)]["beam_stem_up"] = beam_stem_up
+                        notes_info[id(n)]["beam_tip_y"] = tip
+                    # the second bar covers only the stretch of 16th notes
+                    if is16:
+                        run.append((sx, tip))
+                    elif run:
+                        inner.append(run)
+                        run = []
+                if run:
+                    inner.append(run)
+
+                pygame.draw.lines(staff_surf, STEM_COLOR, False, outer, beam_w)
+                # A run of sixteenths carries a second bar: it goes between the first
+                # bar and the notes, so the stems run through it (MuseScore stacks
+                # the beams inward, and `reach` already leaves room for the stack).
+                off = gap if beam_stem_up else -gap
+                for run in inner:
+                    shifted = [(x, y + off) for x, y in run]
+                    if len(run) >= 2:
+                        pygame.draw.lines(staff_surf, STEM_COLOR, False, shifted, beam_w)
+                    else:      # a lone 16th gets a short stub of its own
+                        x, y = shifted[0]
+                        pygame.draw.line(staff_surf, STEM_COLOR, (x - round(s * 0.6), y), (x, y), beam_w)
+
+            # Grace runs are beamed together too, at graceNoteMag, and the whole
+            # run carries one stroke through its beam instead of a stroke on every
+            # stem - MuseScore's look for two flicked notes (BeamLayout::
+            # beamGraceNotes, beamlayout.cpp:553-620). The notes join the beamed
+            # set so they draw no flags of their own, and the beam's tip is their
+            # stem's end.
+            for _run, g_clusters in group_grace_beams(
+                    find_grace_runs(sorted_notes, beat_len), notes_info,
+                    lambda st_: get_beat_duration(self.song, st_)):
+                g_notes = [n for c in g_clusters for n in c]
+                mid_step = TREBLE_MID_STEP if notes_info[id(g_notes[0])]["clef"] == CLEF_TREBLE \
+                    else BASS_MID_STEP
+                up = stem_up_for([notes_info[id(n)]["step_draw"] for n in g_notes], mid_step)
+
+                g_stem_len = STEM_LEN_SPACES * s * notation.GRACE_MAG
+                g_beam_w = max(2, round(BEAM_WIDTH_SPACES * s * notation.GRACE_MAG))
+                tips = []
+                for c in g_clusters:
+                    y_top = min(notes_info[id(n)]["y_top"] for n in c)
+                    y_bot = max(notes_info[id(n)]["y_bot"] for n in c)
+                    tip = round(y_top - g_stem_len) if up else round(y_bot + g_stem_len)
+                    tips.append((notes_info[id(c[0])]["x"], tip))
+                # one level bar for the whole run - a grace run is a flick, it never
+                # bothers with the stacked bars a slow run of sixteenths carries
+                bar_y = round(sum(t for _x, t in tips) / len(tips))
+
+                outer = []
+                for c, (x, _tip) in zip(g_clusters, tips):
+                    sx = round(x + nw * notation.GRACE_MAG - 1) if up \
+                        else round(x - nw * notation.GRACE_MAG + 1)
+                    outer.append((sx, bar_y))
+                    for n in c:
+                        notes_info[id(n)]["beam_stem_up"] = up
+                        notes_info[id(n)]["beam_tip_y"] = bar_y
+                        beamed_note_ids.add(id(n))
+                pygame.draw.lines(staff_surf, STEM_COLOR, False, outer, g_beam_w)
+                notation.beam_slash(staff_surf, s * notation.GRACE_MAG,
+                                    outer[0][0], outer[-1][0], bar_y, up,
+                                    HAND_COLORS[g_notes[0].hand][0])
+
+            # The 8va / 8vb brackets come after the stems: their line is kept off the
+            # ink the group really draws, stems and beams included, so it has to know
+            # which way each stem ended up pointing.
+            draw_octave_brackets(staff_surf, notes_info, sys_pieces, treble_mid_y, bass_mid_y,
+                                 s, local_rect)
+
+            # The tuplet brackets (3 over the line: a triplet) come after the stems
+            # and beams for the same reason: the bracket stands on the side the
+            # group's stems point to.
+            draw_tuplet_brackets(staff_surf, notes_info, sys_pieces,
+                                 treble_mid_y, bass_mid_y, s, local_rect)
+
+            # Draw individual notes - through notation.py, which draws Leland's
+            # SMuFL glyphs at MuseScore's metrics (see docs/ARCHITECTURE.md)
+            rendered_chord_stems = set()
+            for n in sorted_notes:
+                n_info = notes_info[id(n)]
+                nx = n_info["x"]
+                clef = n_info["clef"]
+                step = n_info["step_draw"]
+                accidental = accidentals.get(id(n))
+                ny = note_y(step, clef, treble_mid_y, bass_mid_y, s)
+
+                hand_col = HAND_COLORS.get(n.hand, HAND_COLORS[RIGHT])[0]
+
+                # A grace note is drawn at graceNoteMag - the head, its accidental,
+                # the stem and the stroke across it all shrink together, while the
+                # note stays on its line (staff.py's layout gave it its place).
+                is_grace = n_info.get("grace", False)
+                g_s = s * notation.GRACE_MAG if is_grace else s
+
+                if n.is_rest:
+                    notation.draw_rest(staff_surf, nx, ny, g_s, n_info.get("rest_type", "quarter"), hand_col)
+                    continue
+
+                nh_g = round(g_s * 0.52)
+
+                b_len = get_beat_duration(self.song, n.start)
+                shape = printed_shape(n, n.duration, b_len)
+                if is_grace:
+                    shape = (shape[0], 0, shape[2])   # the stroke replaces its flags
+                head_half = notation.HEAD_BOX[shape[0]][2] * 0.5 * g_s
+
+                # Ledger lines: MuseScore's thickness, reaching a ledgerLineLength
+                # past the notehead on each side (ChordLayout::updateLedgerLines)
+                ledger_col = line_color
+                ext = notation.LEDGER_EXT_SP * g_s
+                lx0, lx1 = nx - head_half - ext, nx + head_half + ext
+                if clef == CLEF_TREBLE:
+                    if step <= 28:  # Middle C and below
+                        for st in range(28, step - 1, -2):
+                            ly = round(treble_mid_y - (st - TREBLE_MID_STEP) * (s * 0.5))
+                            notation.ledger_line(staff_surf, lx0, lx1, ly, s, ledger_col)
+                    elif step >= 40:  # A5 and above
+                        for st in range(40, step + 1, 2):
+                            ly = round(treble_mid_y - (st - TREBLE_MID_STEP) * (s * 0.5))
+                            notation.ledger_line(staff_surf, lx0, lx1, ly, s, ledger_col)
+                else:  # Bass clef
+                    if step >= 28:  # Middle C and above
+                        for st in range(28, step + 1, 2):
+                            ly = round(bass_mid_y - (st - BASS_MID_STEP) * (s * 0.5))
+                            notation.ledger_line(staff_surf, lx0, lx1, ly, s, ledger_col)
+                    elif step <= 16:  # E2 and below
+                        for st in range(16, step - 1, -2):
+                            ly = round(bass_mid_y - (st - BASS_MID_STEP) * (s * 0.5))
+                            notation.ledger_line(staff_surf, lx0, lx1, ly, s, ledger_col)
+
+                # Stem and flags
+                stem_up = n_info.get("beam_stem_up", n_info.get("chord_stem_up", (step < TREBLE_MID_STEP if clef == CLEF_TREBLE else step < BASS_MID_STEP)))
+                y_top = n_info.get("y_top", ny)
+                y_bot = n_info.get("y_bot", ny)
+                g_stem_len = round(STEM_LEN_SPACES * g_s) if is_grace else stem_len
+
+                # One stem for the whole chord: notes struck together on one staff
+                # share a single stem, all pointing the same way.
+                stem_key = n_info.get("stem_key", (id(n), clef))
+                stem = None
+                if shape[0] != "whole" and stem_key not in rendered_chord_stems:
+                    rendered_chord_stems.add(stem_key)
+                    if stem_up:
+                        tip_y = n_info.get("beam_tip_y", round(y_top - g_stem_len))
+                        stem = (round(y_bot), tip_y)
+                    else:
+                        tip_y = n_info.get("beam_tip_y", round(y_bot + g_stem_len))
+                        stem = (round(y_top), tip_y)
+
+                notation.draw_staff_note(staff_surf, nx, ny, g_s, shape, hand_col, stem_up,
+                                         False, stem=stem,
+                                         beamed=id(n) in beamed_note_ids,
+                                         accidental=accidental, on_line=(step % 2 == 0),
+                                         grace=is_grace)
+
+                # What `draw` adds while this note sounds: the ring (its box and pad) and
+                # the same note in the sounding colour, drawn over the cached paper. The
+                # old per-frame pass passed `sounding=True` here; this closure does the
+                # same without working the note's shape, stem or accidental out again.
+                light = (lambda surf_,
+                                nx=nx, ny=ny, g_s=g_s, shape=shape, hand_col=hand_col,
+                                stem_up=stem_up, stem=stem, beamed=id(n) in beamed_note_ids,
+                                accidental=accidental, on_line=(step % 2 == 0), is_grace=is_grace:
+                         notation.draw_staff_note(surf_, nx, ny, g_s, shape, hand_col, stem_up,
+                                                  True, stem=stem, beamed=beamed,
+                                                  accidental=accidental, on_line=on_line,
+                                                  grace=is_grace))
+                heads.append((n, nx, ny, head_half, nh_g, max(2, round(g_s * 0.25)), light))
+
+            # Ties: after the noteheads, so the crescent reads over the ink, the way
+            # MuseScore draws it (TDraw::draw(const TieSegment*), tdraw.cpp:3199).
+            # The tie joins the two heads' facing edges and arches away from the
+            # stems - MuseScore ties a single note opposite its chord's stem
+            # (SlurTieLayout::computeUp, slurtielayout.cpp:3086: setUp(!chord->up())).
+            #
+            # A tie cut by the system's edge is drawn in full on both systems: the
+            # earlier one carries it out to the closing bar line, the later one opens
+            # it at the staff's left edge, so the break still reads as a tie instead
+            # of a pair of stubs.
+            limit = margin_left + usable_w
+            for left, right in sys_ties:
+                li = notes_info.get(id(left))
+                ri = notes_info.get(id(right))
+                if li is None and ri is None:
+                    continue
+                if li is not None and ri is not None:
+                    if li["x"] >= limit or ri["x"] > limit:
+                        continue
+                    left_head = printed_shape(left, left.duration,
+                                              get_beat_duration(self.song, left.start))[0]
+                    right_head = printed_shape(right, right.duration,
+                                               get_beat_duration(self.song, right.start))[0]
+                    x0 = li["x"] + notation.HEAD_BOX[left_head][2] * 0.25 * s
+                    x1 = ri["x"] - notation.HEAD_BOX[right_head][2] * 0.25 * s
+                    ref_note, info_ref = left, li
+                elif li is not None:
+                    # The tie leaves this system: run it to the closing bar line.
+                    if li["x"] >= limit:
+                        continue
+                    left_head = printed_shape(left, left.duration,
+                                              get_beat_duration(self.song, left.start))[0]
+                    x0 = li["x"] + notation.HEAD_BOX[left_head][2] * 0.25 * s
+                    x1 = limit
+                    ref_note, info_ref = left, li
+                else:
+                    # The tie comes in from the break: open it at the staff's left
+                    # edge, before the clef and key, and land it on the first note.
+                    if ri["x"] > limit:
+                        continue
+                    right_head = printed_shape(right, right.duration,
+                                               get_beat_duration(self.song, right.start))[0]
+                    x0 = left_x
+                    x1 = ri["x"] - notation.HEAD_BOX[right_head][2] * 0.25 * s
+                    ref_note, info_ref = right, ri
+
+                up = not info_ref.get("beam_stem_up", info_ref.get("chord_stem_up", False))
+                head = printed_shape(ref_note, ref_note.duration,
+                                     get_beat_duration(self.song, ref_note.start))[0]
+                # The head's half height (HEAD_BOX is (left, top, right, bottom)) keeps
+                # the crescent clear of the ink it leaves from.
+                head_half_h = (notation.HEAD_BOX[head][1]
+                               - notation.HEAD_BOX[head][3]) * 0.5 * s
+                side = -1.0 if up else 1.0
+                y = note_y(info_ref["step_draw"], info_ref["clef"], treble_mid_y, bass_mid_y, s) \
+                    + side * (head_half_h + notation.TIE_END_SP * s)
+                col = HAND_COLORS.get(ref_note.hand, HAND_COLORS[RIGHT])[0]
+                if x1 > x0:
+                    notation.draw_tie(staff_surf, s, x0, x1, y, up, col)
+
+            # 7b. Pedal brackets: the geometry reserved room for them below the
+            # lowest ink, so the line never sits on a note.
+            if self._pedal_spans(sys):
+                draw_pedal_brackets(staff_surf, self.song.pedal_spans, sys.start_t, sys.end_t,
+                                    lambda st_: local_rect.x + margin_left + (st_ - sys.start_t) / sys.duration * usable_w,
+                                    geo.pedal_y, s)
+
+        return staff_surf, heads, rolled_chords, geo
+
+    def time_at_x(self, x: float, staff_rect: pygame.Rect, t: float) -> float:
+        """
+        The song time under screen x on the system drawn at time t (the inverse of `cursor_x`).
+
+        A click on the paper lands on the nearest note or beat of that system, so playback
+        starts on the note the click is pointing at instead of a hair before or after it;
+        a click out in the empty space keeps its own place. The click never jumps to another
+        system: it is the one on the page that answers.
+        """
+        sys = self.system_for_time(t) if (self.song and self.systems) else None
+        if sys is None:
+            return 0.0
+        geo = self.staff_geometry(sys, staff_rect)
+        span = max(1.0, geo.usable_w)
+        frac = min(1.0, max(0.0, (x - staff_rect.x - geo.margin_left) / span))
+        when = sys.start_t + frac * sys.duration
+
+        # The places worth landing on: where a note starts, and where a beat falls.
+        places = [n.start for n in sys.notes if sys.start_t - 1e-9 <= n.start < sys.end_t]
+        beats = getattr(self.song, "beat_times", None) or []
+        lo = bisect.bisect_left(beats, sys.start_t - 1e-9)
+        hi = bisect.bisect_right(beats, sys.end_t + 1e-9)
+        places.extend(beats[lo:hi])
+        if places:
+            best = min(places, key=lambda p: abs(p - when))
+            # snap only when the click is close enough to mean that place: 12 px of time
+            if abs(best - when) <= sys.duration / span * 12:
+                when = best
+        return max(0.0, when)
+
+    def draw(self, surf: pygame.Surface, staff_rect: pygame.Rect, t: float, active_notes: Optional[list] = None, opacity: float = 1.0):
+        """
+        Draw the sheet music: the system's cached paper, the notes that are sounding, the cursor.
+
+        The paper (lines, clefs, signatures, every notehead, stem, beam and tie) is rendered
+        once per system by `_render_static_system_surf` and cached, so a frame here costs one
+        blit plus the few ellipses of the notes being heard - not a whole engraving pass.
+        """
+        if staff_rect.h <= 0 or staff_rect.w <= 0:
+            return
+
+        opacity = max(0.0, min(1.0, opacity))
+        local_rect = pygame.Rect(0, 0, staff_rect.w, staff_rect.h)
+
+        sys = self.system_for_time(t) if (self.song and self.systems) else None
+
+        # The paper is the same on every frame of a system: draw it again only when the
+        # system, the panel's size or the zoom changed.
+        key = (id(sys), local_rect.w, local_rect.h, self.scale, self.target_dur, id(self.song))
+        if self._cached_key != key or self._cached_static_surf is None:
+            self._cached_static_surf, self._cached_heads, self._cached_rolled, self._cached_geo = \
+                self._render_static_system_surf(sys, local_rect)
+            self._cached_key = key
+
+        # One reusable surface the size of the panel: the paper is blitted into it and the
+        # moving parts drawn on top, so a frame never allocates (and never copies) a surface.
+        if self._scratch is None or self._scratch.get_size() != local_rect.size:
+            self._scratch = pygame.Surface(local_rect.size)
+        staff_surf = self._scratch
+        staff_surf.blit(self._cached_static_surf, (0, 0))
+
+        if self.song and self.systems and sys is not None:
+            geo = self._cached_geo
+            s = geo.s
+            active_ids = {id(n) for n in active_notes} if active_notes is not None else set()
+
+            # 8. What moves: the notes being heard (lighter ink and a ring), then the cursor.
+            for n, hx, hy, half_w, half_h, pad, light in self._cached_heads:
+                if (id(n) in active_ids) or (n.start <= t < n.end):
+                    light(staff_surf)
+                    halo = pygame.Rect(round(hx - half_w - pad), round(hy - half_h - pad),
+                                       round(2 * half_w + 2 * pad), round(2 * half_h + 2 * pad))
+                    pygame.draw.ellipse(staff_surf, CURSOR_COLOR, halo, 2)
+
+            # A rolled chord being swept is marked in the cursor's red, as it was before
+            # the paper was cached (the wave itself lives on the cached surface in grey).
+            for chord, wx, wy0, wy1 in self._cached_rolled:
+                if any((id(n) in active_ids) or (n.start <= t < n.end) for n in chord):
+                    draw_arpeggio_wavy_line(staff_surf, wx, wy0, wy1, s, CURSOR_COLOR)
+
+            treble_top = round(geo.treble_mid_y - 2 * s)
+            bass_bot = round(geo.bass_mid_y + 2 * s)
+            cx = round(self.cursor_x(t, local_rect, geo.margin_left, geo.usable_w))
+            cy_top = round(treble_top - s * 0.8)
+            cy_bot = round(bass_bot + s * 0.8)
+            ch = cy_bot - cy_top
+
+            # Translucent cursor glow band
+            glow_surf = pygame.Surface((8, ch), pygame.SRCALPHA)
+            glow_surf.fill((*CURSOR_COLOR, 50))
+            staff_surf.blit(glow_surf, (cx - 4, cy_top))
+
+            # Main cursor line
+            pygame.draw.line(staff_surf, CURSOR_COLOR, (cx, cy_top), (cx, cy_bot), 2)
+
+            # Cursor triangles at top and bottom
+            tri_top = [(cx - 4, cy_top - 3), (cx + 4, cy_top - 3), (cx, cy_top + 3)]
+            tri_bot = [(cx - 4, cy_bot + 3), (cx + 4, cy_bot + 3), (cx, cy_bot - 3)]
+            pygame.draw.polygon(staff_surf, CURSOR_COLOR, tri_top)
+            pygame.draw.polygon(staff_surf, CURSOR_COLOR, tri_bot)
+
+        # Blit staff_surf with requested opacity (set_alpha(None) keeps the opaque blit fast)
         if opacity < 0.999:
             staff_surf.set_alpha(max(0, min(255, int(round(opacity * 255)))))
+        else:
+            staff_surf.set_alpha(None)
         surf.blit(staff_surf, staff_rect.topleft)
 
         # Panel edge border

@@ -79,6 +79,7 @@ FINGER_PX_MAX = 17          # finger numbers on the notes: this big at most (13 
 FINGER_PX_MIN = 11          # ...but narrower than a black key's notes (Visualizer._finger_size)
 FPS_CAP_MIN, FPS_CAP_MAX = 24, 240     # the frame rate cap's range (Settings; past the top: uncapped)
 STAFF_HEIGHT_MIN, STAFF_HEIGHT_MAX = 90, 360    # the sheet-music panel's draggable height range (px)
+STAFF_CLICK_PLAYS = True    # a click on the sheet music starts playing from that note (False: only seeks)
 CONTROLS_H = 30            # the player's controls panel under the progress bar...
 PANEL_MARGIN = 8            # ...this far in from the window's right and below the bar (or the waveform)
 PANEL_ALPHA = 170           # ...and its panels' opacity (0-255): translucent over the notes
@@ -385,8 +386,10 @@ class Visualizer(Transport):
                 if now - getattr(self, "_last_staff_click", 0) < 400:
                     self.reset_staff_zoom()
                     self._last_staff_click = 0
-                    return True
-                self._last_staff_click = now
+                else:
+                    self._last_staff_click = now
+                    self.seek_on_staff(event.pos[0])   # (a click on the paper plays from there)
+                return True
             if self.keys_button.collidepoint(event.pos):
                 self.show_keys = not self.show_keys
                 pianists.set_app_setting("player_keys", self.show_keys)
@@ -648,6 +651,20 @@ class Visualizer(Transport):
         if self.song and self.song.duration > 0:
             frac = min(1.0, max(0.0, x / self.bar_rect.w))
             self.seek(frac * self.song.duration)
+
+    def seek_on_staff(self, x):
+        """
+        A click on the sheet music: seek to the time under that x on the page's system.
+
+        `staff_view.time_at_x` lands the click on the nearest note or beat, so playback
+        starts on the note the click points at (like clicking the score in the web
+        normalizer). With STAFF_CLICK_PLAYS a click while stopped starts playing there.
+        """
+        if not self.song or not hasattr(self, "staff_view") or self.staff_rect.h <= 0:
+            return
+        self.seek(self.staff_view.time_at_x(x, self.staff_rect, self.t))
+        if STAFF_CLICK_PLAYS and self.paused:
+            self.toggle_pause()
 
     def idle(self, budget):
         """The frame's spare time (App.run): the hands work ahead (HandAnimator.prepare) - not while the
