@@ -2104,47 +2104,76 @@ class OSMDSystemItem:
 
     def x_for_time(self, t: float, song) -> float:
         bars = getattr(song, 'bar_times', []) if song else []
-        if not self.measures or not bars:
+        measures = self.measures
+
+        if not measures:
             frac = max(0.0, min(1.0, (t - self.start_t) / self.duration))
-            first_x = self.measures[0]['x'] if self.measures else 50
-            last_x = (self.measures[-1]['x'] + self.measures[-1]['w']) if self.measures else (self.surface.get_width() - 50)
+            sw = self.surface.get_width()
+            return 50 + frac * (sw - 100)
+
+        if not bars:
+            frac = max(0.0, min(1.0, (t - self.start_t) / self.duration))
+            first_x = measures[0]['x']
+            last_x = measures[-1]['x'] + measures[-1]['w']
             return first_x + frac * (last_x - first_x)
 
-        for m in self.measures:
+        # Build a list of (t_start, t_end, x_start, x_end) segments from measure data.
+        # The first measure on each system has its x shifted by the clef/key area.
+        # We normalise by treating the first measure's x as the "content start".
+        segs = []
+        for m in measures:
             bar_idx = m['number'] - 1
             if 0 <= bar_idx < len(bars):
                 t0 = bars[bar_idx]
-                if bar_idx + 1 < len(bars):
-                    t1 = bars[bar_idx + 1]
-                else:
-                    t1 = song.duration if song else (t0 + 2.0)
-                if t0 <= t <= t1:
-                    frac = (t - t0) / max(0.001, t1 - t0)
-                    return m['x'] + frac * m['w']
+                t1 = bars[bar_idx + 1] if bar_idx + 1 < len(bars) else (getattr(song, 'duration', t0 + 2.0))
+                segs.append((t0, t1, m['x'], m['x'] + m['w']))
 
-        if t < self.start_t:
-            return self.measures[0]['x']
-        return self.measures[-1]['x'] + self.measures[-1]['w']
+        if not segs:
+            frac = max(0.0, min(1.0, (t - self.start_t) / self.duration))
+            first_x = measures[0]['x']
+            last_x = measures[-1]['x'] + measures[-1]['w']
+            return first_x + frac * (last_x - first_x)
+
+        # Find the segment that contains t (use strict upper bound to avoid
+        # cursor landing at wrong position when t equals the next bar's start).
+        for t0, t1, x0, x1 in segs:
+            if t0 <= t < t1:
+                frac = (t - t0) / max(0.001, t1 - t0)
+                return x0 + frac * (x1 - x0)
+
+        # t is before the first segment or after the last one.
+        if t <= segs[0][0]:
+            return segs[0][2]
+        return segs[-1][3]
 
     def time_for_x(self, x_in_crop: float, song) -> float:
         bars = getattr(song, 'bar_times', []) if song else []
-        if not self.measures or not bars:
+        measures = self.measures
+        if not measures or not bars:
             return self.start_t
-        for m in self.measures:
-            mx = m['x']
-            mw = max(1.0, m['w'])
-            if mx <= x_in_crop <= mx + mw:
-                bar_idx = m['number'] - 1
-                if 0 <= bar_idx < len(bars):
-                    t0 = bars[bar_idx]
-                    t1 = bars[bar_idx + 1] if bar_idx + 1 < len(bars) else (song.duration if song else t0 + 2.0)
-                    frac = (x_in_crop - mx) / mw
-                    return t0 + frac * (t1 - t0)
-        if x_in_crop < self.measures[0]['x']:
-            b0 = max(0, self.measures[0]['number'] - 1)
-            return bars[b0] if b0 < len(bars) else self.start_t
-        b_last = max(0, self.measures[-1]['number'] - 1)
-        return bars[b_last] if b_last < len(bars) else self.end_t
+
+        # Build segments: (x_start, x_end, t_start, t_end)
+        segs = []
+        for m in measures:
+            bar_idx = m['number'] - 1
+            if 0 <= bar_idx < len(bars):
+                mx = m['x']
+                mw = max(1.0, m['w'])
+                t0 = bars[bar_idx]
+                t1 = bars[bar_idx + 1] if bar_idx + 1 < len(bars) else (getattr(song, 'duration', t0 + 2.0))
+                segs.append((mx, mx + mw, t0, t1))
+
+        if not segs:
+            return self.start_t
+
+        for x0, x1, t0, t1 in segs:
+            if x0 <= x_in_crop < x1:
+                frac = (x_in_crop - x0) / max(0.001, x1 - x0)
+                return t0 + frac * (t1 - t0)
+
+        if x_in_crop < segs[0][0]:
+            return segs[0][2]
+        return segs[-1][3]
 
 
 def _extract_mxl_content(mxl_path: str) -> Optional[str]:

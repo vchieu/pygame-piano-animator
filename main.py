@@ -1621,8 +1621,21 @@ class App:
         """
         song, hands = self._load(path_or_song, normalize=normalize) if hands is None else (path_or_song, hands)
         if song:
-            self._switch(Visualizer(self.screen, song, midi=self.midi, speed=speed or self.speed,
-                                    fonts=self.fonts, audio=audio, hands=hands))
+            viz = Visualizer(self.screen, song, midi=self.midi, speed=speed or self.speed,
+                             fonts=self.fonts, audio=audio, hands=hands)
+            # Wait for OSMD background rendering to finish before showing the visualizer,
+            # so the user never sees the "Đang tạo khuôn nhạc..." placeholder on entry.
+            sv = getattr(viz, 'staff_view', None)
+            if sv is not None and getattr(sv, 'osmd_loading', False):
+                def _wait_osmd():
+                    import time as _time
+                    while getattr(sv, 'osmd_loading', False):
+                        _time.sleep(0.05)
+                try:
+                    run_busy(self.screen, self.fonts, "Preparing sheet music…", _wait_osmd)
+                except Exception:
+                    pass
+            self._switch(viz)
             if song.path:
                 recent.add_play(song.path, soundfont=getattr(self.midi, "path", None),
                                 audio=audio.path if audio else None, speed=speed)
