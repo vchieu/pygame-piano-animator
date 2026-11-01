@@ -593,7 +593,9 @@ def clean_song(song, **options):
     duration = max((n.end for n in clean.notes), default=0.0)
     out = MidiSong(clean.notes, tracks, duration, clean.bar_times, clean.beat_times, song.path, clean.controls,
                    key_fifths=getattr(song, "key_fifths", 0),
-                   time_signature=(clean.beats_per_bar, 4))
+                   time_signature=(clean.beats_per_bar, 4),
+                   time_changes=getattr(song, "time_changes", None),
+                   bar_sigs=getattr(song, "bar_sigs", None))
     out.from_musicxml = getattr(song, "from_musicxml", False)
     out.quarter_times = [(0.0, 60.0 / clean.bpm)]
     out.pickup_end = clean.pickup_end

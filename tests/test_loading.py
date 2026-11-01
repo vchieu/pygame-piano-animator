@@ -112,6 +112,45 @@ def test_midi_triplet_detection():
     assert [n.printed for n in m51] == ["quarter", "quarter", "quarter"]
 
 
+def test_mariage_damour_time_signature_changes():
+    """Mariage d'Amour has time signature changes: 4/4 (bars 1-2), 5/4 (bar 3), 4/4 (4-6), 5/4 (7), 4/4 (8-9), 3/4 (10), 4/4 (11+)."""
+    import os
+    import midi_loader
+    import midi_to_musicxml
+    import xml.etree.ElementTree as ET
+
+    p = midi_path("Paul de Senneville - Mariage d'Amour.mid")
+    if not os.path.exists(p):
+        pytest.skip("Mariage d'Amour.mid not found")
+    song = midi_loader.load_midi(p)
+
+    expected_bar_sigs = [(4, 4), (4, 4), (5, 4), (4, 4), (4, 4), (4, 4), (5, 4), (4, 4), (4, 4), (3, 4), (4, 4)]
+    assert song.bar_sigs[:11] == expected_bar_sigs
+
+    # Check that song_to_musicxml writes <time> elements at measure changes
+    xml = midi_to_musicxml.song_to_musicxml(song)
+    root = ET.fromstring(xml)
+    measures = root.findall(".//part[@id='P1']/measure")
+
+    def get_time(m):
+        time_elem = m.find(".//attributes/time")
+        if time_elem is not None:
+            return (int(time_elem.find("beats").text), int(time_elem.find("beat-type").text))
+        return None
+
+    assert get_time(measures[0]) == (4, 4)   # Measure 1: 4/4
+    assert get_time(measures[1]) is None      # Measure 2: no change (4/4)
+    assert get_time(measures[2]) == (5, 4)   # Measure 3: 5/4
+    assert get_time(measures[3]) == (4, 4)   # Measure 4: 4/4
+    assert get_time(measures[4]) is None      # Measure 5: no change
+    assert get_time(measures[5]) is None      # Measure 6: no change
+    assert get_time(measures[6]) == (5, 4)   # Measure 7: 5/4
+    assert get_time(measures[7]) == (4, 4)   # Measure 8: 4/4
+    assert get_time(measures[8]) is None      # Measure 9: no change
+    assert get_time(measures[9]) == (3, 4)   # Measure 10: 3/4
+    assert get_time(measures[10]) == (4, 4)  # Measure 11: 4/4
+
+
 def test_spell_with_key_octave_calculation():
     """spell_with_key matches diatonic_step octaves for flat and sharp key signatures."""
     import midi_loader

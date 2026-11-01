@@ -1341,7 +1341,8 @@ def vertical_extents(steps: dict, s: float) -> Tuple[float, float, float, float]
 def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: float, usable_w: float,
                        margin_left: float, s: float, beat_len: float = 0.5,
                        bar_times: Optional[List[float]] = None,
-                       accidentals: Optional[dict] = None) -> dict:
+                       accidentals: Optional[dict] = None,
+                       song: Optional[Any] = None) -> dict:
     """
     Computes rendering info for notes in a system:
     x coordinate (with clashing/overlap offset), clef, step_draw, octave_shift, label_text.
@@ -1561,9 +1562,17 @@ def compute_notes_info(sys_notes: List[Note], sys_start: float, sys_duration: fl
             before = [bt for bt in bar_times if bt <= cluster[0].start + 1e-9]
             if not before:
                 continue
-            bx = margin_left + (max(before) - sys_start) / sys_duration * usable_w
+            last_bt = max(before)
+            bx = margin_left + (last_bt - sys_start) / sys_duration * usable_w
             left_ink = min(info[id(n)]["x"] for n in cluster) - cluster_left_ink(cluster)
             want = bx + bar_gap
+            if song is not None and hasattr(song, "bar_sig_at") and hasattr(song, "bar_times"):
+                bt_list = getattr(song, "bar_times", [])
+                if last_bt in bt_list:
+                    k = bt_list.index(last_bt)
+                    if k > 0 and song.bar_sig_at(k) != song.bar_sig_at(k - 1):
+                        ts_w = (notation.TIME_SIG_HALF_W_SP * 2.0 + 0.4) * s
+                        want = bx + bar_gap + ts_w
             if left_ink < want:
                 x_max = max(info[id(n)]["x"] for n in cluster)
                 shift = min(want - left_ink, max(0.0, right_limit - x_max))
@@ -2218,9 +2227,9 @@ class OSMDSystemItem:
                     pts.append((t_e, e['x']))
 
                 if pts[0][0] > t0 + 0.001:
-                    pts.insert(0, (t0, pts[0][1]))
+                    pts.insert(0, (t0, m['x']))
                 else:
-                    pts[0] = (t0, pts[0][1])
+                    pts[0] = (t0, m['x'])
                 pts.append((t1, m['x'] + m['w']))
 
                 for k in range(len(pts) - 1):
@@ -2527,15 +2536,18 @@ class StaffView:
                 new_systems = []
                 full_w, full_h = full_surf.get_size()
 
-                all_m_nums = [m['number'] for info in systems_info for m in info.get('measures', [])]
+                all_m_nums = [m['number'] for info in systems_info for m in info.get('measures', []) if m.get('number', -1) >= 0]
                 first_measure_num = min(all_m_nums) if all_m_nums else 1
 
                 # Walk all measures in sequential score order and assign score_idx (0, 1, 2, ...)
                 score_m_counter = 0
                 for info in systems_info:
                     for m in info.get('measures', []):
-                        m['score_idx'] = score_m_counter
-                        score_m_counter += 1
+                        if m.get('number', -1) >= 0:
+                            m['score_idx'] = score_m_counter
+                            score_m_counter += 1
+                        else:
+                            m['score_idx'] = -1
 
                 # Safety check: OSMD measure count vs bar_times length.
                 # bar_times has N+1 entries for N played measures.
@@ -2899,7 +2911,11 @@ class StaffView:
         # denominator on the line below (notation.draw_time_signature places them). The
         # old UI-font digits are the fallback for a build without the music font.
         ts_x = time_sig_x(left_x, s, key_end)
-        ts_num, ts_den = getattr(self.song, "time_signature", (4, 4)) if self.song else (4, 4)
+        m0 = sys.measures[0] if (sys and sys.measures) else None
+        if self.song and m0 and hasattr(self.song, "bar_sig_at"):
+            ts_num, ts_den = self.song.bar_sig_at(m0.index)
+        else:
+            ts_num, ts_den = getattr(self.song, "time_signature", (4, 4)) if self.song else (4, 4)
         drawn = [notation.draw_time_signature(staff_surf, ts_x, ts_mid, s, ts_num, ts_den, TIME_SIG_COLOR)
                  for ts_mid in (treble_mid_y, bass_mid_y)]
         if not all(drawn):
@@ -2913,7 +2929,7 @@ class StaffView:
         if self.song and self.systems and sys is not None and usable_w > 10:
             # Measure bar lines
             num_font = ui_font(10)
-            for m in sys.measures:
+            for i_m, m in enumerate(sys.measures):
                 if m.index > sys.measures[0].index:
                     frac_bar = (m.start_t - sys.start_t) / sys.duration
                     bx = round(local_rect.x + margin_left + frac_bar * usable_w)
@@ -2921,6 +2937,23 @@ class StaffView:
                     # Measure number at the top of the bar line
                     num_surf = num_font.render(str(m.index + 1), True, MEASURE_NUM_COLOR)
                     staff_surf.blit(num_surf, (bx + 3, treble_top - num_surf.get_height() - 1))
+
+                    # Time signature change at measure boundary
+                    m_ts = self.song.bar_sig_at(m.index) if hasattr(self.song, "bar_sig_at") else getattr(self.song, "time_signature", (4, 4))
+                    prev_m = sys.measures[i_m - 1]
+                    prev_ts = self.song.bar_sig_at(prev_m.index) if hasattr(self.song, "bar_sig_at") else getattr(self.song, "time_signature", (4, 4))
+                    if m_ts != prev_ts:
+                        ts_num_m, ts_den_m = m_ts
+                        ts_x_m = bx + round(notation.TIME_SIG_HALF_W_SP * s + s * 0.2)
+                        drawn_m = [notation.draw_time_signature(staff_surf, ts_x_m, ts_mid, s, ts_num_m, ts_den_m, TIME_SIG_COLOR)
+                                   for ts_mid in (treble_mid_y, bass_mid_y)]
+                        if not all(drawn_m):
+                            ts_font_m = ui_font(max(10, int(s * 1.6)), bold=True)
+                            ts_num_img_m = ts_font_m.render(str(ts_num_m), True, TIME_SIG_COLOR)
+                            ts_den_img_m = ts_font_m.render(str(ts_den_m), True, TIME_SIG_COLOR)
+                            for ts_mid in (treble_mid_y, bass_mid_y):
+                                staff_surf.blit(ts_num_img_m, ts_num_img_m.get_rect(center=(ts_x_m, round(ts_mid - s * 0.9))))
+                                staff_surf.blit(ts_den_img_m, ts_den_img_m.get_rect(center=(ts_x_m, round(ts_mid + s * 0.9))))
 
             # System ending bar line
             sys_end_x = round(local_rect.x + margin_left + usable_w)
@@ -2989,7 +3022,7 @@ class StaffView:
                                             margin_left, s, get_beat_duration(self.song),
                                             [m.start_t for m in sys.measures[1:]]
                                             + [sys.start_t + sys.duration],
-                                            accidentals)
+                                            accidentals, song=self.song)
 
             # Group the pieces into chords, the same way compute_notes_info did
             sorted_notes = sorted(sys_pieces, key=lambda n: (n.start, n.pitch))

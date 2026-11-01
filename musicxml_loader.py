@@ -977,7 +977,8 @@ def load_musicxml(path: str, hands_from_file: bool = True, fingering: str = "fil
     duration = max((n.end for n in notes), default=duration)
     song = MidiSong(notes, tracks, duration, bar_times, beat_times, path, controls,
                     key_fifths=key_fifths, key_changes=key_changes,
-                    xml_ties=_pair_ties(notes), time_signature=time_signature)
+                    xml_ties=_pair_ties(notes), time_signature=time_signature,
+                    time_changes=time_changes)
     song.quarter_times = quarter_times
     song.from_musicxml = True
     if _first_measure_pickup(part_measures, order) and len(bar_times) >= 2:

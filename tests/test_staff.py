@@ -2437,3 +2437,33 @@ def test_staff_draws_rests(screen):
 
     assert len(drawn_rests) > 0
 
+
+def test_staff_draws_time_signature_changes(screen):
+    """When a song has time signature changes across measures, native staff draws time signatures at change locations."""
+    import midi_loader
+    song = midi_loader.load_midi(midi_path("Paul de Senneville - Mariage d'Amour.mid"))
+    sv = staff.StaffView(song)
+    rect = pygame.Rect(0, 0, 1200, 140)
+
+    drawn_ts = []
+    real_draw_ts = notation.draw_time_signature
+
+    def spy_ts(*args, **kwargs):
+        num, den = args[4], args[5]
+        drawn_ts.append((num, den))
+        return real_draw_ts(*args, **kwargs)
+
+    notation.draw_time_signature = spy_ts
+    staff.notation.draw_time_signature = spy_ts
+    try:
+        sv.draw(screen, rect, 0.0)
+    finally:
+        notation.draw_time_signature = real_draw_ts
+        staff.notation.draw_time_signature = real_draw_ts
+
+    # The first system should draw the initial (4, 4) at header, and (5, 4) at measure 3 if inside system 0
+    # Or multiple time signatures drawn depending on system bounds
+    assert (4, 4) in drawn_ts
+    assert (5, 4) in drawn_ts
+
+

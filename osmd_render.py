@@ -222,7 +222,7 @@ class OSMDRenderer:
                         for (let mIdx = 0; mIdx < numMeasures; mIdx++) {
                             const m0 = staffLines[0].Measures[mIdx];
                             const mNum = m0.MeasureNumber;
-                            if (mNum !== undefined && mNum !== null) {
+                            if (mNum !== undefined && mNum !== null && mNum >= 0) {
                                 startMeasure = Math.min(startMeasure, mNum);
                                 endMeasure = Math.max(endMeasure, mNum);
                                 const sm = m0.parentSourceMeasure;

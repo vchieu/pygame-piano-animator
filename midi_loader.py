@@ -207,7 +207,9 @@ class MidiSong:
                  controls: Optional[list] = None, key_fifths: int = 0,
                  key_changes: Optional[list] = None,
                  xml_ties: Optional[List[Tuple[Note, Note]]] = None,
-                 time_signature: Tuple[int, int] = (4, 4)):
+                 time_signature: Tuple[int, int] = (4, 4),
+                 time_changes: Optional[list] = None,
+                 bar_sigs: Optional[List[Tuple[int, int]]] = None):
         self.notes: List[Note] = sorted(notes, key=lambda n: (n.start, n.pitch))
         self.xml_ties = list(xml_ties or [])
         # pedals: [(time, controller, value)] for sustain (64), sostenuto (66), soft (67).
@@ -238,6 +240,26 @@ class MidiSong:
         self.normalized = False
         self.clean = None
         self.time_signature = time_signature if time_signature and len(time_signature) == 2 else (4, 4)
+        self.time_changes: List[Tuple[float, int, int]] = sorted(
+            (float(t), int(b), int(d)) for t, b, d in (time_changes or []))
+        if not self.time_changes or self.time_changes[0][0] > 0.001:
+            self.time_changes.insert(0, (0.0, self.time_signature[0], self.time_signature[1]))
+
+        if bar_sigs is not None:
+            self.bar_sigs = [(int(b), int(d)) for b, d in bar_sigs]
+        elif self.bar_times:
+            sigs = []
+            for t in self.bar_times:
+                cur = self.time_signature
+                for tc_t, b, d in self.time_changes:
+                    if tc_t <= t + 0.01:
+                        cur = (b, d)
+                    else:
+                        break
+                sigs.append(cur)
+            self.bar_sigs = sigs
+        else:
+            self.bar_sigs = []
         # The key signature the file declares: how many sharps (positive) or flats
         # (negative) it holds. The staff draws it at the head of every system and
         # leaves out the accidentals the key already covers (see staff.py).
@@ -304,6 +326,25 @@ class MidiSong:
         """How many seconds a quarter note lasts at time t (0.5 s when the tempo is unknown)."""
         i = bisect.bisect_right(self.quarter_times, (float(t), float("inf")))
         return self.quarter_times[i - 1][1] if i else (self.quarter_times[0][1] if self.quarter_times else 0.5)
+
+    def time_sig_at(self, t: float) -> Tuple[int, int]:
+        """Time signature in force at time t seconds (beats, beat_type)."""
+        cur = self.time_signature
+        for tc_t, b, d in getattr(self, "time_changes", []):
+            if tc_t <= t + 0.01:
+                cur = (b, d)
+            else:
+                break
+        return cur
+
+    def bar_sig_at(self, m_idx: int) -> Tuple[int, int]:
+        """Time signature of measure m_idx (beats, beat_type)."""
+        sigs = getattr(self, "bar_sigs", None)
+        if sigs and 0 <= m_idx < len(sigs):
+            return sigs[m_idx]
+        if hasattr(self, "bar_times") and 0 <= m_idx < len(self.bar_times):
+            return self.time_sig_at(self.bar_times[m_idx])
+        return self.time_signature
 
     def _pedal_key(self):
         """Key for caching auto pedal calculations across non-pitch/non-timing edits."""
@@ -1165,8 +1206,14 @@ def load_midi(path: str, include_drums: bool = False, split_pitch: int = MIDDLE_
                 controls.append((float(cc.time), int(cc.number), int(cc.value)))
 
     duration = max((n.end for n in notes), default=0.0)
+    time_changes = []
+    if hasattr(pm, "time_signature_changes") and pm.time_signature_changes:
+        for ts in pm.time_signature_changes:
+            time_changes.append((float(ts.time), int(ts.numerator), int(ts.denominator)))
+    time_changes.sort(key=lambda x: x[0])
     song = MidiSong(notes, tracks, duration, bar_times, beat_times, path, controls,
-                    key_fifths=key_fifths, time_signature=time_sig)
+                    key_fifths=key_fifths, time_signature=time_sig,
+                    time_changes=time_changes)
     try:
         tempo_times, tempi = pm.get_tempo_changes()
         song.quarter_times = [(float(t), 60.0 / float(bpm))
