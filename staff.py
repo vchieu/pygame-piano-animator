@@ -2178,7 +2178,7 @@ class OSMDSystemItem:
             sw = self.surface.get_width()
             return 50 + frac * (sw - 100)
 
-        # Default start x if t is before start_t
+        # Default start x if t is before start_t or before bars[0]
         first_entry_x = (measures[0].get('entries')[0]['x']
                          if measures and measures[0].get('entries')
                          else (measures[0]['x'] if measures else 50))
@@ -2191,11 +2191,9 @@ class OSMDSystemItem:
 
         total_dur = getattr(song, 'duration', 10.0)
 
-        # Smooth lead-in before bars[0]: move from measure start line to first notehead
-        if t < bars[0]:
-            t_lead = min(0.0, bars[0] - 1.5)
-            frac = max(0.0, min(1.0, (t - t_lead) / max(0.001, bars[0] - t_lead)))
-            return first_m_x + frac * (first_entry_x - first_m_x)
+        # Before bars[0]: stay directly on the first notehead of the score
+        if t <= bars[0]:
+            return first_entry_x
 
         # Determine played measure index play_idx
         play_idx = bisect.bisect_right(bars, t) - 1
@@ -2210,7 +2208,7 @@ class OSMDSystemItem:
         t1 = bars[play_idx + 1] if play_idx + 1 < len(bars) else total_dur
 
         # Match measure in this system
-        for m in measures:
+        for m_idx, m in enumerate(measures):
             m_score_idx = m.get('score_idx', m.get('number', 0) - self.first_measure_num)
             if m_score_idx == target_score_idx:
                 entries = m.get('entries', [])
@@ -2226,11 +2224,13 @@ class OSMDSystemItem:
                     t_e = _map_measure_frac_to_time(song, t0, t1, frac_e)
                     pts.append((t_e, e['x']))
 
-                if pts[0][0] > t0 + 0.001:
+                if m_idx > 0 and pts[0][0] > t0 + 0.001:
                     pts.insert(0, (t0, m['x']))
-                else:
-                    pts[0] = (t0, m['x'])
-                pts.append((t1, m['x'] + m['w']))
+                if pts[-1][0] < t1 - 0.001:
+                    pts.append((t1, m['x'] + m['w']))
+
+                if t <= pts[0][0]:
+                    return pts[0][1]
 
                 for k in range(len(pts) - 1):
                     ta, xa = pts[k]
@@ -2243,7 +2243,7 @@ class OSMDSystemItem:
         # Measure not in this system: check whether it is before or after
         sys_first_idx = measures[0].get('score_idx', measures[0].get('number', 0) - self.first_measure_num)
         if target_score_idx < sys_first_idx:
-            return measures[0]['x']
+            return first_entry_x
         return measures[-1]['x'] + measures[-1]['w']
 
     def time_for_x(self, x_in_crop: float, song, repeat_order: Optional[List[int]] = None, current_t: float = 0.0) -> float:
