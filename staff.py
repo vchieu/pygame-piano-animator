@@ -2150,6 +2150,37 @@ def _map_measure_time_to_frac(song, t0: float, t1: float, t: float) -> float:
     return 1.0
 
 
+def _build_measure_interpolation_points(song, m: dict, m_idx: int, t0: float, t1: float) -> List[Tuple[float, float]]:
+    """
+    Build synchronized (time, x) piecewise interpolation points for a measure.
+    Shared between x_for_time and time_for_x to ensure 100% symmetric mapping.
+    """
+    entries = m.get('entries', [])
+    mx = m['x']
+    mw = max(1.0, m['w'])
+    if not entries:
+        return [(t0, mx), (t1, mx + mw)]
+
+    abs_ts = m.get('absTs', 0.0)
+    dur_ts = max(0.0001, m.get('dur', 1.0))
+    pts = []
+    for e in entries:
+        frac_e = max(0.0, min(1.0, (e['ts'] - abs_ts) / dur_ts))
+        t_e = _map_measure_frac_to_time(song, t0, t1, frac_e)
+        pts.append((t_e, e['x']))
+
+    if m_idx > 0 and pts[0][0] > t0 + 0.001:
+        pts.insert(0, (t0, mx))
+    elif pts[0][0] > t0 + 0.001:
+        pts.insert(0, (t0, pts[0][1]))
+    else:
+        pts[0] = (t0, pts[0][1])
+
+    if pts[-1][0] < t1 - 0.001:
+        pts.append((t1, mx + mw))
+    return pts
+
+
 class OSMDSystemItem:
     """Represents a rendered staff system slice from OSMD with measure timing."""
     def __init__(self, system_index: int, surface: pygame.Surface, start_t: float, end_t: float,
@@ -2216,18 +2247,7 @@ class OSMDSystemItem:
                     frac = _map_measure_time_to_frac(song, t0, t1, t)
                     return m['x'] + frac * m['w']
 
-                abs_ts = m.get('absTs', 0.0)
-                dur_ts = max(0.0001, m.get('dur', 1.0))
-                pts = []
-                for e in entries:
-                    frac_e = max(0.0, min(1.0, (e['ts'] - abs_ts) / dur_ts))
-                    t_e = _map_measure_frac_to_time(song, t0, t1, frac_e)
-                    pts.append((t_e, e['x']))
-
-                if m_idx > 0 and pts[0][0] > t0 + 0.001:
-                    pts.insert(0, (t0, m['x']))
-                if pts[-1][0] < t1 - 0.001:
-                    pts.append((t1, m['x'] + m['w']))
+                pts = _build_measure_interpolation_points(song, m, m_idx, t0, t1)
 
                 if t <= pts[0][0]:
                     return pts[0][1]
@@ -2267,7 +2287,9 @@ class OSMDSystemItem:
         for m_idx, m in enumerate(measures):
             mx = m['x']
             mw = max(1.0, m['w'])
-            if mx <= x_in_crop < mx + mw:
+            is_last_m = (m_idx == len(measures) - 1)
+            in_measure = (mx <= x_in_crop <= mx + mw) if is_last_m else (mx <= x_in_crop < mx + mw)
+            if in_measure:
                 m_score_idx = m.get('score_idx', m.get('number', 0) - self.first_measure_num)
                 candidates = get_play_idx_candidates(m_score_idx)
                 if not candidates:
@@ -2278,21 +2300,18 @@ class OSMDSystemItem:
 
                 entries = m.get('entries', [])
                 if entries:
-                    abs_ts = m.get('absTs', 0.0)
-                    dur_ts = max(0.0001, m.get('dur', 1.0))
-                    pts = []
-                    for e in entries:
-                        frac_e = max(0.0, min(1.0, (e['ts'] - abs_ts) / dur_ts))
-                        t_e = _map_measure_frac_to_time(song, t0, t1, frac_e)
-                        pts.append((t_e, e['x']))
-                    if m_idx > 0 and pts[0][0] > t0 + 0.001:
-                        pts.insert(0, (t0, mx))
-                    elif pts[0][0] > t0 + 0.001:
-                        pts.insert(0, (t0, pts[0][1]))
-                    else:
-                        pts[0] = (t0, pts[0][1])
-                    if pts[-1][0] < t1 - 0.001:
-                        pts.append((t1, mx + mw))
+                    pts = _build_measure_interpolation_points(song, m, m_idx, t0, t1)
+
+                    # Snap to note entry if click is close (within 12px in crop coordinates)
+                    best_pt = None
+                    best_dist = 12.0
+                    for e_time, e_x in pts:
+                        d = abs(x_in_crop - e_x)
+                        if d <= best_dist:
+                            best_dist = d
+                            best_pt = e_time
+                    if best_pt is not None:
+                        return best_pt
 
                     for k in range(len(pts) - 1):
                         ta, xa = pts[k]
@@ -2326,7 +2345,7 @@ class OSMDSystemItem:
         cands = get_play_idx_candidates(m_last_score_idx)
         if cands:
             b_last = min(cands, key=lambda idx: abs(bars[idx] - current_t))
-            return bars[b_last]
+            return bars[b_last + 1] if b_last + 1 < len(bars) else total_dur
         return self.end_t
 
 
@@ -2548,7 +2567,7 @@ class StaffView:
                 import osmd_render
                 disp = pygame.display.get_surface()
                 dw = disp.get_width() if disp else 1400
-                render_w = target_width or max(1200, min(2400, dw))
+                render_w = target_width or max(1600, min(3200, int(dw * 1.5)))
                 self._osmd_render_width = render_w
 
                 full_surf, systems_info = osmd_render.render_full_score(xml_content, width=render_w)
@@ -2591,18 +2610,21 @@ class StaffView:
                     s_idx = info['systemIndex']
                     staff_min_y = info.get('staffLinesMinY', info['y'])
                     staff_max_y = info.get('staffLinesMaxY', info['y'] + info['h'])
-                    pad_top = 65
-                    pad_bot = 35
-                    crop_y = max(0, int(staff_min_y - pad_top))
+
+                    # Encompass full system elements (staves, ledger lines, 8va brackets, tuplets)
+                    sys_top = min(info.get('y', staff_min_y), staff_min_y)
+                    sys_bottom = max(info.get('y', staff_min_y) + info.get('h', staff_max_y - staff_min_y), staff_max_y)
+                    pad_top = 15
+                    pad_bot = 15
+                    crop_y = max(0, int(sys_top - pad_top))
 
                     if i + 1 < num_systems:
-                        next_staff_min_y = systems_info[i + 1].get('staffLinesMinY', None)
-                        if next_staff_min_y is not None:
-                            max_crop_bottom = min(int(staff_max_y + pad_bot), int(next_staff_min_y - 45))
-                        else:
-                            max_crop_bottom = int(staff_max_y + pad_bot)
+                        next_info = systems_info[i + 1]
+                        next_top = min(next_info.get('y', next_info.get('staffLinesMinY', full_h)),
+                                       next_info.get('staffLinesMinY', full_h))
+                        max_crop_bottom = min(int(sys_bottom + pad_bot), max(int(sys_bottom + 5), int(next_top - 4)))
                     else:
-                        max_crop_bottom = min(full_h, int(staff_max_y + pad_bot))
+                        max_crop_bottom = min(full_h, int(sys_bottom + pad_bot))
 
                     crop_h = max_crop_bottom - crop_y
                     if crop_h <= 10:
@@ -3474,7 +3496,7 @@ class StaffView:
             sys_item = self.osmd_system_for_time(t)
             if sys_item is not None:
                 sw, sh = sys_item.surface.get_size()
-                scale = min(staff_rect.w / max(1, sw), staff_rect.h / max(1, sh))
+                scale = min(staff_rect.w / max(1, sw), (staff_rect.h - 8) / max(1, sh))
                 dest_x = (staff_rect.w - int(sw * scale)) // 2
                 cx_in_crop = (x - staff_rect.x - dest_x) / max(0.0001, scale)
                 return sys_item.time_for_x(cx_in_crop, self.song, repeat_order=repeat_order, current_t=t)

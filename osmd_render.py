@@ -96,6 +96,9 @@ def _create_render_html(xml_content: str, width: int = 1400) -> str:
     // Generous system spacing to eliminate note clipping and prevent systems from leaking into each other
     window.osmd.rules.MinimumDistanceBetweenSystems = 12.0;
     window.osmd.rules.MinSkyBottomDistBetweenSystems = 10.0;
+    window.osmd.rules.BetweenStaffDistance = 5.0;
+    window.osmd.rules.FillEmptyMeasuresWithWholeRest = true;
+    window.osmd.rules.DisplacedNoteMargin = 0.2;
     
     window.osmd.load(url).then(() => {{
       window.osmd.render();
@@ -138,7 +141,7 @@ class OSMDRenderer:
             print("Starting OSMD renderer...")
             playwright = sync_playwright().start()
             browser = playwright.chromium.launch(headless=True)
-            context = browser.new_context(viewport={"width": 1400, "height": 800})
+            context = browser.new_context(viewport={"width": 2400, "height": 800})
             page = context.new_page()
             print("OSMD renderer ready")
             self._ready_event.set()

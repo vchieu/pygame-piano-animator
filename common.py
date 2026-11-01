@@ -805,6 +805,7 @@ class Transport:
         self.t = 0.0
         self.paused = True
         self.sounding = {}             # id(note) -> (release, note) currently sent to the synth
+        self._just_seeked = False
 
     def _performance(self):
         if self.perf is None and self.song is not None:
@@ -832,9 +833,11 @@ class Transport:
             self.midi.pedals_up()
         self.midi.all_off()
         self._send_pedals()
-        # Treat notes already in progress as "already played" so they don't retrigger.
+        # Treat notes already in progress before self.t as "already played" so they don't retrigger.
+        # But notes starting at or after self.t must be allowed to play on the first update!
         perf = self._performance()
-        self.sounding = {id(n): (r, n) for _, r, n in perf.active(self.t)}
+        self.sounding = {id(n): (r, n) for p, r, n in perf.active(self.t) if p < self.t - 1e-4}
+        self._just_seeked = True
 
     def toggle_pause(self):
         if not self.song:
@@ -872,7 +875,14 @@ class Transport:
         # everything that happens in (t0, t1], in time order: releases,
         # pedal changes, then new notes
         events = [(r, 0, n) for r, n in self.sounding.values() if r <= t1]
-        for p, r, n in perf.starting(t0, t1):
+        if getattr(self, "_just_seeked", False):
+            self._just_seeked = False
+            lo = bisect.bisect_left(perf._starts, t0 - 1e-4)
+            hi = bisect.bisect_right(perf._starts, t1)
+            new_notes = perf.items[lo:hi]
+        else:
+            new_notes = perf.starting(t0, t1)
+        for p, r, n in new_notes:
             events.append((p, 2, (r, n)))
             if r <= t1:
                 events.append((r, 0, n))

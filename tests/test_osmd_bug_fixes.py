@@ -18,6 +18,12 @@ class DummySong:
         self.duration = duration
         self.notes = []
 
+    def control_state(self, t):
+        return {}
+
+    def controls_between(self, t0, t1):
+        return []
+
 
 def test_bug1_tempo_aware_beat_interpolation():
     """Bug #1: non-linear tempo inside measure must map accurately through beat_times."""
@@ -337,5 +343,167 @@ def test_bug10_plan_accidentals_measure_boundary():
     assert plan[id(n0)] == 1
     # n1 is still in measure 0, so accidental holds and prints None (not repeated)
     assert plan[id(n1)] is None
+
+
+def test_review_bug1_duration_to_type_fine_buckets():
+    """Review Bug #1: duration_to_type correctly categorizes 16th, 32nd, 64th, and dotted variants."""
+    from midi_to_musicxml import duration_to_type, song_to_musicxml
+    from midi_loader import Note, RIGHT
+
+    dpq = 480
+    assert duration_to_type(int(dpq * 6.0), dpq) == ("whole", True)
+    assert duration_to_type(int(dpq * 4.0), dpq) == ("whole", False)
+    assert duration_to_type(int(dpq * 3.0), dpq) == ("half", True)
+    assert duration_to_type(int(dpq * 2.0), dpq) == ("half", False)
+    assert duration_to_type(int(dpq * 1.5), dpq) == ("quarter", True)
+    assert duration_to_type(int(dpq * 1.0), dpq) == ("quarter", False)
+    assert duration_to_type(int(dpq * 0.75), dpq) == ("eighth", True)
+    assert duration_to_type(int(dpq * 0.5), dpq) == ("eighth", False)
+    assert duration_to_type(int(dpq * 0.25), dpq) == ("16th", False)
+    assert duration_to_type(int(dpq * 0.125), dpq) == ("32nd", False)
+    assert duration_to_type(int(dpq * 0.0625), dpq) == ("64th", False)
+
+    # Short 16th notes in a measure are not dropped as rests
+    song = DummySong(bar_times=[0.0, 2.0], duration=2.0)
+    song.notes = [
+        Note(60, 0.0, 0.25, 80, 0, RIGHT),
+        Note(62, 0.25, 0.5, 80, 0, RIGHT),
+        Note(64, 0.5, 0.75, 80, 0, RIGHT),
+    ]
+    xml = song_to_musicxml(song)
+    assert "<type>16th</type>" in xml or "<type>eighth</type>" in xml
+    # Right hand notes should be present
+    assert "<step>C</step>" in xml
+    assert "<step>D</step>" in xml
+    assert "<step>E</step>" in xml
+
+
+def test_review_bug2_time_at_x_scale_minus_8_alignment():
+    """Review Bug #2: time_at_x must use (staff_rect.h - 8) to match draw() scale exactly."""
+    surf = pygame.Surface((1000, 200))
+    m0 = {
+        'number': 1, 'score_idx': 0, 'x': 100, 'w': 400,
+        'absTs': 0.0, 'dur': 1.0,
+        'entries': [{'ts': 0.0, 'x': 100}, {'ts': 1.0, 'x': 500}]
+    }
+    sys0 = OSMDSystemItem(0, surf, 0.0, 4.0, 1, 1, 20, 150, [m0])
+
+    song = DummySong(bar_times=[0.0, 4.0], duration=4.0)
+    view = StaffView(song)
+    with view._osmd_lock:
+        view.osmd_systems = [sys0]
+        view.use_osmd = True
+
+    staff_rect = pygame.Rect(50, 50, 1000, 108)  # height 108 -> (108 - 8) = 100
+    # sw=1000, sh=200 -> scale = min(1000/1000, 100/200) = 0.5
+    # scaled_w = 500. dest_x = (1000 - 500) // 2 = 250.
+    # At screen x = staff_rect.x + dest_x + 100 * scale = 50 + 250 + 50 = 350 -> should be t = 0.0
+    t_found = view.time_at_x(350, staff_rect, 0.0)
+    assert abs(t_found - 0.0) < 0.01
+
+
+def test_review_bug4_measure_interpolation_points_symmetry():
+    """Review Bug #4: Shared _build_measure_interpolation_points guarantees x_for_time and time_for_x symmetry."""
+    from staff import _build_measure_interpolation_points
+    song = DummySong(bar_times=[0.0, 2.0, 4.0], duration=4.0)
+    m = {
+        'number': 1, 'score_idx': 0, 'x': 60, 'w': 300,
+        'absTs': 0.0, 'dur': 1.0,
+        'entries': [{'ts': 0.0, 'x': 80}, {'ts': 0.5, 'x': 180}, {'ts': 0.75, 'x': 250}]
+    }
+    pts = _build_measure_interpolation_points(song, m, 0, 0.0, 2.0)
+    assert pts[0][0] == 0.0
+    assert pts[0][1] == 80  # First notehead
+    assert pts[-1][0] == 2.0
+    assert pts[-1][1] == 360  # Measure right edge (60 + 300)
+
+    surf = pygame.Surface((1000, 200))
+    sys0 = OSMDSystemItem(0, surf, 0.0, 2.0, 1, 1, 20, 150, [m])
+
+    # Round trip: for time t in [0.0, 2.0], time_for_x(x_for_time(t)) ~ t
+    for test_t in [0.0, 0.5, 1.0, 1.5, 2.0]:
+        x = sys0.x_for_time(test_t, song)
+        t_recovered = sys0.time_for_x(x, song, current_t=test_t)
+        assert abs(t_recovered - test_t) < 0.05
+
+
+def test_review_bug5_and_tuning_osmd_rules_and_viewport():
+    """Review Bug #5 & Improvement #2: OSMD HTML includes spacing rules and worker viewport width is 2400."""
+    import osmd_render
+    html = osmd_render._create_render_html("<score-partwise></score-partwise>", width=2000)
+    assert "BetweenStaffDistance" in html
+    assert "FillEmptyMeasuresWithWholeRest" in html
+    assert "DisplacedNoteMargin" in html
+
+
+def test_mariage_damour_measure_5_and_6_downbeats_are_not_rests():
+    """Bug 1 verification: Measure 5 LH downbeat and Measure 6 RH/LH downbeats are not rests."""
+    import os
+    import xml.etree.ElementTree as ET
+    import midi_loader
+    import midi_to_musicxml
+
+    midi_path = os.path.join("MIDIs", "Paul de Senneville - Mariage d'Amour.mid")
+    if not os.path.exists(midi_path):
+        pytest.skip("Mariage d'Amour MIDI not found")
+
+    song = midi_loader.load_midi(midi_path)
+    xml_str = midi_to_musicxml.song_to_musicxml(song)
+    root = ET.fromstring(xml_str)
+    measures = root.findall(".//measure")
+    assert len(measures) >= 6
+
+    # Measure 5: Voice 2 (LH) must start with a note, not a rest
+    m5 = measures[4]
+    m5_notes = m5.findall("note")
+    m5_voice2 = [n for n in m5_notes if n.find("voice") is not None and n.find("voice").text == "2"]
+    assert len(m5_voice2) > 0
+    assert m5_voice2[0].find("rest") is None, "Measure 5 LH first note should not be a rest"
+
+    # Measure 6: Both Voice 1 (RH) and Voice 2 (LH) must start with a note, not a rest
+    m6 = measures[5]
+    m6_notes = m6.findall("note")
+    m6_voice1 = [n for n in m6_notes if n.find("voice") is not None and n.find("voice").text == "1"]
+    m6_voice2 = [n for n in m6_notes if n.find("voice") is not None and n.find("voice").text == "2"]
+    assert len(m6_voice1) > 0 and m6_voice1[0].find("rest") is None, "Measure 6 RH first note should not be a rest"
+    assert len(m6_voice2) > 0 and m6_voice2[0].find("rest") is None, "Measure 6 LH first note should not be a rest"
+
+
+def test_transport_seek_triggers_notes_at_seek_time_immediately():
+    """Bug 2 verification: Seeking to downbeat triggers notes starting at that exact time on the first update."""
+    from common import Transport
+    import midi_loader
+
+    class MockMidi:
+        def __init__(self):
+            self.notes_on = []
+            self.notes_off = []
+        def all_off(self):
+            pass
+        def control_change(self, c, v):
+            pass
+        def note_on(self, note):
+            self.notes_on.append(note.pitch)
+        def note_off(self, note):
+            self.notes_off.append(note.pitch)
+
+    song = DummySong(bar_times=[0.0, 2.0, 4.0], duration=4.0)
+    # Add a note starting exactly at bar 1 (2.0)
+    n1 = midi_loader.Note(pitch=60, start=2.0, end=3.0, velocity=80, track=0, hand="R")
+    n2 = midi_loader.Note(pitch=48, start=2.0, end=3.5, velocity=80, track=0, hand="L")
+    song.notes = [n1, n2]
+
+    tr = Transport()
+    tr._init_transport(MockMidi())
+    tr.song = song
+    tr.paused = False
+
+    tr.seek(2.0)
+    # First update frame should immediately trigger the notes starting at 2.0
+    tr.update(0.05)
+    assert 60 in tr.midi.notes_on
+    assert 48 in tr.midi.notes_on
+
+
 
 

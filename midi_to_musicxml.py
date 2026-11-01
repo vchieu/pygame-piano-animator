@@ -50,27 +50,23 @@ def pitch_to_step_alter_octave(pitch: int, key_fifths: int = 0) -> Tuple[str, in
 def duration_to_type(dur_divisions: int, divisions_per_quarter: int = 480) -> Tuple[str, bool]:
     """Convert duration in divisions to MusicXML note type and dotted flag."""
     ratio = dur_divisions / max(1, divisions_per_quarter)
-    # Check standard durations
-    if ratio >= 5.5:
-        return "whole", True
-    elif ratio >= 3.5:
-        return "whole", False
-    elif ratio >= 2.8:
-        return "half", True
-    elif ratio >= 1.8:
-        return "half", False
-    elif ratio >= 1.3:
-        return "quarter", True
-    elif ratio >= 0.8:
-        return "quarter", False
-    elif ratio >= 0.6:
-        return "eighth", True
-    elif ratio >= 0.4:
-        return "eighth", False
-    elif ratio >= 0.2:
-        return "16th", False
-    else:
-        return "32nd", False
+    # Check standard durations with accurate midpoints
+    thresholds = [
+        (5.0,   "whole",   True),   # dotted whole (6.0)
+        (3.5,   "whole",   False),  # whole (4.0)
+        (2.5,   "half",    True),   # dotted half (3.0)
+        (1.75,  "half",    False),  # half (2.0)
+        (1.25,  "quarter", True),   # dotted quarter (1.5)
+        (0.85,  "quarter", False),  # quarter (1.0)
+        (0.625, "eighth",  True),   # dotted eighth (0.75)
+        (0.375, "eighth",  False),  # eighth (0.5)
+        (0.1875,"16th",    False),  # 16th (0.25)
+        (0.09,  "32nd",    False),  # 32nd (0.125)
+    ]
+    for min_r, ntype, dotted in thresholds:
+        if ratio >= min_r:
+            return ntype, dotted
+    return "64th", False
 
 
 def _div_per_quarter(beat_type: int, divisions: int) -> int:
@@ -157,8 +153,14 @@ def song_to_musicxml(song, divisions: int = 480) -> str:
             m_beats = max(1, round((bar_dur / regular_bar_dur) * beats))
             m_divisions = m_beats * dpq
 
-        min_div = max(1, dpq // 8)      # shortest written value: a 32nd note
-        grid_div = max(1, dpq // 16)    # positions snap to a 64th note
+        min_div = max(1, dpq // 16)     # shortest written value: a 64th note
+        grid_div = max(1, dpq // 32)    # positions snap to a 128th note
+
+        # Effective boundary with tolerance for downbeat note alignment.
+        # Downbeat notes (due to float rounding e.g. 1e-15 or slight human performance advance)
+        # must belong to the new measure at snap=0 rather than being swallowed/dropped by the previous measure.
+        eps0 = max(0.015, (bar_dur * grid_div) / (2.0 * m_divisions)) if m_idx > 0 else 0.0
+        eps1 = max(0.015, (bar_dur * grid_div) / (2.0 * m_divisions)) if m_idx + 1 < num_bars else 0.0
 
         m_elem = ET.SubElement(part, "measure", number=str(m_idx + 1))
 
@@ -190,8 +192,8 @@ def song_to_musicxml(song, divisions: int = 480) -> str:
         prev_sig = (beats, beat_type)
         prev_dpq = dpq
 
-        # Notes belong to this measure if their start falls within [t0, t1)
-        m_notes = [n for n in notes if t0 <= n.start < t1]
+        # Notes belong to this measure if their start falls within [t0 - eps0, t1 - eps1)
+        m_notes = [n for n in notes if (t0 - eps0) <= n.start < (t1 - eps1)]
 
         # Separate into staff 1 (RH) and staff 2 (LH)
         rh_notes = [n for n in m_notes if n.hand == "R" or (n.hand != "L" and n.pitch >= 60)]
@@ -200,7 +202,7 @@ def song_to_musicxml(song, divisions: int = 480) -> str:
         def snap(t: float) -> int:
             """Time (s) -> position in this measure, in divisions, on the 64th-note grid."""
             d = round(((t - t0) / bar_dur) * m_divisions)
-            return int(round(d / grid_div)) * grid_div
+            return max(0, int(round(d / grid_div)) * grid_div)
 
         def write_rest(duration: int, voice_num: int, staff_num: int, whole: bool = False):
             rest_note = ET.SubElement(m_elem, "note")
