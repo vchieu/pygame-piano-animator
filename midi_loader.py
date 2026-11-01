@@ -256,6 +256,9 @@ class MidiSong:
         self._pedal_memo = None
         # The end of the pickup measure (0.0 = the song starts on a full bar).
         self.pickup_end = 0.0
+        # Whether a MusicXML score was read (its bars and time signature are the
+        # score's own, so normalize follows them instead of guessing).
+        self.from_musicxml = False
         # The tempo map for the auto pedal: (time, seconds per quarter note).
         self.quarter_times: List[Tuple[float, float]] = []
 
@@ -1263,14 +1266,44 @@ def save_pig(path: str, notes, fingers) -> int:
     return len(rows)
 
 
-def clean_options(options=None):
+def bar_options(song):
+    """
+    The normalize options a score's own bar lines give: `beats_per_bar` (its
+    time signature as quarter notes, 3 for 3/4) and `bar_anchor` (the bar line
+    the music starts on: the end of the pickup measure, else the first bar).
+
+    Only for a MusicXML score: a played-in MIDI file's downbeats are a guess
+    from its tempo map, and the normalizer's own guess is at least as good.
+    {} when the score declares nothing usable.
+    """
+    if not getattr(song, "from_musicxml", False):
+        return {}
+    out = {}
+    beats, beat_type = getattr(song, "time_signature", (4, 4))
+    quarters = beats * 4.0 / float(beat_type or 4)
+    if quarters >= 1 and abs(quarters - round(quarters)) < 1e-9:
+        out["beats_per_bar"] = int(round(quarters))
+    anchor = getattr(song, "pickup_end", 0.0)
+    if not anchor:
+        bars = getattr(song, "bar_times", None) or []
+        anchor = bars[0] if bars else None
+    if anchor is not None:
+        out["bar_anchor"] = float(anchor)
+    return out
+
+
+def clean_options(options=None, song=None):
     """
     The normalize options to clean a song with: `options` on top of the app
-    settings ("normalize_voices", "normalize_max_bpm"; see app_settings).
+    settings ("normalize_voices", "normalize_max_bpm"; see app_settings). For
+    a MusicXML score the score's own bar lines go on top (see bar_options), so
+    a 3/4 piece keeps its bars; `options` still wins over both.
     """
     import pianist
     out = {"voices": pianist.app_setting("normalize_voices", "single"),
            "max_bpm": float(pianist.app_setting("normalize_max_bpm", 130.0))}
+    if song is not None:
+        out.update(bar_options(song))
     out.update(options or {})
     return out
 
@@ -1289,7 +1322,7 @@ def maybe_normalize(song, normalize=None, options=None):
         return song
     from normalize import clean_song
     try:
-        out = clean_song(song, **clean_options(options))
+        out = clean_song(song, **clean_options(options, song))
     except Exception as exc:
         song.cleanup.append(f"Normalize failed ({exc}); kept the file's timings")
         print(f"normalize failed: {exc}; kept the file's timings")

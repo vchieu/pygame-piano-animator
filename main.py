@@ -369,8 +369,10 @@ class Visualizer(Transport):
             elif k == pygame.K_o:
                 if event.mod & pygame.KMOD_SHIFT:
                     if hasattr(self, "staff_view") and self.song:
-                        self.staff_view.reload_osmd()
-                        self.message = "Đang tạo lại khuôn nhạc OSMD..."
+                        if event.mod & pygame.KMOD_CTRL:      # force a fresh engraving
+                            self.staff_view.reload_osmd()
+                        else:
+                            self.staff_view.toggle_osmd()
                 else:
                     path = pick_file()
                     if path:
@@ -923,7 +925,9 @@ class Visualizer(Transport):
                  ("Ctrl+Wheel", "Zoom the staff's notes (on the staff)"),
                  ("Shift+Wheel", "Zoom the staff's size (on the staff)"),
                  ("H", "Show / hide the hands"), ("F", "Show / hide the finger numbers"),
-                 ("O", "Open another MIDI file"), ("Esc", "Back to the main menu")]
+                 ("O", "Open another MIDI file"),
+                 ("Shift+O", "Sheet music: OSMD / native (Ctrl+Shift: re-render)"),
+                 ("Esc", "Back to the main menu")]
         return keys
 
     @staticmethod

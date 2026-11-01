@@ -14,10 +14,13 @@ note overlaps the next one). This module turns the notes - with their hands alre
   2. Snap.      A phase-locked loop follows the player through the piece (slow drift, a
                 little rubato) and puts each chord on a grid cell: the coarse cell, or -
                 only when that is clearly a worse fit - a half cell (the 32nd of an
-                ornament). Chords are notes within CHORD_TOL of one another.
+                ornament). By default no note is written shorter than a 16th, so the half
+                cell is only used when the cell itself is an 8th or longer (there it is
+                still a 16th); see `fine`. Chords are notes within CHORD_TOL of one another.
   3. Bars.      The beat is a multiple of the cell that puts the tempo in range (180 -> 90
                 bpm, so the pulse reads as eighths). The downbeat is the beat position where
-                left-hand and long notes land, preferring "the first note is beat 1".
+                left-hand and long notes land, preferring "the first note is beat 1" - unless
+                the caller knows a bar line (`bar_anchor`, e.g. a MusicXML score's own).
   4. Voices.    Each hand becomes one voice: a chord shares one length, and ends where the
                 next chord of that hand begins (legato fill); a real gap stays a rest. Held
                 notes that overlapped the next onset are cut there (counted in the report;
@@ -165,9 +168,14 @@ def find_cell(times: Sequence[float]) -> Tuple[float, float, float]:
 # 2. Snapping, following the player
 # --------------------------------------------------------------------------- #
 
-def _snap(groups: List[list], cell: float, origin: float):
+def _snap(groups: List[list], cell: float, origin: float, fine: bool = False):
     """
     Put every group of notes on the grid, in units of half a cell.
+
+    fine=False: every group goes to the nearest WHOLE cell (even units), so a hand never gets a
+    32nd crumb or a chord split over two units. fine=True: a group far from the coarse grid may
+    use the half cell when that fits clearly better (ornaments). `normalize` passes fine=True by
+    default when the cell is an 8th or longer: half a cell is then still a 16th or longer.
 
     Returns (units, drift, stats): the unit each group lands on, the grid's offset from the
     origin at that group (seconds - how far the player had drifted) and counters.
@@ -191,7 +199,7 @@ def _snap(groups: List[list], cell: float, origin: float):
             d += PLL_GAIN * e
             stats["coarse"] += 1
             stats["on_grid"] += 1
-        else:
+        elif fine:
             uf = math.floor(x / half + 0.5)
             ef = x - uf * half
             if uf % 2 and abs(ef) < FINE_RATIO * abs(e):
@@ -200,6 +208,9 @@ def _snap(groups: List[list], cell: float, origin: float):
             else:
                 u = 2 * k
                 stats["outliers"] += 1
+        else:
+            u = 2 * k
+            stats["outliers"] += 1
         u = max(u, prev)
         prev = u
         units.append(u)
@@ -270,13 +281,14 @@ def _tidy_len(u: int, e: int) -> int:
 
 
 def _voice(by_u: dict, voices: str, chord_end: str, rest_min: int, counters: dict,
-           tidy: bool = True) -> List[tuple]:
+           tidy: bool = True, cells_only: bool = False) -> List[tuple]:
     """
     [(start unit, end unit, [(note, end_raw)])] for one hand.
 
     "single": a chord has one length and ends where the hand's next chord starts, unless a
     gap of rest_min units or more is left (then it is a rest). "keep": every note keeps its own
     length (so overlaps stay), gaps shorter than rest_min are still filled.
+    cells_only: a written length is always a whole number of cells (never a 32nd crumb).
     """
     us = sorted(by_u)
     out = []
@@ -292,7 +304,7 @@ def _voice(by_u: dict, voices: str, chord_end: str, rest_min: int, counters: dic
 
         def coarse(e_float: float) -> int:
             """A written length: whole cells when it is long enough to be one, else the nearest unit."""
-            if e_float - u >= 1.5:
+            if cells_only or e_float - u >= 1.5:
                 return max(u + 2, 2 * math.floor(e_float / 2.0 + 0.5))
             return max(u + 1, math.floor(e_float + 0.5))
 
@@ -327,7 +339,8 @@ def _voice(by_u: dict, voices: str, chord_end: str, rest_min: int, counters: dic
 def normalize(notes: Sequence, controls: Optional[Sequence[tuple]] = None, beats_per_bar: int = 4,
               max_bpm: float = MAX_BPM, voices: str = "single", chord_end: str = "median",
               rest_min: Optional[int] = None, cells_per_beat: Optional[int] = None,
-              downbeat: str = "auto", tidy: bool = True) -> Clean:
+              downbeat: str = "auto", tidy: bool = True, fine: bool = False,
+              bar_anchor: Optional[float] = None) -> Clean:
     """
     Clean `notes` (objects with .pitch .start .end .velocity .hand, hands already decided).
 
@@ -340,6 +353,12 @@ def normalize(notes: Sequence, controls: Optional[Sequence[tuple]] = None, beats
     downbeat:        "auto", or "first" to make the first note beat 1.
     tidy:            (voices="single") every note gets a written note value and no long note ends
                      between two cells, so a notation program prints one voice per staff.
+    fine:            False (default): never write a note shorter than a 16th. Whole cells are used
+                     when the cell is a 16th or shorter; when it is an 8th or longer, a half cell
+                     (still a 16th or longer) is allowed too. True: ornaments may always use the
+                     half cell (the old behaviour).
+    bar_anchor:      a time (seconds on the input clock) known to be a bar line (e.g. from a MusicXML
+                     source); with downbeat="auto" it fixes where bars fall instead of guessing.
     controls:        [(time, controller, value)], mapped onto the new clock.
     """
     notes = [n for n in notes]
@@ -349,12 +368,15 @@ def normalize(notes: Sequence, controls: Optional[Sequence[tuple]] = None, beats
     groups = _chords(notes)
     gtimes = [sum(n.start for n in g) / len(g) for g in groups]
     cell, origin, strength = find_cell(gtimes)
-    units, drift, st = _snap(groups, cell, origin)
+    cpb, bpm = pick_beat(cell, max_bpm) if not cells_per_beat else \
+        (cells_per_beat, round(60.0 / (cell * cells_per_beat), 2))
+    # A half cell may only be written when it is still at least a 16th: with a cell of an 8th or
+    # longer (cpb < 4) half a cell is a 16th or longer, so the fine positions are safe by default.
+    fine_snap = fine or cpb < 4
+    units, drift, st = _snap(groups, cell, origin, fine=fine_snap)
     fit = st["on_grid"] / max(1, len(groups))
     half = cell / 2.0
 
-    cpb, bpm = pick_beat(cell, max_bpm) if not cells_per_beat else \
-        (cells_per_beat, round(60.0 / (cell * cells_per_beat), 2))
     upb = 2 * cpb                                           # units per beat
     if PPQ % upb:
         raise ValueError("cells_per_beat %d does not divide the resolution" % cpb)
@@ -378,6 +400,8 @@ def normalize(notes: Sequence, controls: Optional[Sequence[tuple]] = None, beats
     first_u = min(u for u, _, _, _ in items)
     if downbeat == "first":
         phase = first_u % bar_u
+    elif bar_anchor is not None:
+        phase = (2 * int(round((bar_anchor - origin) / cell))) % bar_u
     else:
         phase = _downbeat(items, bar_u, upb)
     # bar lines fall on the units congruent to `phase` (mod bar_u): u0 is the last one at or
@@ -389,7 +413,8 @@ def normalize(notes: Sequence, controls: Optional[Sequence[tuple]] = None, beats
     out_notes = []
     for hand in (RIGHT, LEFT):
         before = sum(len(v) for v in per_hand[hand].values())
-        for u, ends, ns in _voice(per_hand[hand], voices, chord_end, rest_min, counters, tidy):
+        for u, ends, ns in _voice(per_hand[hand], voices, chord_end, rest_min, counters, tidy,
+                                  cells_only=not fine and cpb >= 4):
             for n, e in zip(ns, ends):
                 kw = dict(start=(u - u0) * unit_new, end=(e - u0) * unit_new, hand=hand,
                           track=0 if hand == RIGHT else 1)
@@ -441,12 +466,16 @@ def normalize(notes: Sequence, controls: Optional[Sequence[tuple]] = None, beats
     return clean
 
 
-def revoice(clean: Clean, voices: str = "single", chord_end: str = "median", tidy: bool = True):
+def revoice(clean: Clean, voices: str = "single", chord_end: str = "median", tidy: bool = True,
+            fine: bool = False):
     """
     Voice `clean.notes` again, per hand as they now carry it. Needed after the notes were edited
     on the clean clock (a note moved to the other hand may overlap that hand's held notes, which
     a notation program prints as a second voice). Returns (Clean, [(old note, new note)]); a note
     that lands on a key its hand already plays at that unit is merged away (no pair).
+
+    fine: same meaning as in `normalize`. False (default) keeps every written length a whole
+    number of cells (never a 32nd crumb); True allows half-cell lengths (the old behaviour).
     """
     unit = clean.unit
     rest_min = max(2, round(REST_MIN_BEAT * clean.units_per_beat))
@@ -457,7 +486,9 @@ def revoice(clean: Clean, voices: str = "single", chord_end: str = "median", tid
     counters = {"cut": 0, "rests": 0, "merged": 0, "tidied": 0}
     pairs = []
     for hand in (RIGHT, LEFT):
-        for u, ends, ns in _voice(per[hand], voices, chord_end, rest_min, counters, tidy):
+        # like `normalize`: with a cell of an 8th (units_per_beat 8) half a cell is still a 16th
+        for u, ends, ns in _voice(per[hand], voices, chord_end, rest_min, counters, tidy,
+                                  cells_only=not fine and clean.units_per_beat >= 8):
             for n, e in zip(ns, ends):
                 pairs.append((n, replace(n, start=u * unit, end=e * unit, hand=hand,
                                          track=0 if hand == RIGHT else 1)))
@@ -561,7 +592,9 @@ def clean_song(song, **options):
     tracks = [TrackInfo(0, "Right hand", 0, rh, RIGHT), TrackInfo(1, "Left hand", 0, len(clean.notes) - rh, LEFT)]
     duration = max((n.end for n in clean.notes), default=0.0)
     out = MidiSong(clean.notes, tracks, duration, clean.bar_times, clean.beat_times, song.path, clean.controls,
-                   key_fifths=getattr(song, "key_fifths", 0))
+                   key_fifths=getattr(song, "key_fifths", 0),
+                   time_signature=(clean.beats_per_bar, 4))
+    out.from_musicxml = getattr(song, "from_musicxml", False)
     out.quarter_times = [(0.0, 60.0 / clean.bpm)]
     out.pickup_end = clean.pickup_end
     out.cleanup = list(getattr(song, "cleanup", [])) + clean.report

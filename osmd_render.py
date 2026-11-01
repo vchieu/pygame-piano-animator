@@ -6,14 +6,16 @@ the OSMD library (JavaScript) running in a headless browser, and return the
 rendered image for display in Pygame.
 """
 import io
+import os
 import queue
 import threading
 import time
-from pathlib import Path
 from typing import Optional
 
 import pygame
 from playwright.sync_api import sync_playwright
+
+import paths
 
 # Cursor color for highlighting (matching the old staff.py)
 CURSOR_COLOR = (220, 40, 60)
@@ -25,20 +27,34 @@ def _escape_xml_for_js(xml: str) -> str:
 
 
 def _get_osmd_script_tag() -> str:
-    """Return <script> tag for OSMD. Prefers local copy to allow offline rendering."""
-    base_dir = Path(__file__).resolve().parent
-    candidates = [
-        base_dir / "osmd_static" / "opensheetmusicdisplay.min.js",
-        base_dir / "opensheetmusicdisplay.min.js",
-    ]
-    for p in candidates:
-        if p.is_file():
-            try:
-                content = p.read_text(encoding="utf-8")
-                if content:
-                    return f"<script>{content}</script>"
-            except Exception:
-                pass
+    """Return <script> tag for OSMD. The bundled copy keeps rendering offline.
+
+    The bundled file sits beside the modules (source) or in the unpacked cache
+    folder (Nuitka); a build that keeps it beside the .exe is looked for too.
+    The CDN is only used when none of them can be read, and the warning says
+    which paths were tried and why, so a missing bundle is easy to spot.
+    """
+    candidates = [paths.resource("osmd_static", "opensheetmusicdisplay.min.js"),
+                  paths.resource("opensheetmusicdisplay.min.js"),
+                  os.path.join(paths.exe_dir(), "osmd_static", "opensheetmusicdisplay.min.js")]
+    tried = []
+    denied = False
+    for path in dict.fromkeys(candidates):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except OSError as exc:
+            tried.append(f"{path} ({type(exc).__name__})")
+            denied = denied or isinstance(exc, PermissionError)
+            continue
+        if content:
+            return f"<script>{content}</script>"
+        tried.append(f"{path} (empty)")
+    print("[OSMD] no local opensheetmusicdisplay.min.js - tried "
+          + ", ".join(tried) + "; loading it from the CDN instead")
+    if denied:
+        print("[OSMD] PermissionError means the file is there but this user may not read it;"
+              " run  icacls osmd_static\\opensheetmusicdisplay.min.js /reset  to inherit the folder's permissions")
     return '<script src="https://cdn.jsdelivr.net/npm/opensheetmusicdisplay@1.8.9/build/opensheetmusicdisplay.min.js"></script>'
 
 

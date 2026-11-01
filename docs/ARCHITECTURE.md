@@ -859,6 +859,15 @@ fast removes about a third of them: most are leaps of a few tens of milliseconds
   when paused (a click while playing just moves there). A click on the panel's bottom edge
   still drags its height, the reset button still resets the zoom, and a double click on the
   paper still resets it too (its first click has already seeked by then).
+- **The OSMD score is engraved from a bundled copy of the library; Shift+O switches
+  engraving styles** (2026-11-01). `osmd_render._get_osmd_script_tag` reads
+  `osmd_static/opensheetmusicdisplay.min.js` through `paths.resource()` (Nuitka ships it via
+  `build.py`'s `--include-data-files`), so rendering needs no network; the jsDelivr CDN is
+  only a fallback when that file is missing. `StaffView.toggle_osmd` is the switch behind
+  Shift+O (Ctrl+Shift+O still forces a fresh `reload_osmd`): going to the native staff bumps `_osmd_request_id` and clears `osmd_loading`, so
+  a render still in flight cannot turn OSMD back on or leave its "Đang tạo khuôn nhạc
+  OSMD..." placeholder up; coming back reuses the systems already rendered and only renders
+  again when there are none (the first time, or after a failed render).
 - The hand colours (`HAND_COLORS`) are still the note colour. Tests: `tests/test_notation.py`
   (metrics, the codepoint table, the glyph cache, every glyph at four sizes, the painter's
   geometry, the clef and time-signature painters, the no-font fallback) and `tests/test_staff.py`
@@ -1142,6 +1151,35 @@ and puts each note's current hand into `<staff>` and its finger into
 were. A `.mxl` destination is written as a compressed score, a `.xml` / `.musicxml` one as plain
 text. `common.save_file_dialog(musicxml=True)` offers the MusicXML formats and
 `common.default_export_name` keeps the source's extension.
+
+## Normalizing a score onto a grid (normalize.py, 2026-11-01)
+
+`--clean`, the "auto normalize" setting and the editor's "Clean score" put a loaded score onto a
+metrical clock: `midi_loader.load_song` → `maybe_normalize` → `normalize.clean_song` →
+`normalize.normalize`. It finds the cell (the finest period the onsets bunch up on), reads the
+tempo off it, snaps every chord to it while following the player's drift, works out the bars,
+leaves one voice per hand and returns a new `MidiSong` whose `bar_times` / `beat_times` are that
+clock's. A MusicXML score goes through the same engine: its notes are already in seconds, so
+nothing is re-gridded twice.
+
+- **No note shorter than a 16th** (the default; `fine=True` restores the old behaviour). `_snap`
+  puts every chord on a WHOLE cell unless `fine`, and `_voice(cells_only=...)` gives every note a
+  whole number of cells. When the cell is a 16th or shorter (`cells_per_beat >= 4`) that is the
+  floor; when it is an 8th or longer, half a cell is still a 16th or longer, so the half-cell
+  positions (ornaments) stay. Measured on the jittered 16th-cell fixture in
+  `tests/test_normalize.py` (269 notes, 35 ms of jitter): before, lengths `{1, 2, 3, 4, 6, 8}` with
+  5 thirty-second crumbs; after, `{2, 4, 6, 8}` and none.
+- **A MusicXML score's own bars** go to the engine: `midi_loader.bar_options` passes
+  `beats_per_bar` (its time signature as quarter notes) and `bar_anchor` (the end of the pickup
+  measure, else the first bar line), and `normalize` sets the bar phase from that anchor instead
+  of guessing the downbeat. A played-in MIDI file gets neither: its downbeats are read from its
+  tempo map and the normalizer's own guess is as good. Measured on
+  `MIDIs/Khi-nguoi-lon-co-don.musicxml` (3/4, 101 bars): before, the 4/4 default packed it into 76
+  bars with bar lines off by up to 1.091 s (mean 0.540 s); after, 101 bars, up to 0.009 s (mean
+  0.001 s). `clean_song` carries the cleaned `beats_per_bar` onto the new song's `time_signature`.
+- The anchor must be the pickup's end, not `bar_times[0]`: on `thiep-hong-sai-ten.musicxml` (a
+  0.714 s pickup) anchoring on the first bar line moved every bar by the pickup's length (mean
+  error 0.012 s → 0.702 s).
 
 ## Fingering stored in MIDI files
 - A text meta event just before each note-on, on the note's own track:

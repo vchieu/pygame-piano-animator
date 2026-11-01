@@ -2388,6 +2388,31 @@ class StaffView:
                 self._osmd_request_id += 1
             self._prepare_osmd(self.song)
 
+    def toggle_osmd(self) -> bool:
+        """Switch between the OSMD engraving and the native staff.
+
+        Returns True when the view is on OSMD afterwards. Turning OSMD off
+        abandons a render still in flight (its request id no longer matches),
+        so the result cannot turn OSMD back on or leave its placeholder up.
+        Turning it on reuses the systems already rendered; only a view that
+        has none (the first time, or after a failed render) renders again.
+        """
+        if not OSMD_AVAILABLE or not self.song:
+            return self.use_osmd
+        with self._osmd_lock:
+            if self.use_osmd:
+                self._osmd_request_id += 1
+                self.osmd_loading = False
+                self.use_osmd = False
+                return False
+            if self.osmd_systems:
+                self.use_osmd = True
+                self.osmd_error = None
+                return True
+        self.reload_osmd()
+        with self._osmd_lock:
+            return self.use_osmd
+
     def set_song(self, song, target_dur: float = 10.0, scale: float = 1.0):
         self.target_dur = clamp_target_dur(target_dur)
         self.scale = clamp_scale(scale)

@@ -378,7 +378,7 @@ class FingeringEditor(Transport):
         for i, n in enumerate(self.notes):
             carry.setdefault((n.hand, n.pitch), []).append((n.start, self.finger[i], i in self.user_set))
         try:
-            cleaned = clean_song(self.song, **clean_options())
+            cleaned = clean_song(self.song, **clean_options(song=self.song))
         except Exception as exc:
             self.say(f"Could not clean the score: {exc}")
             return False

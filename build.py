@@ -125,6 +125,9 @@ def command(console=False, tcl_tk=()):
         "--include-data-files=assets/fonts/OFL.txt=assets/fonts/OFL.txt",   # ...and its licence
         "--include-data-files=assets/fonts/Leland.otf=assets/fonts/Leland.otf",  # the music font (notation.py)
         "--include-data-files=assets/fonts/LICENSE-Leland.txt=assets/fonts/LICENSE-Leland.txt",   # ...and its licence
+        # the OSMD engraving runs offline from this copy (osmd_render)
+        "--include-data-files=osmd_static/opensheetmusicdisplay.min.js=osmd_static/opensheetmusicdisplay.min.js",
+        "--include-data-files=osmd_static/LICENSE-opensheetmusicdisplay.txt=osmd_static/LICENSE-opensheetmusicdisplay.txt",
         # tools and tests that the app never imports
         "--nofollow-import-to=pig_eval,learn_weights,tests,conftest,pytest",
         "--noinclude-pytest-mode=nofollow",

@@ -150,6 +150,40 @@ def test_every_length_is_a_written_value():
         assert not (k >= 4 and round(n.end / clean.unit) % 2)
 
 
+def test_no_note_shorter_than_a_16th_when_the_cell_is_a_16th():
+    """
+    A 16th cell played with human jitter: every onset sits on a whole cell and every note is a
+    whole cell or longer - no 32nd crumb, no chord split over two units (the 16th floor).
+    """
+    notes, _ = _piece(bars=8, jitter=0.035)
+    clean = N.normalize(notes)
+    assert clean.units_per_beat == 8                       # the cell really is a 16th
+    for n in clean.notes:
+        k = round((n.end - n.start) / clean.unit)
+        assert k >= 2 and k in N.STD_LEN
+        assert round(n.start / clean.unit) % 2 == 0
+    assert clean.stats["fine"] == 0                        # (nothing needed the half cell)
+
+
+def test_fine_lets_an_ornament_use_the_half_cell():
+    """fine=True is the old behaviour: the same piece keeps its 32nds and dotted 16ths."""
+    notes, _ = _piece(bars=8, jitter=0.035)
+    clean = N.normalize(notes, fine=True)
+    lens = [round((n.end - n.start) / clean.unit) for n in clean.notes]
+    assert min(lens) < 2 and clean.stats["fine"] > 0
+
+
+def test_cells_only_keeps_written_lengths_whole_cells():
+    """cells_only: a note played shorter than a cell still gets a whole one, not a 32nd."""
+    n = lambda p: Note(p, 0.0, 9.0, 90, 0, "R")
+    by_u = {0: [(n(72), 0.4)], 4: [(n(74), 4.0)]}
+    c = lambda: {"cut": 0, "rests": 0, "merged": 0, "tidied": 0}
+    ends = {u: e[0] for u, e, _ in N._voice(by_u, "single", "median", 2, c(), cells_only=True)}
+    assert ends[0] == 2
+    loose = {u: e[0] for u, e, _ in N._voice(by_u, "single", "median", 2, c())}
+    assert loose[0] == 1                                   # (the old behaviour: a 32nd)
+
+
 def test_too_few_notes():
     with pytest.raises(ValueError):
         N.find_cell([0.0, 0.3, 0.6])
@@ -200,6 +234,19 @@ def test_a_song_too_short_to_clean_keeps_its_timings():
     song = MidiSong([Note(60, 0.0, 1.0, 90, 0, RIGHT), Note(53, 2.0, 5.0, 90, 1, LEFT)], tracks, 6.0, [], [])
     assert midi_loader.maybe_normalize(song, True) is song          # a raw song that loads beats none at all
     assert not song.normalized and any("Normalize failed" in l for l in song.cleanup)
+
+
+def test_bar_options_come_only_from_a_musicxml_score():
+    """A score's own bars go to normalize (beats_per_bar, bar_anchor); a played-in MIDI's guess
+    stays the normalizer's, and a caller's own option still wins."""
+    import midi_loader
+    song = midi_loader.MidiSong([], [], 0.0, [0.0, 2.0, 4.0], [0.0, 1.0], time_signature=(3, 4))
+    assert midi_loader.bar_options(song) == {}
+    song.from_musicxml = True
+    assert midi_loader.bar_options(song) == {"beats_per_bar": 3, "bar_anchor": 0.0}
+    song.pickup_end = 0.5
+    assert midi_loader.bar_options(song)["bar_anchor"] == 0.5
+    assert midi_loader.clean_options({"beats_per_bar": 4}, song)["beats_per_bar"] == 4
 
 
 def test_revoice_after_a_hand_edit_keeps_one_voice_a_hand():

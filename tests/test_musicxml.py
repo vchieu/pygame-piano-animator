@@ -140,6 +140,27 @@ def test_beat_grid_has_no_gap_at_the_bar_line(tmp_path):
     assert gaps == {1.0}                             # every beat the same length
 
 
+def test_a_three_four_score_is_cleaned_in_three_beat_bars(tmp_path):
+    """
+    Cleaning a 3/4 score follows the score's own time signature (midi_loader.bar_options):
+    four bars of three beats at 120 bpm, not the normalizer's default 4/4 guess, which would
+    pack the same notes into three bars of four.
+    """
+    attributes = ("<attributes><divisions>4</divisions>"
+                  "<time><beats>3</beats><beat-type>4</beat-type></time></attributes>")
+    direction = '<direction><sound tempo="120"/></direction>'
+    steps = ["C", "D", "E", "F", "G", "A"]
+    bars = "".join(
+        measure("".join(note(steps[(i * 6 + j) % 6], 4, 2, "eighth") for j in range(6)),
+                number=i + 1, attributes=attributes if i == 0 else "",
+                direction=direction if i == 0 else "")
+        for i in range(4))
+    song = load_song(one_part(tmp_path, bars), normalize=True)
+    assert song.normalized and song.time_signature == (3, 4)
+    assert len(song.bar_times) == 5                   # four bars
+    assert all(b - a == pytest.approx(1.5) for a, b in zip(song.bar_times, song.bar_times[1:]))
+
+
 def test_repeated_note_touching_end_to_end_is_not_cut(tmp_path):
     # The same pitch twice, back to back: the second note starts exactly where the
     # first ends. The score's arithmetic leaves a rounding error there, and the

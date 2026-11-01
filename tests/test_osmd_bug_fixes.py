@@ -125,3 +125,72 @@ def test_bug7_start_renderer_no_crash():
     """Bug #7: start_renderer() must not raise AttributeError."""
     osmd_render.start_renderer()
 
+
+def test_osmd_javascript_is_bundled_locally():
+    """The score is engraved from osmd_static/, not fetched from the CDN."""
+    tag = osmd_render._get_osmd_script_tag()
+    assert tag.startswith("<script>")
+    assert "OpenSheetMusicDisplay" in tag
+    assert "cdn.jsdelivr.net" not in tag
+
+
+def test_a_missing_bundle_falls_back_to_the_cdn_and_says_why(tmp_path, monkeypatch, capsys):
+    """The warning names the paths it tried, so a bad build is easy to diagnose."""
+    missing = tmp_path / "osmd_static" / "opensheetmusicdisplay.min.js"
+    monkeypatch.setattr(osmd_render.paths, "resource", lambda *parts: str(missing))
+    monkeypatch.setattr(osmd_render.paths, "exe_dir", lambda: str(tmp_path))
+
+    tag = osmd_render._get_osmd_script_tag()
+
+    assert "cdn.jsdelivr.net" in tag
+    out = capsys.readouterr().out
+    assert str(missing) in out and "FileNotFoundError" in out
+
+
+def test_an_unreadable_bundle_says_how_to_fix_its_permissions(tmp_path, monkeypatch, capsys):
+    """Opening a directory raises PermissionError - the hint should point at icacls."""
+    blocked = tmp_path / "osmd_static"
+    blocked.mkdir()
+    monkeypatch.setattr(osmd_render.paths, "resource", lambda *parts: str(blocked))
+    monkeypatch.setattr(osmd_render.paths, "exe_dir", lambda: str(tmp_path))
+
+    tag = osmd_render._get_osmd_script_tag()
+
+    assert "cdn.jsdelivr.net" in tag
+    out = capsys.readouterr().out
+    assert "PermissionError" in out and "icacls" in out
+
+
+def test_shift_o_switches_between_osmd_and_the_native_staff():
+    """Shift+O toggles the view; the rendered systems are kept for the way back."""
+    surf = pygame.Surface((1000, 200))
+    sys0 = OSMDSystemItem(0, surf, 0.0, 4.0, 1, 2, 20, 150, [
+        {'number': 1, 'score_idx': 0, 'x': 50, 'w': 100, 'entries': [{'ts': 0, 'x': 60}]}
+    ])
+    view = StaffView(None)
+    view.song = DummySong()
+    view.osmd_systems = [sys0]
+    view.use_osmd = True
+
+    assert view.toggle_osmd() is False              # OSMD -> the native staff
+    assert view.use_osmd is False
+    assert view.osmd_systems == [sys0]              # ...which keeps the engraving
+
+    assert view.toggle_osmd() is True               # back to OSMD, no re-render
+    assert view.use_osmd is True
+    assert view.osmd_systems == [sys0]
+
+
+def test_switching_off_osmd_abandons_a_render_in_flight():
+    """The placeholder cannot stay up, and the late result is dropped."""
+    view = StaffView(None)
+    view.song = DummySong()
+    view.use_osmd = True
+    view.osmd_loading = True
+    request_id = view._osmd_request_id
+
+    assert view.toggle_osmd() is False
+    assert view.use_osmd is False
+    assert view.osmd_loading is False
+    assert view._osmd_request_id == request_id + 1
+
