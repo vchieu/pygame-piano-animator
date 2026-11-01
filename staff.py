@@ -291,11 +291,21 @@ def plan_accidentals(notes: List[Note], measure_starts: List[float],
 
 
 def clef_for_note(note: Note) -> str:
-    """Determine whether a note belongs to Treble clef or Bass clef."""
+    """Determine whether a note belongs to Treble clef or Bass clef.
+
+    Thresholds are chosen so that notes in the common crossover zone (C4–B4)
+    stay on their home staff with ledger lines, rather than jumping to the
+    other staff and colliding with the opposite hand's notes.
+
+    Right hand stays on treble down to C3 (pitch 48, ~5 ledger lines below
+    treble bottom line E4).  Left hand stays on bass up to B4 (pitch 71,
+    ~4 ledger lines above bass top line A3).  Only beyond those extremes do
+    we switch the note to the opposite staff for readability.
+    """
     if note.hand == RIGHT:
-        return CLEF_TREBLE if note.pitch >= 55 else CLEF_BASS
+        return CLEF_TREBLE if note.pitch >= 48 else CLEF_BASS   # switch below C3
     elif note.hand == LEFT:
-        return CLEF_BASS if note.pitch <= 64 else CLEF_TREBLE
+        return CLEF_BASS if note.pitch <= 71 else CLEF_TREBLE   # switch above B4
     return CLEF_TREBLE if note.pitch >= 60 else CLEF_BASS
 
 
@@ -1296,6 +1306,47 @@ def drawn_steps(clusters: List[List[Note]], sys_notes: List[Note]) -> dict:
                         n_info["step_draw"] = step_nat
                         n_info["octave_shift"] = 0
                         n_info["label"] = ""
+
+    # -------------------------------------------------------------------------
+    # Safety net: if RH and LH notes still share the same clef in a cluster
+    # (possible when clef_for_note() is ambiguous near the boundary), try to
+    # push the "guest" note back to its home staff — but only if doing so would
+    # require at most MAX_LEDGER_LINES ledger lines on that home staff.
+    #
+    # Bass top staff line = A3 (diatonic step 26); treble bottom = E4 (step 30).
+    # Each ledger line spans 2 diatonic steps.
+    # -------------------------------------------------------------------------
+    _MAX_LEDGER = 5
+    # Bass top line step (A3) and treble bottom line step (E4):
+    _BASS_TOP_STEP = 26
+    _TREBLE_BOT_STEP = 30
+
+    for cluster in clusters:
+        treble_notes = [n for n in cluster if info[id(n)]["clef"] == CLEF_TREBLE]
+        bass_notes   = [n for n in cluster if info[id(n)]["clef"] == CLEF_BASS]
+        rh_treble = [n for n in treble_notes if n.hand == RIGHT]
+        lh_treble = [n for n in treble_notes if n.hand == LEFT]
+        rh_bass   = [n for n in bass_notes   if n.hand == RIGHT]
+        lh_bass   = [n for n in bass_notes   if n.hand == LEFT]
+
+        # LH ended up on treble alongside RH → try moving LH to bass
+        if rh_treble and lh_treble:
+            for n in lh_treble:
+                step_nat, _ = written_step(n)
+                ledger_above_bass = max(0, step_nat - _BASS_TOP_STEP) // 2
+                if ledger_above_bass <= _MAX_LEDGER:
+                    n_info = info[id(n)]
+                    n_info["clef"] = CLEF_BASS
+                    # step_draw is pitch-based and already correct for bass clef
+
+        # RH ended up on bass alongside LH → try moving RH to treble
+        if lh_bass and rh_bass:
+            for n in rh_bass:
+                step_nat, _ = written_step(n)
+                ledger_below_treble = max(0, _TREBLE_BOT_STEP - step_nat) // 2
+                if ledger_below_treble <= _MAX_LEDGER:
+                    n_info = info[id(n)]
+                    n_info["clef"] = CLEF_TREBLE
 
     return info
 
