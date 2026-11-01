@@ -277,7 +277,7 @@ def plan_accidentals(notes: List[Note], measure_starts: List[float],
         if n.is_rest:
             continue
         step, alter = written_step(n)
-        where = bisect.bisect_right(bounds, n.start + 1e-6) - 1
+        where = bisect.bisect_right(bounds, n.start) - 1
         if where != measure:
             measure = where
             state.clear()            # an accidental holds for its measure only
@@ -2192,7 +2192,7 @@ class OSMDSystemItem:
         total_dur = getattr(song, 'duration', 10.0)
 
         # Before bars[0]: stay directly on the first notehead of the score
-        if t <= bars[0]:
+        if t < bars[0]:
             return first_entry_x
 
         # Determine played measure index play_idx
@@ -2264,7 +2264,7 @@ class OSMDSystemItem:
             return []
 
         # Check through measure segments
-        for m in measures:
+        for m_idx, m in enumerate(measures):
             mx = m['x']
             mw = max(1.0, m['w'])
             if mx <= x_in_crop < mx + mw:
@@ -2285,19 +2285,28 @@ class OSMDSystemItem:
                         frac_e = max(0.0, min(1.0, (e['ts'] - abs_ts) / dur_ts))
                         t_e = _map_measure_frac_to_time(song, t0, t1, frac_e)
                         pts.append((t_e, e['x']))
-                    if pts[0][0] > t0 + 0.001:
+                    if m_idx > 0 and pts[0][0] > t0 + 0.001:
+                        pts.insert(0, (t0, mx))
+                    elif pts[0][0] > t0 + 0.001:
                         pts.insert(0, (t0, pts[0][1]))
                     else:
                         pts[0] = (t0, pts[0][1])
-                    pts.append((t1, mx + mw))
+                    if pts[-1][0] < t1 - 0.001:
+                        pts.append((t1, mx + mw))
 
                     for k in range(len(pts) - 1):
                         ta, xa = pts[k]
                         tb, xb = pts[k + 1]
                         min_x, max_x = min(xa, xb), max(xa, xb)
-                        if min_x <= x_in_crop < max_x:
-                            frac = (x_in_crop - xa) / max(0.001, xb - xa)
-                            return ta + frac * (tb - ta)
+                        if min_x <= x_in_crop <= max_x:
+                            dx = xb - xa
+                            if abs(dx) > 1e-4:
+                                frac = max(0.0, min(1.0, (x_in_crop - xa) / dx))
+                                return ta + frac * (tb - ta)
+                            return ta
+                    if x_in_crop <= pts[0][1]:
+                        return pts[0][0]
+                    return pts[-1][0]
                 else:
                     frac = (x_in_crop - mx) / mw
                     return _map_measure_frac_to_time(song, t0, t1, frac)
@@ -2377,6 +2386,7 @@ class StaffView:
         self._cached_rolled: List[tuple] = []
         self._cached_geo = None
         self._cached_key: Optional[tuple] = None
+        self._song_version: int = 0
         self._scratch: Optional[pygame.Surface] = None
         if song is not None:
             self.set_song(song, target_dur=self.target_dur, scale=self.scale)
@@ -2418,7 +2428,15 @@ class StaffView:
                 self.use_osmd = True
                 self.osmd_error = None
                 return True
-        self.reload_osmd()
+            if self.osmd_loading:
+                self.use_osmd = True
+                return True
+            self.use_osmd = True
+            self.osmd_systems = []
+            self.osmd_repeat_order = None
+            self._scaled_sys_cache = None
+            self._osmd_request_id += 1
+        self._prepare_osmd(self.song)
         with self._osmd_lock:
             return self.use_osmd
 
@@ -2426,6 +2444,7 @@ class StaffView:
         self.target_dur = clamp_target_dur(target_dur)
         self.scale = clamp_scale(scale)
         self.song = song
+        self._song_version += 1
         self.systems = build_systems(song, self.target_dur)
         self._system_starts = [sys.start_t for sys in self.systems]
         self.clear_cache()
@@ -2440,6 +2459,17 @@ class StaffView:
     def _get_musicxml_content(self, song) -> Optional[str]:
         if song is None:
             return None
+        # If the song is normalized, its bar_times and note timings follow a cleaned grid
+        # that differs from the original file on disk. In order to keep OSMD sheet music
+        # perfectly in sync with playback, generate fresh MusicXML directly from the normalized song.
+        if getattr(song, 'normalized', False):
+            try:
+                from midi_to_musicxml import song_to_musicxml
+                return song_to_musicxml(song)
+            except Exception as e:
+                print(f"[OSMD] Failed to convert normalized song to MusicXML: {e}")
+                return None
+
         song_path = getattr(song, 'path', None)
         if song_path and os.path.exists(song_path):
             ext = os.path.splitext(song_path)[1].lower()
@@ -2509,7 +2539,6 @@ class StaffView:
         with self._osmd_lock:
             self._osmd_request_id += 1
             my_req_id = self._osmd_request_id
-            self._loading_song = song
             self.use_osmd = True
             self.osmd_loading = True
             self.osmd_error = None
@@ -2625,7 +2654,7 @@ class StaffView:
                     if k + 1 < len(new_systems):
                         sys_item.end_t = new_systems[k + 1].start_t
                     else:
-                        sys_item.end_t = max(total_dur + 5.0, sys_item.start_t + 10.0)
+                        sys_item.end_t = max(total_dur + 0.5, sys_item.start_t + 1.0)
                     sys_item.duration = max(0.001, sys_item.end_t - sys_item.start_t)
 
                 with self._osmd_lock:
@@ -2684,7 +2713,23 @@ class StaffView:
                 _missed.add(target_score_idx)
                 print(f"[OSMD] score_idx={target_score_idx} not found in any system "
                       f"(t={t:.3f}s, play_idx={play_idx}). "
-                      f"Falling back to time-based lookup.")
+                      f"Falling back to measure-based lookup.")
+
+            # Fallback: match system by closest measure index in score order
+            # (Do NOT bisect on sys.start_t because start_t is for the first pass and fails during repeats)
+            def _sys_score_dist(s: OSMDSystemItem) -> float:
+                if not s.measures:
+                    return float('inf')
+                s_min = s.measures[0].get('score_idx', s.measures[0].get('number', 0) - first_m_num)
+                s_max = s.measures[-1].get('score_idx', s.measures[-1].get('number', 0) - first_m_num)
+                if s_min <= target_score_idx <= s_max:
+                    return 0.0
+                return min(abs(target_score_idx - s_min), abs(target_score_idx - s_max))
+
+            sys_dists = [(_sys_score_dist(s), s) for s in systems]
+            sys_dists.sort(key=lambda item: item[0])
+            if sys_dists and sys_dists[0][0] != float('inf'):
+                return sys_dists[0][1]
 
         # Continuous time-based fallback: bisect on sys.start_t
         sys_starts = [s.start_t for s in systems]
@@ -3565,7 +3610,8 @@ class StaffView:
         # Native staff fallback
         sys = self.system_for_time(t) if (self.song and self.systems) else None
 
-        key = (id(sys), local_rect.w, local_rect.h, self.scale, self.target_dur, id(self.song))
+        sys_id = (sys.index, round(sys.start_t, 3), round(sys.end_t, 3)) if sys is not None else None
+        key = (self._song_version, sys_id, local_rect.w, local_rect.h, self.scale, self.target_dur)
         if self._cached_key != key or self._cached_static_surf is None:
             self._cached_static_surf, self._cached_heads, self._cached_rolled, self._cached_geo = \
                 self._render_static_system_surf(sys, local_rect)

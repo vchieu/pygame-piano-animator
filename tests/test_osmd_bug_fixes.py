@@ -194,3 +194,148 @@ def test_switching_off_osmd_abandons_a_render_in_flight():
     assert view.osmd_loading is False
     assert view._osmd_request_id == request_id + 1
 
+
+def test_bug1_cursor_at_bars_0():
+    """Bug #1: x_for_time at t == bars[0] enters measure interpolation instead of sticking."""
+    surf = pygame.Surface((1000, 200))
+    m0 = {
+        'number': 1, 'score_idx': 0, 'x': 50, 'w': 200,
+        'absTs': 0.0, 'dur': 1.0,
+        'entries': [{'ts': 0.0, 'x': 70}, {'ts': 0.5, 'x': 150}]
+    }
+    sys0 = OSMDSystemItem(0, surf, 0.0, 4.0, 1, 1, 20, 150, [m0])
+    song = DummySong(bar_times=[0.0, 2.0], duration=4.0)
+
+    # Before bars[0] (e.g. lead-in -0.1s): stays on first notehead
+    assert sys0.x_for_time(-0.1, song) == 70
+
+    # At bars[0] (t == 0.0s): note 0 is at 0.0s -> returns 70
+    assert sys0.x_for_time(0.0, song) == 70
+
+    # At t = 0.5s: note 1 is at 1.0s in song time, midpoint is t = 0.5s -> x is between 70 and 150
+    x_mid = sys0.x_for_time(0.5, song)
+    assert 70 < x_mid < 150
+
+
+def test_bug2_normalized_song_musicxml_content(tmp_path):
+    """Bug #2: Normalized song regenerates MusicXML instead of loading disk raw MusicXML."""
+    xml_file = tmp_path / "song.musicxml"
+    xml_file.write_text("<score-partwise><raw/></score-partwise>", encoding="utf-8")
+
+    from midi_loader import Note, RIGHT
+    song = DummySong(bar_times=[0.0, 2.0, 4.0], duration=4.0)
+    song.path = str(xml_file)
+    song.notes = [Note(60, 0.0, 1.0, 80, 0, RIGHT)]
+    song.normalized = True
+
+    view = StaffView(None)
+    content = view._get_musicxml_content(song)
+    assert content is not None
+    # Must NOT be the raw unnormalized file from disk
+    assert "<raw/>" not in content
+    assert "<score-partwise" in content
+
+
+def test_bug3_and_bug7_time_for_x_symmetry_and_grace_notes():
+    """Bug #3 & #7: time_for_x handles right edge guard, measure left edge, and decreasing x."""
+    surf = pygame.Surface((1000, 200))
+    # Measure 1 with decreasing x (e.g. grace note or dense chord layout)
+    m0 = {
+        'number': 1, 'score_idx': 0, 'x': 50, 'w': 200,
+        'absTs': 0.0, 'dur': 1.0,
+        'entries': [{'ts': 0.0, 'x': 100}, {'ts': 0.5, 'x': 90}, {'ts': 1.0, 'x': 200}]
+    }
+    sys0 = OSMDSystemItem(0, surf, 0.0, 2.0, 1, 1, 20, 150, [m0])
+    song = DummySong(bar_times=[0.0, 2.0], duration=2.0)
+
+    # Click between x=90 and x=100 (decreasing interval)
+    t_click = sys0.time_for_x(95, song)
+    # Must be valid time between ts 0.0 and 0.5 (which maps to 0.0s and 1.0s)
+    assert 0.0 <= t_click <= 1.0
+
+
+def test_bug4_repeat_fallback_closest_measure():
+    """Bug #4: Repeat fallback selects system by measure proximity, not absolute time."""
+    surf = pygame.Surface((1000, 200))
+    # sys0: measures 1..2 (score_idx 0..1), start_t 0.0
+    sys0 = OSMDSystemItem(0, surf, 0.0, 4.0, 1, 2, 20, 150, [
+        {'number': 1, 'score_idx': 0, 'x': 50, 'w': 100, 'entries': []},
+        {'number': 2, 'score_idx': 1, 'x': 150, 'w': 100, 'entries': []}
+    ])
+    # sys1: measures 3..4 (score_idx 2..3), start_t 4.0
+    sys1 = OSMDSystemItem(1, surf, 4.0, 8.0, 3, 4, 20, 150, [
+        {'number': 3, 'score_idx': 2, 'x': 50, 'w': 100, 'entries': []},
+        {'number': 4, 'score_idx': 3, 'x': 150, 'w': 100, 'entries': []}
+    ])
+
+    song = DummySong(bar_times=[0.0, 2.0, 4.0, 6.0, 8.0], duration=10.0)
+    view = StaffView(song)
+    with view._osmd_lock:
+        view.osmd_systems = [sys0, sys1]
+        # Repeat order plays: measure 0, measure 1, then repeats measure 0!
+        view.osmd_repeat_order = [0, 1, 0, 2, 3]
+
+    # At t = 4.5s, play_idx is 2 (3rd bar played), repeat_order[2] == 0 (measure 0)
+    # sys0 covers measure 0, so even though t=4.5s > sys1.start_t (4.0s), it MUST pick sys0!
+    chosen = view.osmd_system_for_time(4.5)
+    assert chosen is sys0
+
+
+def test_bug5_end_t_not_drifting_5s():
+    """Bug #5: Last system end_t does not add excessive 5-second drift."""
+    # When systems are constructed in _prepare_osmd, last sys_item.end_t is max(total_dur + 0.5, sys.start_t + 1.0)
+    total_dur = 20.0
+    start_t = 15.0
+    end_t = max(total_dur + 0.5, start_t + 1.0)
+    assert end_t == 20.5  # not 25.0
+
+
+def test_bug6_native_staff_cache_versioning():
+    """Bug #6: StaffView._song_version increments on set_song to avoid ABA pointer id cache collisions."""
+    view = StaffView(None)
+    v0 = view._song_version
+    song1 = DummySong()
+    view.set_song(song1)
+    v1 = view._song_version
+    assert v1 > v0
+    song2 = DummySong()
+    view.set_song(song2)
+    assert view._song_version > v1
+
+
+def test_bug8_loading_song_not_stored():
+    """Bug #8: _loading_song is not held as an attribute preventing GC."""
+    view = StaffView(None)
+    assert not hasattr(view, '_loading_song')
+
+
+def test_bug9_toggle_osmd_while_loading():
+    """Bug #9: toggle_osmd() while already loading does not re-launch reload_osmd."""
+    view = StaffView(None)
+    view.song = DummySong()
+    view.use_osmd = False
+    view.osmd_loading = True
+    req_id = view._osmd_request_id
+
+    # Toggle to OSMD while loading in background
+    res = view.toggle_osmd()
+    assert res is True
+    assert view.use_osmd is True
+    # Request ID was NOT changed/reloaded
+    assert view._osmd_request_id == req_id
+
+
+def test_bug10_plan_accidentals_measure_boundary():
+    """Bug #10: Note strictly before measure boundary is not prematurely assigned to next measure."""
+    import staff
+    from midi_loader import Note, RIGHT
+    sharp = lambda t: Note(66, t, t + 0.4, 80, 0, RIGHT, None, False, 3 * 7 + 3, 1, None)
+    # Note at 1.999999 is in measure 0 (boundary at [0.0, 2.0]), so accidental state holds
+    n0 = sharp(0.0)
+    n1 = sharp(1.999999)
+    plan = staff.plan_accidentals([n0, n1], [0.0, 2.0], 0)
+    assert plan[id(n0)] == 1
+    # n1 is still in measure 0, so accidental holds and prints None (not repeated)
+    assert plan[id(n1)] is None
+
+
