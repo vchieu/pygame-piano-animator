@@ -433,8 +433,8 @@ def test_review_bug1_duration_to_type_fine_buckets():
     assert "<step>E</step>" in xml
 
 
-def test_review_bug2_time_at_x_scale_minus_8_alignment():
-    """Review Bug #2: time_at_x must use (staff_rect.h - 8) to match draw() scale exactly."""
+def test_review_bug2_time_at_x_matches_draw_placement():
+    """time_at_x must undo exactly the scale and origin draw() uses."""
     surf = pygame.Surface((1000, 200))
     m0 = {
         'number': 1, 'score_idx': 0, 'x': 100, 'w': 400,
@@ -449,12 +449,42 @@ def test_review_bug2_time_at_x_scale_minus_8_alignment():
         view.osmd_systems = [sys0]
         view.use_osmd = True
 
-    staff_rect = pygame.Rect(50, 50, 1000, 108)  # height 108 -> (108 - 8) = 100
-    # sw=1000, sh=200 -> scale = min(1000/1000, 100/200) = 0.5
-    # scaled_w = 500. dest_x = (1000 - 500) // 2 = 250.
-    # At screen x = staff_rect.x + dest_x + 100 * scale = 50 + 250 + 50 = 350 -> should be t = 0.0
-    t_found = view.time_at_x(350, staff_rect, 0.0)
-    assert abs(t_found - 0.0) < 0.01
+    staff_rect = pygame.Rect(50, 50, 1000, 108)
+    scale, _, _, dest_x, _ = sys0.draw_placement(pygame.Rect(0, 0, staff_rect.w, staff_rect.h))
+    # The sheet fills the panel width, so scale is exactly w / surface width.
+    assert scale == 1.0
+    # Timestamp 0.0 is drawn on the notehead at crop x = 100.
+    screen_x = staff_rect.x + dest_x + 100 * scale
+    assert abs(view.time_at_x(screen_x, staff_rect, 0.0) - 0.0) < 0.01
+
+
+def test_osmd_system_fills_the_panel_width_instead_of_shrinking():
+    """A tall system used to be scaled to the strip's height, leaving wide side margins."""
+    surf = pygame.Surface((1000, 300))
+    surf.fill((255, 255, 255))
+    # Mark the left and right edges so the drawn width is measurable.
+    pygame.draw.rect(surf, (0, 0, 0), (0, 150, 4, 100))
+    pygame.draw.rect(surf, (0, 0, 0), (996, 150, 4, 100))
+
+    m0 = {'number': 1, 'score_idx': 0, 'x': 50, 'w': 900,
+          'entries': [{'ts': 0.0, 'x': 60}]}
+    sys0 = OSMDSystemItem(0, surf, 0.0, 4.0, 1, 1, 10, 290, [m0])
+
+    song = DummySong(bar_times=[0.0, 4.0], duration=4.0)
+    view = StaffView(song)
+    with view._osmd_lock:
+        view.osmd_systems = [sys0]
+        view.use_osmd = True
+
+    rect = pygame.Rect(0, 0, 800, 140)
+    out = pygame.Surface(rect.size)
+    out.fill((255, 255, 255))
+    view.draw(out, rect, 0.0)
+
+    dark = [x for x in range(rect.w) if out.get_at((x, 80)).r < 128]
+    assert dark, "the system was not drawn at all"
+    assert dark[0] <= 2, f"empty margin on the left: first ink at x={dark[0]}"
+    assert dark[-1] >= rect.w - 3, f"empty margin on the right: last ink at x={dark[-1]}"
 
 
 def test_review_bug4_measure_interpolation_points_symmetry():

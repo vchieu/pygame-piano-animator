@@ -2358,6 +2358,12 @@ def _osmd_crop_regions(ink_counts, systems_info, full_h: int,
 
 class OSMDSystemItem:
     """Represents a rendered staff system slice from OSMD with measure timing."""
+
+    # How much of a system's own music height has to stay on screen. A dense
+    # passage (a wide arpeggio, notes between the staves) can be much taller
+    # than the staff strip; zooming it to the full width would hide most of it.
+    MIN_VISIBLE_HEIGHT = 0.5
+
     def __init__(self, system_index: int, surface: pygame.Surface, start_t: float, end_t: float,
                  start_bar: int, end_bar: int,
                  staff_top: int, staff_bottom: int,
@@ -2374,6 +2380,33 @@ class OSMDSystemItem:
         self.staff_bottom = staff_bottom
         self.measures = measures or []
         self.first_measure_num = first_measure_num
+
+    def draw_placement(self, rect: pygame.Rect):
+        """(scale, scaled_w, scaled_h, x, y) for drawing this system inside `rect`.
+
+        The system fills the panel's width. Fitting its height as well is what
+        made a tall system shrink into a narrow ribbon with empty margins on
+        both sides: a page is far wider than it is tall, but a system with wide
+        chords or notes between the staves is not, so height used to be the
+        binding constraint. Whatever sticks out of the strip is clipped around
+        the music, and `MIN_VISIBLE_HEIGHT` stops the width fit from hiding it.
+        """
+        sw, sh = self.surface.get_size()
+        scale = rect.w / max(1, sw)
+        ink_h = max(0, self.staff_bottom - self.staff_top)
+        if ink_h > 0:
+            scale = min(scale, rect.h / (self.MIN_VISIBLE_HEIGHT * ink_h))
+        scaled_w = max(1, int(sw * scale))
+        scaled_h = max(1, int(sh * scale))
+        dest_x = (rect.w - scaled_w) // 2
+        if ink_h > 0:
+            # Centre the music itself, not the blank bands above and below it.
+            dest_y = (rect.h - int(ink_h * scale)) // 2 - int(self.staff_top * scale)
+        else:
+            dest_y = (rect.h - scaled_h) // 2
+        if scaled_h <= rect.h:
+            dest_y = max(0, min(dest_y, rect.h - scaled_h))
+        return scale, scaled_w, scaled_h, dest_x, dest_y
 
     def x_for_time(self, t: float, song, repeat_order: Optional[List[int]] = None) -> float:
         bars = getattr(song, 'bar_times', []) if song else []
@@ -3713,9 +3746,7 @@ class StaffView:
         if use_osmd and has_systems:
             sys_item = self.osmd_system_for_time(t)
             if sys_item is not None:
-                sw, sh = sys_item.surface.get_size()
-                scale = min(staff_rect.w / max(1, sw), (staff_rect.h - 8) / max(1, sh))
-                dest_x = (staff_rect.w - int(sw * scale)) // 2
+                scale, _, _, dest_x, _ = sys_item.draw_placement(staff_rect)
                 cx_in_crop = (x - staff_rect.x - dest_x) / max(0.0001, scale)
                 return sys_item.time_for_x(cx_in_crop, self.song, repeat_order=repeat_order, current_t=t)
 
@@ -3762,23 +3793,8 @@ class StaffView:
         if use_osmd and has_systems:
             osmd_sys = self.osmd_system_for_time(t)
             if osmd_sys is not None:
-                sw, sh = osmd_sys.surface.get_size()
-                scale = min(local_rect.w / max(1, sw), (local_rect.h - 8) / max(1, sh))
-                scaled_w = int(sw * scale)
-                scaled_h = int(sh * scale)
-                dest_x = (local_rect.w - scaled_w) // 2
-
+                scale, scaled_w, scaled_h, dest_x, dest_y = osmd_sys.draw_placement(local_rect)
                 staff_h = osmd_sys.staff_bottom - osmd_sys.staff_top
-                if staff_h > 0:
-                    scaled_staff_h = int(staff_h * scale)
-                    # Center the grand staff (treble top line to bass bottom line) vertically in local_rect
-                    dest_y = (local_rect.h - scaled_staff_h) // 2 - int(osmd_sys.staff_top * scale)
-                else:
-                    dest_y = (local_rect.h - scaled_h) // 2
-
-                # If the entire scaled system fits within local_rect height, keep it within viewport
-                if scaled_h <= local_rect.h:
-                    dest_y = max(0, min(dest_y, local_rect.h - scaled_h))
 
                 # Cache scaled system surface to keep 60 FPS ultra-fast
                 cache_key = (id(osmd_sys), scaled_w, scaled_h)
