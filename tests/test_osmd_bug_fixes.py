@@ -435,13 +435,13 @@ def test_review_bug1_duration_to_type_fine_buckets():
 
 def test_review_bug2_time_at_x_matches_draw_placement():
     """time_at_x must undo exactly the scale and origin draw() uses."""
-    surf = pygame.Surface((1000, 200))
+    surf = pygame.Surface((1000, 150))
     m0 = {
         'number': 1, 'score_idx': 0, 'x': 100, 'w': 400,
         'absTs': 0.0, 'dur': 1.0,
         'entries': [{'ts': 0.0, 'x': 100}, {'ts': 1.0, 'x': 500}]
     }
-    sys0 = OSMDSystemItem(0, surf, 0.0, 4.0, 1, 1, 20, 150, [m0])
+    sys0 = OSMDSystemItem(0, surf, 0.0, 4.0, 1, 1, 20, 120, [m0])
 
     song = DummySong(bar_times=[0.0, 4.0], duration=4.0)
     view = StaffView(song)
@@ -449,7 +449,7 @@ def test_review_bug2_time_at_x_matches_draw_placement():
         view.osmd_systems = [sys0]
         view.use_osmd = True
 
-    staff_rect = pygame.Rect(50, 50, 1000, 108)
+    staff_rect = pygame.Rect(50, 50, 1000, 140)
     scale, _, _, dest_x, _ = sys0.draw_placement(pygame.Rect(0, 0, staff_rect.w, staff_rect.h))
     # The sheet fills the panel width, so scale is exactly w / surface width.
     assert scale == 1.0
@@ -459,16 +459,16 @@ def test_review_bug2_time_at_x_matches_draw_placement():
 
 
 def test_osmd_system_fills_the_panel_width_instead_of_shrinking():
-    """A tall system used to be scaled to the strip's height, leaving wide side margins."""
-    surf = pygame.Surface((1000, 300))
+    """Normal systems fill width, while tall systems scale down to fit vertically."""
+    surf = pygame.Surface((1000, 140))
     surf.fill((255, 255, 255))
     # Mark the left and right edges so the drawn width is measurable.
-    pygame.draw.rect(surf, (0, 0, 0), (0, 150, 4, 100))
-    pygame.draw.rect(surf, (0, 0, 0), (996, 150, 4, 100))
+    pygame.draw.rect(surf, (0, 0, 0), (0, 20, 4, 100))
+    pygame.draw.rect(surf, (0, 0, 0), (996, 20, 4, 100))
 
     m0 = {'number': 1, 'score_idx': 0, 'x': 50, 'w': 900,
           'entries': [{'ts': 0.0, 'x': 60}]}
-    sys0 = OSMDSystemItem(0, surf, 0.0, 4.0, 1, 1, 10, 290, [m0])
+    sys0 = OSMDSystemItem(0, surf, 0.0, 4.0, 1, 1, 20, 120, [m0])
 
     song = DummySong(bar_times=[0.0, 4.0], duration=4.0)
     view = StaffView(song)
@@ -686,6 +686,23 @@ def test_transport_seek_triggers_notes_at_seek_time_immediately():
     tr.update(0.05)
     assert 60 in tr.midi.notes_on
     assert 48 in tr.midi.notes_on
+
+
+def test_tall_system_scales_down_to_prevent_vertical_clipping():
+    """Systems with extreme vertical ink height (like Mariage d'Amour m41-45) scale down to fit rect.h."""
+    surf = pygame.Surface((1000, 500))
+    # Synthetic system with large ink height (staff_top=50, staff_bottom=450 -> ink_h=400)
+    sys0 = OSMDSystemItem(0, surf, 0.0, 4.0, 41, 45, 50, 450, [])
+
+    # In a 140px panel:
+    rect = pygame.Rect(0, 0, 800, 140)
+    scale, scaled_w, scaled_h, dest_x, dest_y = sys0.draw_placement(rect)
+
+    screen_ink_top = dest_y + int(sys0.staff_top * scale)
+    screen_ink_bot = dest_y + int(sys0.staff_bottom * scale)
+
+    assert screen_ink_top >= 0, f"Ink top clipped above panel: {screen_ink_top}"
+    assert screen_ink_bot <= rect.h, f"Ink bottom clipped below panel: {screen_ink_bot}"
 
 
 

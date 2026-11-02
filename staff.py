@@ -2359,10 +2359,10 @@ def _osmd_crop_regions(ink_counts, systems_info, full_h: int,
 class OSMDSystemItem:
     """Represents a rendered staff system slice from OSMD with measure timing."""
 
-    # How much of a system's own music height has to stay on screen. A dense
-    # passage (a wide arpeggio, notes between the staves) can be much taller
-    # than the staff strip; zooming it to the full width would hide most of it.
-    MIN_VISIBLE_HEIGHT = 0.5
+    # Require 100% of a system's ink height to remain visible within the panel height.
+    # Normal systems fill full panel width. Systems with tall arpeggios/ledger lines
+    # scale down just enough to keep all notes 100% visible without top/bottom clipping.
+    MIN_VISIBLE_HEIGHT = 1.0
 
     def __init__(self, system_index: int, surface: pygame.Surface, start_t: float, end_t: float,
                  start_bar: int, end_bar: int,
@@ -2384,12 +2384,9 @@ class OSMDSystemItem:
     def draw_placement(self, rect: pygame.Rect):
         """(scale, scaled_w, scaled_h, x, y) for drawing this system inside `rect`.
 
-        The system fills the panel's width. Fitting its height as well is what
-        made a tall system shrink into a narrow ribbon with empty margins on
-        both sides: a page is far wider than it is tall, but a system with wide
-        chords or notes between the staves is not, so height used to be the
-        binding constraint. Whatever sticks out of the strip is clipped around
-        the music, and `MIN_VISIBLE_HEIGHT` stops the width fit from hiding it.
+        Systems attempt to fill the panel width, but scale is capped if the system's
+        ink height exceeds panel height (`MIN_VISIBLE_HEIGHT * ink_h`). This ensures
+        high/low notes fit vertically in `rect` without vertical clipping.
         """
         sw, sh = self.surface.get_size()
         scale = rect.w / max(1, sw)
@@ -2400,7 +2397,6 @@ class OSMDSystemItem:
         scaled_h = max(1, int(sh * scale))
         dest_x = (rect.w - scaled_w) // 2
         if ink_h > 0:
-            # Centre the music itself, not the blank bands above and below it.
             dest_y = (rect.h - int(ink_h * scale)) // 2 - int(self.staff_top * scale)
         else:
             dest_y = (rect.h - scaled_h) // 2
