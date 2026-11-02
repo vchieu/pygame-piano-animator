@@ -620,10 +620,10 @@ def build(song, gap_s: float = DEFAULT_PEDAL_GAP, max_hold_bars: int = 4,
                 st["low"] = min(st.get("low") if st.get("low") is not None else a.pitch, a.pitch)
 
         if st["t_down"] is not None and st.get("low") is not None:
-            lh_in_bar = [n.pitch for n in lh_idx.sounding(st["t0"], m.end)
-                         if st["t0"] - 0.05 <= n.start < m.end]
-            if lh_in_bar:
-                st["low"] = min(st["low"], min(lh_in_bar))
+            m_low = min((n.pitch for n in lh_idx.sounding(st["t0"], m.end)
+                         if st["t0"] - 0.05 <= n.start < m.end), default=None)
+            if m_low is not None:
+                st["low"] = min(st["low"], m_low)
 
         nxt = ms[i + 1] if i + 1 < len(ms) else None
         if nxt is None:

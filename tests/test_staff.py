@@ -75,9 +75,9 @@ def test_note_y_calculation():
 
 def test_clef_for_note():
     n_right_high = Note(pitch=72, start=0, end=1, velocity=80, track=0, hand=RIGHT)
-    n_right_low = Note(pitch=50, start=0, end=1, velocity=80, track=0, hand=RIGHT)
+    n_right_low = Note(pitch=40, start=0, end=1, velocity=80, track=0, hand=RIGHT)
     n_left_low = Note(pitch=48, start=0, end=1, velocity=80, track=0, hand=LEFT)
-    n_left_high = Note(pitch=72, start=0, end=1, velocity=80, track=0, hand=LEFT)
+    n_left_high = Note(pitch=75, start=0, end=1, velocity=80, track=0, hand=LEFT)
 
     assert clef_for_note(n_right_high) == CLEF_TREBLE
     assert clef_for_note(n_right_low) == CLEF_BASS

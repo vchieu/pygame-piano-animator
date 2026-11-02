@@ -103,7 +103,7 @@ class _Hand:
     """A hand's recent history along one candidate path (immutable-ish)."""
     __slots__ = ("center", "last_t", "last_lo", "last_hi", "held", "last_ps")
 
-    def __init__(self, center, last_t=-math.inf, last_lo=None, last_hi=None, held=(), last_ps=()):
+    def __init__(self, center, last_t=-math.inf, last_lo=None, last_hi=None, held=(), last_ps=frozenset()):
         self.center = center          # where the hand is, in semitones
         self.last_t = last_t          # when it last played
         self.last_lo = last_lo        # range of the last group it played
@@ -119,7 +119,7 @@ class _Hand:
         m = sum(ps) / len(ps)
         # the hand centres on what it just played, remembering a little of before
         c = m if self.last_lo is None else 0.7 * m + 0.3 * self.center
-        return _Hand(c, t, min(ps), max(ps), held + tuple((n.end, n.pitch, n.start) for n in notes), tuple(ps))
+        return _Hand(c, t, min(ps), max(ps), held + tuple((n.end, n.pitch, n.start) for n in notes), frozenset(ps))
 
 
 class _Part:
@@ -306,12 +306,17 @@ def _inside(rh, lh, t, rn, ln):
     r_all, l_all = rd + rnp, ld + lnp
     if len(r_all) < 2 and len(l_all) < 2:
         return 0.0
-    inside = lambda keys, p: len(keys) >= 2 and min(keys) < p < max(keys)
-    k = sum(inside(l_all, p) for p in rnp) + sum(inside(r_all, p) for p in lnp)
-    if lnp:
-        k += sum(inside(l_all, q) for q in rd)
-    if rnp:
-        k += sum(inside(r_all, q) for q in ld)
+    k = 0
+    if len(l_all) >= 2:
+        l_min, l_max = min(l_all), max(l_all)
+        k += sum(1 for p in rnp if l_min < p < l_max)
+        if lnp:
+            k += sum(1 for q in rd if l_min < q < l_max)
+    if len(r_all) >= 2:
+        r_min, r_max = min(r_all), max(r_all)
+        k += sum(1 for p in lnp if r_min < p < r_max)
+        if rnp:
+            k += sum(1 for q in ld if r_min < q < r_max)
     return INSIDE * k
 
 

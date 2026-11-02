@@ -6,7 +6,8 @@ import pygame
 import pytest
 from staff import (
     StaffView, OSMDSystemItem,
-    _map_measure_frac_to_time, _map_measure_time_to_frac
+    _map_measure_frac_to_time, _map_measure_time_to_frac,
+    _osmd_ink_row_counts, _osmd_crop_regions
 )
 import osmd_render
 
@@ -258,6 +259,60 @@ def test_bug3_and_bug7_time_for_x_symmetry_and_grace_notes():
     t_click = sys0.time_for_x(95, song)
     # Must be valid time between ts 0.0 and 0.5 (which maps to 0.0s and 1.0s)
     assert 0.0 <= t_click <= 1.0
+
+
+def test_osmd_ink_row_counts_flags_ink_rows():
+    """Only rows the score actually draws on come back as ink."""
+    surf = pygame.Surface((40, 30))
+    surf.fill((255, 255, 255))
+    pygame.draw.line(surf, (0, 0, 0), (0, 10), (39, 10))
+    counts = _osmd_ink_row_counts(surf)
+    assert counts is not None
+    assert counts[10] > 0
+    assert counts[0] == 0
+
+
+def test_osmd_crop_regions_follow_ink_not_bounding_boxes():
+    """Each system slice keeps all of its ink, even where OSMD's boxes overlap.
+
+    In Mariage d'Amour, system 11 starts ~12 px above the previous system's
+    inflated staff box; clamping the crop to that box cut its top staff line
+    and the notes above it.
+    """
+    ink = [0] * 300
+    blocks = [(20, 70), (110, 160), (200, 250)]
+    for top, bottom in blocks:
+        for y in range(top, bottom):
+            ink[y] = 7
+
+    # Deliberately inflated bounding boxes: every system's staff box reaches
+    # into the next system's ink, like OSMD's StaffLine.Size.height does.
+    systems = [
+        {'systemIndex': 0, 'y': 20, 'h': 50, 'staffLinesMinY': 20, 'staffLinesMaxY': 130},
+        {'systemIndex': 1, 'y': 110, 'h': 50, 'staffLinesMinY': 110, 'staffLinesMaxY': 220},
+        {'systemIndex': 2, 'y': 200, 'h': 50, 'staffLinesMinY': 200, 'staffLinesMaxY': 310},
+    ]
+
+    regions = _osmd_crop_regions(ink, systems, len(ink))
+    assert regions is not None
+    assert len(regions) == 3
+    for (crop_y, crop_bottom, content_top, content_bottom), (top, bottom) in zip(regions, blocks):
+        assert (content_top, content_bottom) == (top, bottom)
+        assert crop_y <= top
+        assert crop_bottom >= bottom
+        assert crop_bottom - crop_y > 0
+
+    # No slice reaches into the neighbouring system's ink.
+    assert regions[0][1] <= blocks[1][0]
+    assert regions[1][1] <= blocks[2][0]
+
+
+def test_osmd_crop_regions_fall_back_without_clean_gaps():
+    """A page that does not split into one blank band per system is left to the fallback."""
+    ink = [5] * 100
+    systems = [{'systemIndex': 0}, {'systemIndex': 1}]
+    assert _osmd_crop_regions(ink, systems, len(ink)) is None
+    assert _osmd_crop_regions(None, systems, len(ink)) is None
 
 
 def test_bug4_repeat_fallback_closest_measure():

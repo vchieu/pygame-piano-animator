@@ -315,8 +315,15 @@ class MidiSong:
     def control_state(self, t: float) -> dict:
         """{controller: value} in force at time t (0 for pedals not yet pressed)."""
         state = {c: 0 for c in PEDALS}
-        for _, c, v in self.controls[:bisect.bisect_right(self._control_times, t)]:
-            state[c] = v
+        idx = bisect.bisect_right(self._control_times, t)
+        remaining = set(PEDALS)
+        for i in range(idx - 1, -1, -1):
+            _, c, v = self.controls[i]
+            if c in remaining:
+                state[c] = v
+                remaining.remove(c)
+                if not remaining:
+                    break
         return state
 
     def sustain_at(self, t: float) -> bool:
@@ -394,8 +401,12 @@ class MidiSong:
     def pitch_range(self) -> tuple:
         if not self.notes:
             return (LOWEST_PIANO_KEY, HIGHEST_PIANO_KEY)
-        pitches = [n.pitch for n in self.notes]
-        return (min(pitches), max(pitches))
+        lo = hi = self.notes[0].pitch
+        for n in self.notes:
+            p = n.pitch
+            if p < lo: lo = p
+            elif p > hi: hi = p
+        return (lo, hi)
 
     def key_at(self, t: float) -> int:
         """
@@ -1055,9 +1066,11 @@ def detect_midi_tuplets(notes: List[Note], beat_times: List[float],
             t3 = c3[0].start
 
             # Cannot cross a bar line
-            if bar_times and any(t1 + 0.01 < bt < t3 + 0.01 for bt in bar_times):
-                i += 1
-                continue
+            if bar_times:
+                b_idx = bisect.bisect_right(bar_times, t1 + 0.01)
+                if b_idx < len(bar_times) and bar_times[b_idx] < t3 + 0.01:
+                    i += 1
+                    continue
 
             bl = _local_beat_len(t1, beat_times)
             s1_b = (t2 - t1) / bl

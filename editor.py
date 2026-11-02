@@ -226,9 +226,10 @@ class ContextMenu:
 
     def draw(self, surf, mouse):
         f = self.fonts
-        shadow = pygame.Surface((self.rect.w + 8, self.rect.h + 8), pygame.SRCALPHA)
-        shadow.fill((0, 0, 0, 70))
-        surf.blit(shadow, (self.rect.x + 2, self.rect.y + 4))
+        if getattr(self, "_shadow", None) is None or self._shadow.get_size() != (self.rect.w + 8, self.rect.h + 8):
+            self._shadow = pygame.Surface((self.rect.w + 8, self.rect.h + 8), pygame.SRCALPHA)
+            self._shadow.fill((0, 0, 0, 70))
+        surf.blit(self._shadow, (self.rect.x + 2, self.rect.y + 4))
         pygame.draw.rect(surf, PANEL, self.rect, border_radius=8)
         pygame.draw.rect(surf, PANEL_EDGE, self.rect, 1, border_radius=8)
         if self.title:
@@ -350,8 +351,9 @@ class FingeringEditor(Transport):
         self.notes = self.song.notes            # same order: sorting is stable
         self.index = {id(n): i for i, n in enumerate(self.notes)}
         fing = {id(n): f for n, f in zip(self.notes, self.finger) if f}
+        hands_present = {n.hand for n in self.notes}
         self.hands = {h: HandAnimator(self.song, h, fingering=fing) for h in (RIGHT, LEFT)
-                      if any(n.hand == h for n in self.notes)}
+                      if h in hands_present}
         pair_hands(self.hands.values())
         settle_heap()                           # (the old animators collected, the new ones kept out of gc passes)
         self.perf = Performance.from_animators(self.hands.values()) if self.hands else None
@@ -911,10 +913,16 @@ class FingeringEditor(Transport):
         if not ns:
             return
         rows = self._rows_visible()
-        lo, hi = min(n.pitch for n in ns), max(n.pitch for n in ns)
+        lo = hi = ns[0].pitch
+        for n in ns:
+            if n.pitch < lo: lo = n.pitch
+            elif n.pitch > hi: hi = n.pitch
         if hi - lo + 2 > rows:                    # too wide: centre on what's near "now"
             near = self.song.notes_between(self.t - 1.0, self.t + 1.5) or ns
-            lo, hi = min(n.pitch for n in near), max(n.pitch for n in near)
+            lo = hi = near[0].pitch
+            for n in near:
+                if n.pitch < lo: lo = n.pitch
+                elif n.pitch > hi: hi = n.pitch
         target = (lo + hi) / 2 + rows / 2
         self.pitch_top += (target - self.pitch_top) * amount
         self._clamp_pitch()
@@ -1394,7 +1402,9 @@ class FingeringEditor(Transport):
             band = pygame.Rect(int(min(x0, mx)), int(min(y0, my)),
                                int(abs(mx - x0)), int(abs(my - y0))).clip(r)
             if band.w > 0 and band.h > 0:
-                fill = pygame.Surface(band.size, pygame.SRCALPHA)
+                fill = getattr(self, "_band_surf", None)
+                if fill is None or fill.get_size() != band.size:
+                    fill = self._band_surf = pygame.Surface(band.size, pygame.SRCALPHA)
                 fill.fill((*ACCENT, 40))
                 s.blit(fill, band.topleft)
                 pygame.draw.rect(s, ACCENT, band, 1)
@@ -1473,10 +1483,15 @@ class FingeringEditor(Transport):
                 s.blit(img, (x + 3, r.y + 3))
         if self.show_difficulty and self.difficulty:
             # where the hard spots are, along the bottom of the ruler
-            for n in sorted(self.song.notes_between(t0, t1), key=lambda n: self.difficulty[self.index[id(n)]]):
-                d = self.difficulty[self.index[id(n)]]
-                if d < 0.25:
-                    continue
+            notes_with_diff = []
+            for n in self.song.notes_between(t0, t1):
+                idx = self.index.get(id(n))
+                if idx is not None:
+                    d = self.difficulty[idx]
+                    if d >= 0.25:
+                        notes_with_diff.append((d, n))
+            notes_with_diff.sort(key=lambda item: item[0])
+            for d, n in notes_with_diff:
                 x0, x1 = int(self.x_of(n.start)), int(self.x_of(n.end))
                 pygame.draw.rect(s, heat_color(d), (x0, r.bottom - 5, max(2, x1 - x0), 5))
         if not bars:
@@ -1547,7 +1562,7 @@ class FingeringEditor(Transport):
             text = ("Click or drag to select notes · right-click to set hand & finger · wheel scrolls · "
                     "Ctrl+wheel zooms · Shift+wheel moves up/down · Ctrl+Z undo · Ctrl+S export")
             color = TEXT_DIM
-        img = self.fonts["small"].render(text, True, color)
+        img = self._label(text, "small", color)
         s.blit(img, (10, r.y + (r.h - img.get_height()) // 2))
         legend = self._label("white number = set by you", "label", TEXT_DIM)
         if 10 + img.get_width() + legend.get_width() + 30 < r.w:

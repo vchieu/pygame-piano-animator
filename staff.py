@@ -20,7 +20,7 @@ import math
 import os
 import tempfile
 import threading
-from collections import namedtuple
+from collections import defaultdict, namedtuple
 from typing import List, Optional, Tuple
 
 import pygame
@@ -53,6 +53,18 @@ SIXTEENTH = "sixteenth"
 # Sheet music paper styling constants
 STAFF_BG = (252, 252, 254)
 STAFF_LINE = (80, 80, 95)
+
+_LABEL_SURF_CACHE: dict[tuple, pygame.Surface] = {}
+
+def _render_cached_label(font: pygame.font.Font, text: str, color: Tuple[int, int, int]) -> pygame.Surface:
+    key = (id(font), text, color)
+    surf = _LABEL_SURF_CACHE.get(key)
+    if surf is None:
+        if len(_LABEL_SURF_CACHE) > 500:
+            _LABEL_SURF_CACHE.clear()
+        surf = font.render(text, True, color)
+        _LABEL_SURF_CACHE[key] = surf
+    return surf
 CLEF_COLOR = (25, 25, 35)
 TIME_SIG_COLOR = (25, 25, 35)
 BAR_LINE_COLOR = (110, 110, 125)
@@ -793,6 +805,32 @@ def get_octave_transposition(n: Note, clef: str) -> Tuple[int, int, str]:
     return step, 0, ""
 
 
+def _is_octave_compatible(n: Note, target_shift: int, clef: str) -> bool:
+    p = n.pitch
+    if clef == CLEF_TREBLE:
+        if target_shift == -1:    # 8va
+            return p >= 72        # C5 and above
+        elif target_shift == -2:  # 15ma
+            return p >= 88        # E6 and above
+    elif clef == CLEF_BASS:
+        if target_shift == 1:     # 8vb
+            return p <= 48        # C3 and below
+        elif target_shift == 2:   # 15mb
+            return p <= 28        # E1 and below
+    return False
+
+
+def _is_octave_extreme(n: Note, target_shift: int) -> bool:
+    p = n.pitch
+    if abs(target_shift) >= 2:
+        return True   # 15ma / 15mb are always extreme (> 6-7 ledger lines)
+    if target_shift == -1:
+        return p >= 96  # C7 and above (> 5 ledger lines)
+    if target_shift == 1:
+        return p <= 21  # A0 and below (> 5 ledger lines)
+    return False
+
+
 def resolve_octave_transpositions(sys_notes: List[Note], info: dict, max_gap: float = 2.0) -> None:
     """
     Ensures phrase-level octave consistency: any note falling within an ottava
@@ -808,20 +846,6 @@ def resolve_octave_transpositions(sys_notes: List[Note], info: dict, max_gap: fl
         c_notes.sort(key=lambda n: (n.start, n.pitch))
         if not c_notes:
             continue
-
-        def is_compatible(n: Note, target_shift: int) -> bool:
-            p = n.pitch
-            if clef == CLEF_TREBLE:
-                if target_shift == -1:    # 8va
-                    return p >= 72        # C5 and above
-                elif target_shift == -2:  # 15ma
-                    return p >= 88        # E6 and above
-            elif clef == CLEF_BASS:
-                if target_shift == 1:     # 8vb
-                    return p <= 48        # C3 and below
-                elif target_shift == 2:   # 15mb
-                    return p <= 28        # E1 and below
-            return False
 
         i = 0
         n_len = len(c_notes)
@@ -841,7 +865,7 @@ def resolve_octave_transpositions(sys_notes: List[Note], info: dict, max_gap: fl
                 curr_n = c_notes[j]
                 if curr_n.start - prev_n.start > max_gap:
                     break
-                if not is_compatible(curr_n, target_shift):
+                if not _is_octave_compatible(curr_n, target_shift, clef):
                     break
                 curr_sh = info[id(curr_n)]["octave_shift"]
                 if curr_sh != 0 and curr_sh != target_shift:
@@ -853,19 +877,9 @@ def resolve_octave_transpositions(sys_notes: List[Note], info: dict, max_gap: fl
             group_counter += 1
             final_phrase = c_notes[i : last_trigger_idx + 1]
 
-            def is_extreme(n: Note, target_shift: int) -> bool:
-                p = n.pitch
-                if abs(target_shift) >= 2:
-                    return True   # 15ma / 15mb are always extreme (> 6-7 ledger lines)
-                if target_shift == -1:
-                    return p >= 96  # C7 and above (> 5 ledger lines)
-                if target_shift == 1:
-                    return p <= 21  # A0 and below (> 5 ledger lines)
-                return False
-
             # An isolated single note in the 3-4 ledger line range should use standard
             # ledger lines rather than a momentary, flickering 8va/8vb bracket.
-            if len(final_phrase) == 1 and not any(is_extreme(fn, target_shift) for fn in final_phrase):
+            if len(final_phrase) == 1 and not any(_is_octave_extreme(fn, target_shift) for fn in final_phrase):
                 for fn in final_phrase:
                     step_nat, _ = written_step(fn)
                     info[id(fn)]["step_draw"] = step_nat
@@ -1832,6 +1846,13 @@ def draw_octave_brackets(surf: pygame.Surface, notes_info: dict, sys_notes: List
     if not sorted_notes:
         return
 
+    unshifted_starts = {
+        CLEF_TREBLE: sorted(other.start for other in sys_notes
+                            if notes_info[id(other)]["clef"] == CLEF_TREBLE and notes_info[id(other)]["octave_shift"] == 0),
+        CLEF_BASS: sorted(other.start for other in sys_notes
+                          if notes_info[id(other)]["clef"] == CLEF_BASS and notes_info[id(other)]["octave_shift"] == 0),
+    }
+
     nw = round(s * 0.75)
     line_w = max(1, int(s * 0.15))
     font = ui_font(max(9, int(s * 1.35)), bold=True)
@@ -1856,13 +1877,9 @@ def draw_octave_brackets(surf: pygame.Surface, notes_info: dict, sys_notes: List
                 t_prev = curr_group[-1][0].start
                 t_curr = n.start
                 clef = ni["clef"]
-                has_gap_note = any(
-                    notes_info[id(other)]["clef"] == clef and
-                    notes_info[id(other)]["octave_shift"] == 0 and
-                    t_prev < other.start < t_curr
-                    for other in sys_notes
-                )
-                if has_gap_note:
+                c_starts = unshifted_starts.get(clef, [])
+                idx = bisect.bisect_right(c_starts, t_prev)
+                if idx < len(c_starts) and c_starts[idx] < t_curr:
                     same_group = False
             if same_group:
                 curr_group.append((n, key))
@@ -1910,11 +1927,10 @@ def draw_octave_brackets(surf: pygame.Surface, notes_info: dict, sys_notes: List
     ink_bands = {CLEF_TREBLE: [], CLEF_BASS: []}
     for n in sys_notes:
         info = notes_info[id(n)]
-        ink_bands[info["clef"]].append((id(n), info["x"] - head_w, info["x"] + head_w,
-                                         note_y(info["step_draw"], info["clef"],
-                                                treble_mid_y, bass_mid_y, s) - head_h,
-                                         note_y(info["step_draw"], info["clef"],
-                                                treble_mid_y, bass_mid_y, s) + head_h))
+        c_clef = info["clef"]
+        ny = note_y(info["step_draw"], c_clef, treble_mid_y, bass_mid_y, s)
+        ink_bands[c_clef].append((id(n), info["x"] - head_w, info["x"] + head_w,
+                                  ny - head_h, ny + head_h))
 
     for grp in groups:
         clef, shift, label, *_ = grp[0][1]
@@ -1924,7 +1940,7 @@ def draw_octave_brackets(surf: pygame.Surface, notes_info: dict, sys_notes: List
         x_min = min(xs) - nw - 4
         x_max = max(xs) + nw + 12
 
-        lbl_surf = font.render(label, True, color)
+        lbl_surf = _render_cached_label(font, label, color)
         lbl_w = lbl_surf.get_width()
         lbl_h = lbl_surf.get_height()
 
@@ -2101,6 +2117,8 @@ def draw_pedal_brackets(surf: pygame.Surface, spans: List[Tuple[float, float]],
 
     tick_h = max(3.0, round(0.6 * s))
     line_w = max(1, round(0.12 * s))
+    ped_font = ui_font(max(9, int(round(s * 1.15))), bold=True)
+    ped_surf = _render_cached_label(ped_font, "Ped.", color)
 
     for idx, (sa, sb) in enumerate(spans):
         ca = max(sa, sys_start)
@@ -2126,9 +2144,6 @@ def draw_pedal_brackets(surf: pygame.Surface, spans: List[Tuple[float, float]],
         if started_in_system:
             pygame.draw.line(surf, color, (round(x0), py), (round(x0), round(py - tick_h)), line_w)
             if is_new_press:
-                # Ped. text
-                ped_font = ui_font(max(9, int(round(s * 1.15))), bold=True)
-                ped_surf = ped_font.render("Ped.", True, color)
                 surf.blit(ped_surf, (round(x0 + 2), round(py - ped_surf.get_height() - 1)))
 
         # End mark: if the span ends within this system
@@ -2230,6 +2245,115 @@ def _build_measure_interpolation_points(song, m: dict, m_idx: int, t0: float, t1
     if pts[-1][0] < t1 - 0.001:
         pts.append((t1, mx + mw))
     return pts
+
+
+def _osmd_ink_row_counts(surface: pygame.Surface) -> Optional[list]:
+    """How many dark pixels each row of a rendered score page holds (None if unavailable).
+
+    OSMD renders black ink on white paper, so a row with no dark pixel is empty
+    paper. `_osmd_crop_regions` uses those empty rows to find where one system
+    ends and the next begins.
+    """
+    try:
+        import numpy as np
+        rgb = pygame.surfarray.array3d(surface)
+        # array3d is (width, height, 3): collapse colour and width to one count per row.
+        return (rgb < 245).any(axis=2).sum(axis=0).tolist()
+    except Exception:
+        return None
+
+
+def _osmd_crop_regions(ink_counts, systems_info, full_h: int,
+                       min_gap: int = 8, edge_pad: int = 24):
+    """Cut a rendered score page into one slice per system.
+
+    OSMD's system bounding boxes only cover the staves, and `StaffLine.Size.height`
+    is often far taller than the ink. High chords, ledger lines, octave brackets,
+    dynamics and pedal marks reach outside those boxes, so cropping to them clips
+    the top of a system (or pulls in the tail of the one above). The blank bands
+    the page leaves between systems are the real separators: each system's slice
+    runs from the middle of the empty band above it to the middle of the band
+    below it, which keeps all of its ink and none of its neighbours'.
+
+    Returns `(crop_y, crop_bottom, content_top, content_bottom)` per system, with
+    the content rows exclusive at the bottom, or None when the page does not
+    split cleanly (the caller then falls back to the bounding boxes).
+    """
+    if not ink_counts or not systems_info:
+        return None
+    n = len(ink_counts)
+    full_h = min(full_h, n)
+    if full_h <= 0:
+        return None
+
+    blank_runs = []
+    y = 0
+    while y < n:
+        if ink_counts[y] > 0:
+            y += 1
+            continue
+        start = y
+        while y < n and ink_counts[y] <= 0:
+            y += 1
+        if y - start >= min_gap:
+            blank_runs.append((start, y))
+
+    # Only the bands between two systems matter; the empty page margin top and
+    # bottom are not separators.
+    interior = [r for r in blank_runs if r[0] > 0 and r[1] < n]
+    if not interior:
+        return None
+
+    # A system can also leave a narrow blank row inside itself (between the
+    # staves, say). Pair each boundary with the blank band closest to the
+    # midpoint between the two systems' boxes, then make sure the split is sane.
+    centers = [float(info.get('y', 0)) + float(info.get('h', 0)) * 0.5
+               for info in systems_info]
+    separators = []
+    for k in range(len(systems_info) - 1):
+        boundary = (centers[k] + centers[k + 1]) * 0.5
+        separators.append(min(interior,
+                              key=lambda r: abs((r[0] + r[1]) * 0.5 - boundary)))
+
+    prev_end = 0
+    for k, (start, end) in enumerate(separators):
+        if start < prev_end:
+            return None
+        if not (centers[k] <= start and end <= centers[k + 1]):
+            return None
+        prev_end = end
+    if separators and centers[-1] < separators[-1][0]:
+        return None
+
+    first_ink = next((y for y, c in enumerate(ink_counts) if c > 0), n)
+    last_ink = next((y for y in range(n - 1, -1, -1) if ink_counts[y] > 0), -1)
+    if last_ink < first_ink:
+        return None
+
+    regions = []
+    for k in range(len(systems_info)):
+        if k == 0:
+            content_top = first_ink
+            crop_y = max(0, first_ink - edge_pad)
+        else:
+            start, end = separators[k - 1]
+            content_top = end
+            crop_y = (start + end) // 2
+
+        if k == len(systems_info) - 1:
+            content_bottom = last_ink + 1
+            crop_bottom = min(full_h, content_bottom + edge_pad)
+        else:
+            start, end = separators[k]
+            content_bottom = start
+            crop_bottom = (start + end) // 2
+
+        crop_y = max(0, min(crop_y, content_top))
+        crop_bottom = min(full_h, max(crop_bottom, content_bottom))
+        if crop_bottom - crop_y < 4:
+            return None
+        regions.append((crop_y, crop_bottom, content_top, content_bottom))
+    return regions
 
 
 class OSMDSystemItem:
@@ -2657,29 +2781,61 @@ class StaffView:
                           f"bar_times has {expected_bar_count - 1} bars. "
                           f"(Normal for pieces with repeats/voltas).")
 
+                # Slice the page on the blank bands between systems. OSMD's own
+                # bounding boxes clip high notes and let the previous system's
+                # tail leak in; the ink actually drawn on the page is the ground truth.
+                crop_regions = _osmd_crop_regions(
+                    _osmd_ink_row_counts(full_surf), systems_info, full_h)
+
                 for i, info in enumerate(systems_info):
                     s_idx = info['systemIndex']
                     staff_min_y = info.get('staffLinesMinY', info['y'])
-                    staff_max_y = info.get('staffLinesMaxY', info['y'] + info['h'])
+                    staff_max_y = info.get('staffLinesMaxY', info['y'] + info.get('h', 0))
 
-                    # Encompass full system elements (staves, ledger lines, 8va brackets, tuplets)
-                    sys_top = min(info.get('y', staff_min_y), staff_min_y)
-                    sys_bottom = max(info.get('y', staff_min_y) + info.get('h', staff_max_y - staff_min_y), staff_max_y)
-                    pad_top = 15
-                    pad_bot = 15
-                    crop_y = max(0, int(sys_top - pad_top))
-
-                    if i + 1 < num_systems:
-                        next_info = systems_info[i + 1]
-                        next_top = min(next_info.get('y', next_info.get('staffLinesMinY', full_h)),
-                                       next_info.get('staffLinesMinY', full_h))
-                        max_crop_bottom = min(int(sys_bottom + pad_bot), max(int(sys_bottom + 5), int(next_top - 4)))
+                    if crop_regions is not None:
+                        crop_y, crop_bottom, content_top, content_bottom = crop_regions[i]
                     else:
-                        max_crop_bottom = min(full_h, int(sys_bottom + pad_bot))
+                        # Fallback: keep the system's own bounding box whole, even when
+                        # it overlaps the neighbouring system's inflated staff box.
+                        if i > 0:
+                            prev_staff_max_y = systems_info[i - 1].get('staffLinesMaxY', systems_info[i - 1]['y'] + systems_info[i - 1].get('h', 0))
+                            gap_prev = max(20.0, staff_min_y - prev_staff_max_y)
+                            crop_y = max(0, int(prev_staff_max_y + gap_prev * 0.5))
+                        else:
+                            if num_systems > 1:
+                                gap_next = max(20.0, systems_info[1].get('staffLinesMinY', staff_max_y + 80) - staff_max_y)
+                                headroom = gap_next * 0.5
+                            else:
+                                headroom = 60.0
+                            crop_y = max(0, int(staff_min_y - headroom))
 
-                    crop_h = max_crop_bottom - crop_y
+                        sys_top = info.get('y')
+                        if sys_top is not None:
+                            crop_y = min(crop_y, max(0, int(sys_top - 6)))
+
+                        if i + 1 < num_systems:
+                            next_staff_min_y = systems_info[i + 1].get('staffLinesMinY', systems_info[i + 1]['y'])
+                            gap_next = max(20.0, next_staff_min_y - staff_max_y)
+                            crop_bottom = min(full_h, int(staff_max_y + gap_next * 0.5))
+                        else:
+                            if num_systems > 1:
+                                prev_staff_max_y = systems_info[i - 1].get('staffLinesMaxY', systems_info[i - 1]['y'])
+                                gap_prev = max(20.0, staff_min_y - prev_staff_max_y)
+                                footroom = gap_prev * 0.5
+                            else:
+                                footroom = 60.0
+                            crop_bottom = min(full_h, int(staff_max_y + footroom))
+
+                        if info.get('y') is not None and info.get('h') is not None:
+                            sys_bot = info['y'] + info['h']
+                            crop_bottom = max(crop_bottom, min(full_h, int(sys_bot + 6)))
+
+                        content_top = crop_y
+                        content_bottom = crop_bottom
+
+                    crop_h = crop_bottom - crop_y
                     if crop_h <= 10:
-                        crop_h = max(20, int(info['h']) + pad_top + pad_bot)
+                        crop_h = max(20, int(info.get('h', 100)) + 40)
                     if crop_y + crop_h > full_h:
                         crop_h = full_h - crop_y
                     if crop_h <= 0:
@@ -2688,8 +2844,9 @@ class StaffView:
                     rect = pygame.Rect(0, crop_y, full_w, crop_h)
                     sub = full_surf.subsurface(rect).copy()
 
-                    staff_top_in_crop = max(0, int(staff_min_y) - crop_y)
-                    staff_bottom_in_crop = min(crop_h, int(staff_max_y) - crop_y)
+                    # Centre on the ink block, not on the inflated StaffLine box.
+                    staff_top_in_crop = max(0, int(content_top) - crop_y)
+                    staff_bottom_in_crop = min(crop_h, max(staff_top_in_crop + 1, int(content_bottom) - crop_y))
 
                     if bars:
                         sys_first_m = info['measures'][0] if info.get('measures') else None
@@ -2973,6 +3130,8 @@ class StaffView:
         again).
         """
         staff_surf = pygame.Surface(local_rect.size)
+        if pygame.display.get_surface() is not None:
+            staff_surf = staff_surf.convert()
         staff_surf.fill(STAFF_BG)
         heads: List[tuple] = []
         rolled_chords: List[tuple] = []
@@ -3038,8 +3197,8 @@ class StaffView:
                  for ts_mid in (treble_mid_y, bass_mid_y)]
         if not all(drawn):
             ts_font = ui_font(max(10, int(s * 1.6)), bold=True)
-            ts_num_img = ts_font.render(str(ts_num), True, TIME_SIG_COLOR)
-            ts_den_img = ts_font.render(str(ts_den), True, TIME_SIG_COLOR)
+            ts_num_img = _render_cached_label(ts_font, str(ts_num), TIME_SIG_COLOR)
+            ts_den_img = _render_cached_label(ts_font, str(ts_den), TIME_SIG_COLOR)
             for ts_mid in (treble_mid_y, bass_mid_y):
                 staff_surf.blit(ts_num_img, ts_num_img.get_rect(center=(ts_x, round(ts_mid - s * 0.9))))
                 staff_surf.blit(ts_den_img, ts_den_img.get_rect(center=(ts_x, round(ts_mid + s * 0.9))))
@@ -3053,7 +3212,7 @@ class StaffView:
                     bx = round(local_rect.x + margin_left + frac_bar * usable_w)
                     pygame.draw.line(staff_surf, BAR_LINE_COLOR, (bx, treble_top), (bx, bass_bot), 1)
                     # Measure number at the top of the bar line
-                    num_surf = num_font.render(str(m.index + 1), True, MEASURE_NUM_COLOR)
+                    num_surf = _render_cached_label(num_font, str(m.index + 1), MEASURE_NUM_COLOR)
                     staff_surf.blit(num_surf, (bx + 3, treble_top - num_surf.get_height() - 1))
 
                     # Time signature change at measure boundary
@@ -3101,24 +3260,31 @@ class StaffView:
                 # tie runs over a system break only one half is on this system,
                 # and the draw loop then carries the tie out to the edge (or in
                 # from it) instead of dropping the pair.
+                piece_lookup = defaultdict(list)
+                for p in sys_pieces:
+                    if sys.start_t - 1e-9 <= p.start < sys.end_t - 1e-9:
+                        piece_lookup[(p.pitch, p.track, p.voice)].append(p)
+
                 def tie_piece(note, last):
-                    found = [p for p in sys_pieces
-                             if p.pitch == note.pitch and p.track == note.track
-                             and p.voice == note.voice
-                             and p.start >= note.start - 1e-3 and p.end <= note.end + 1e-3
-                             and sys.start_t - 1e-9 <= p.start < sys.end_t - 1e-9]
+                    cands = piece_lookup.get((note.pitch, note.track, note.voice))
+                    if not cands:
+                        return None
+                    found = [p for p in cands
+                             if p.start >= note.start - 1e-3 and p.end <= note.end + 1e-3]
                     if not found:
                         return None
-                    return max(found, key=lambda p: p.start) if last \
-                        else min(found, key=lambda p: p.start)
+                    return max(found, key=lambda p: p.start) if last else min(found, key=lambda p: p.start)
+
+                sys_ties_set = set(sys_ties)
                 for l, r in self.song.xml_ties:
                     l_piece = tie_piece(l, last=True)
                     r_piece = tie_piece(r, last=False)
                     if l_piece is None and r_piece is None:
                         continue
                     pair = (l_piece or l, r_piece or r)
-                    if pair not in sys_ties:
+                    if pair not in sys_ties_set:
                         sys_ties.append(pair)
+                        sys_ties_set.add(pair)
             # Keep only the pieces that belong to this system (starting on or after
             # sys.start_t and before sys.end_t). A note crossing system boundaries is
             # split at the bar line; the head piece is rendered on the earlier system
@@ -3172,10 +3338,11 @@ class StaffView:
             # so its own stem is not looked at twice.
             beamed_note_ids = set()
             measure_of = {}
-            for m in sys.measures:
-                for n in sys_pieces:
+            for n in sys_pieces:
+                for m in sys.measures:
                     if m.start_t <= n.start < m.end_t:
                         measure_of[id(n)] = m
+                        break
 
             beam_groups = group_beams(time_clusters, notes_info,
                                       lambda st_: get_beat_duration(self.song, st_), measure_of)
@@ -3604,13 +3771,14 @@ class StaffView:
                 staff_h = osmd_sys.staff_bottom - osmd_sys.staff_top
                 if staff_h > 0:
                     scaled_staff_h = int(staff_h * scale)
-                    # Center the grand staff vertically with slight upward shift to avoid bottom divider and give treble notes headroom
-                    dest_y = (local_rect.h - scaled_staff_h) // 2 - int(osmd_sys.staff_top * scale) - int(6 * scale)
+                    # Center the grand staff (treble top line to bass bottom line) vertically in local_rect
+                    dest_y = (local_rect.h - scaled_staff_h) // 2 - int(osmd_sys.staff_top * scale)
                 else:
                     dest_y = (local_rect.h - scaled_h) // 2
 
+                # If the entire scaled system fits within local_rect height, keep it within viewport
                 if scaled_h <= local_rect.h:
-                    dest_y = max(2, min(dest_y, local_rect.h - scaled_h - 2))
+                    dest_y = max(0, min(dest_y, local_rect.h - scaled_h))
 
                 # Cache scaled system surface to keep 60 FPS ultra-fast
                 cache_key = (id(osmd_sys), scaled_w, scaled_h)

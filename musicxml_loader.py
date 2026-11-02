@@ -28,9 +28,11 @@ Typical use:
 """
 from __future__ import annotations
 
+import functools
 import os
 import re
 import zipfile
+from collections import defaultdict
 from dataclasses import replace
 from typing import Dict, List, Optional, Tuple
 
@@ -75,6 +77,7 @@ def is_musicxml(path: str) -> bool:
 # Reading the XML
 # --------------------------------------------------------------------------- #
 
+@functools.lru_cache(maxsize=1024)
 def _local(tag) -> str:
     """A tag with its namespace or prefix stripped ('{uri}note' / 'm:note' -> 'note')."""
     if not isinstance(tag, str):
@@ -876,11 +879,11 @@ def _place_graces(notes: List[Note], graces: List[Note], main: Note):
     """
     starts = _grace_run_starts(main.start, len(graces))
     bounds = starts + [main.start]
+    note_idx = {id(n): i for i, n in enumerate(notes)}
     for g, start, end in zip(graces, starts, bounds[1:]):
-        for i, old in enumerate(notes):
-            if old is g:
-                notes[i] = replace(g, start=start, end=end)
-                break
+        idx = note_idx.get(id(g))
+        if idx is not None:
+            notes[idx] = replace(g, start=start, end=end)
 
 
 def _note_hand(staff: Optional[int], part_hand: Optional[str]) -> Optional[str]:
@@ -967,8 +970,12 @@ def load_musicxml(path: str, hands_from_file: bool = True, fingering: str = "fil
         bar_times, beat_times, quarter_times = _bar_and_beat_times(part_measures, order)
         notes = _fingering_stage(notes, fingering, report)
 
+    hands_by_track: Dict[int, List[Optional[str]]] = defaultdict(list)
+    for n in notes:
+        hands_by_track[n.track].append(n.hand)
+
     for i, t in enumerate(tracks):
-        mine = [n.hand for n in notes if n.track == i]
+        mine = hands_by_track[i]
         if mine and all(h == mine[0] for h in mine):
             tracks[i] = replace(t, hand=mine[0], note_count=len(mine))
         else:
@@ -1110,11 +1117,12 @@ def _set_staff(note_elem, hand):
         el = ET.SubElement(note_elem, "staff")
         el.text = str(want)
         # <staff> belongs after <voice>, before <type>: move it there if we can
-        order = ["grace", "cue", "chord", "pitch", "rest", "duration", "tie", "voice",
-                 "type", "dot", "accidental", "time-modification", "stem", "notehead",
-                 "staff", "beam", "notations", "lyric"]
+        order = {"grace": 0, "cue": 1, "chord": 2, "pitch": 3, "rest": 4, "duration": 5,
+                 "tie": 6, "voice": 7, "type": 8, "dot": 9, "accidental": 10,
+                 "time-modification": 11, "stem": 12, "notehead": 13, "staff": 14,
+                 "beam": 15, "notations": 16, "lyric": 17}
         kids = list(note_elem)
-        kids.sort(key=lambda c: order.index(_local(c.tag)) if _local(c.tag) in order else len(order))
+        kids.sort(key=lambda c: order.get(_local(c.tag), len(order)))
         note_elem[:] = kids
 
 
@@ -1204,12 +1212,12 @@ def _score_note_times(parts, order):
     tempo = _Tempo()
     at = 0.0
     div = 0
-    done = []
+    done = set()
     out = []
     for idx in order:
         if idx in done:
             continue
-        done.append(idx)
+        done.add(idx)
         present = [its[idx].elem for its in part_measures if idx < len(its)]
         if not present:
             continue
