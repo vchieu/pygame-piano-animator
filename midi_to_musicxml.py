@@ -69,6 +69,81 @@ def duration_to_type(dur_divisions: int, divisions_per_quarter: int = 480) -> Tu
     return "64th", False
 
 
+# Every note value this exporter writes, in 64th notes (a 64th is one unit).
+# A note's <type> has to agree with its <duration>, so lengths are snapped to
+# one of these and rests are split into them.
+_NOTE_LENGTHS_64THS = (
+    (96, "whole",   True),   # dotted whole (6 quarters)
+    (64, "whole",   False),  # whole (4)
+    (48, "half",    True),   # dotted half (3)
+    (32, "half",    False),  # half (2)
+    (24, "quarter", True),   # dotted quarter (1.5)
+    (16, "quarter", False),  # quarter (1)
+    (12, "eighth",  True),   # dotted eighth (0.75)
+    (8,  "eighth",  False),  # eighth (0.5)
+    (6,  "16th",    True),   # dotted 16th (0.375)
+    (4,  "16th",    False),  # 16th (0.25)
+    (3,  "32nd",    True),   # dotted 32nd (0.1875)
+    (2,  "32nd",    False),  # 32nd (0.125)
+    (1,  "64th",    False),  # 64th (0.0625)
+)
+
+
+def _writable_lengths(dpq: int):
+    """[(divisions, type, dotted)] for every writable note value, longest first."""
+    unit = max(1, dpq // 16)
+    return [(n * unit, ntype, dotted) for n, ntype, dotted in _NOTE_LENGTHS_64THS]
+
+
+def _duration_type(dur_div: int, dpq: int):
+    """(type, dotted) for a length snapped to one of _writable_lengths."""
+    for value, ntype, dotted in _writable_lengths(dpq):
+        if value == dur_div:
+            return ntype, dotted
+    return duration_to_type(dur_div, dpq)
+
+
+def _canonical_duration(dur_div: int, max_div: int, dpq: int) -> int:
+    """Round a sounding length up to a writable value when it is close to one.
+
+    A chord's <duration> has to agree with its <type>: a 450-division note
+    typed as a quarter (480) made OSMD pad the bar with a stray rest. A length
+    within a 64th below a writable value is timing noise, so it is stretched
+    to it - stretching fills the silence instead of creating another rest.
+    A length that fits none (a triplet, say) keeps the old quantization: it
+    still fills the space, so no rests are invented for it either.
+    """
+    unit = max(1, dpq // 16)
+    durations = [d for d, _, _ in _writable_lengths(dpq) if d <= max_div]
+    if not durations:
+        return max(1, max_div)
+    above = [d for d in durations if d >= dur_div]
+    if above and min(above) - dur_div <= unit:
+        return min(above)
+    return max(1, min(max_div, int(round(dur_div / unit)) * unit))
+
+
+def _rest_chunks(duration: int, dpq: int):
+    """[(divisions, type, dotted)] summing to `duration`, one rest per chunk."""
+    out = []
+    remaining = int(duration)
+    for value, ntype, dotted in _writable_lengths(dpq):
+        while remaining >= value:
+            out.append((value, ntype, dotted))
+            remaining -= value
+    if remaining > 0:
+        # Positions snap to a 128th, so a gap can end in half a 64th. Fold that
+        # sliver into the previous rest: the bar still adds up and no tiny,
+        # nameless rest is emitted.
+        if out:
+            value, ntype, dotted = out[-1]
+            out[-1] = (value + remaining, ntype, dotted)
+        else:
+            ntype, dotted = duration_to_type(remaining, dpq)
+            out.append((remaining, ntype, dotted))
+    return out
+
+
 def _div_per_quarter(beat_type: int, divisions: int) -> int:
     """Divisions per quarter note used by a measure of the given beat type."""
     if beat_type > 4 and (beat_type & (beat_type - 1)) == 0:
@@ -205,13 +280,25 @@ def song_to_musicxml(song, divisions: int = 480) -> str:
             return max(0, int(round(d / grid_div)) * grid_div)
 
         def write_rest(duration: int, voice_num: int, staff_num: int, whole: bool = False):
-            rest_note = ET.SubElement(m_elem, "note")
-            rest = ET.SubElement(rest_note, "rest")
+            if duration <= 0:
+                return
             if whole:
+                rest_note = ET.SubElement(m_elem, "note")
+                rest = ET.SubElement(rest_note, "rest")
                 rest.set("measure", "yes")
-            ET.SubElement(rest_note, "duration").text = str(duration)
-            ET.SubElement(rest_note, "voice").text = str(voice_num)
-            ET.SubElement(rest_note, "staff").text = str(staff_num)
+                ET.SubElement(rest_note, "duration").text = str(duration)
+                ET.SubElement(rest_note, "voice").text = str(voice_num)
+                ET.SubElement(rest_note, "staff").text = str(staff_num)
+                return
+            for chunk, ntype, dotted in _rest_chunks(duration, dpq):
+                rest_note = ET.SubElement(m_elem, "note")
+                ET.SubElement(rest_note, "rest")
+                ET.SubElement(rest_note, "duration").text = str(chunk)
+                ET.SubElement(rest_note, "voice").text = str(voice_num)
+                ET.SubElement(rest_note, "type").text = ntype
+                if dotted:
+                    ET.SubElement(rest_note, "dot")
+                ET.SubElement(rest_note, "staff").text = str(staff_num)
 
         def write_staff_voice(staff_notes, staff_num: int, voice_num: int):
             if not staff_notes:
@@ -252,10 +339,9 @@ def song_to_musicxml(song, divisions: int = 480) -> str:
 
                 avg_dur_s = sum(n.end - n.start for n in chord) / len(chord)
                 chord_dur_div = round((avg_dur_s / bar_dur) * m_divisions)
-                chord_dur_div = int(round(chord_dur_div / min_div)) * min_div
-                chord_dur_div = max(min_div, min(max_dur_div, chord_dur_div))
+                chord_dur_div = _canonical_duration(chord_dur_div, max_dur_div, dpq)
 
-                ntype, dotted = duration_to_type(chord_dur_div, dpq)
+                ntype, dotted = _duration_type(chord_dur_div, dpq)
 
                 # Write each note of chord
                 for note_i, n in enumerate(chord):

@@ -524,6 +524,104 @@ def test_mariage_damour_measure_5_and_6_downbeats_are_not_rests():
     assert len(m6_voice2) > 0 and m6_voice2[0].find("rest") is None, "Measure 6 LH first note should not be a rest"
 
 
+def test_mariage_damour_time_changes_write_clean_rests():
+    """Bug: after a 5/4 -> 4/4 change the bar was padded with 510/30-division rests.
+
+    A chord whose <type> says quarter (480 divisions) but whose <duration> was
+    450 left the remainder of the bar as a malformed, untyped rest.
+    """
+    import os
+    import xml.etree.ElementTree as ET
+    import midi_loader
+    import midi_to_musicxml
+
+    midi_path = os.path.join("MIDIs", "Paul de Senneville - Mariage d'Amour.mid")
+    if not os.path.exists(midi_path):
+        pytest.skip("Mariage d'Amour MIDI not found")
+
+    song = midi_loader.load_midi(midi_path)
+    root = ET.fromstring(midi_to_musicxml.song_to_musicxml(song))
+    measures = {m.get("number"): m for m in root.findall(".//measure")}
+
+    def rh_timeline(number):
+        timeline = []
+        cur = 0
+        for n in measures[number].findall("note"):
+            if n.findtext("staff") != "1":
+                continue
+            dur = int(n.findtext("duration"))
+            is_rest = n.find("rest") is not None
+            timeline.append((cur, dur, None if is_rest else n.findtext("type")))
+            if n.find("chord") is None:
+                cur += dur
+        return timeline
+
+    # Every note's <duration> must be a value its <type> can name.
+    for number in ("4", "6", "8", "10", "11"):
+        for pos, dur, ntype in rh_timeline(number):
+            if ntype is None or pos < 960:
+                continue
+            expected = {"quarter": 480, "half": 960}.get(ntype)
+            if expected is not None:
+                assert dur == expected, (number, pos, ntype, dur)
+
+    # Those bars end with an ordinary quarter rest (or no rest at all in 10),
+    # never the old 450 + 510 / 450 + 30 leftovers.
+    for number in ("4", "6", "8", "11"):
+        timeline = rh_timeline(number)
+        assert (960, 480, "quarter") in timeline, (number, timeline)
+        assert (1440, 480, None) in timeline, (number, timeline)
+
+    assert all(dur != 30 for _, dur, _ in rh_timeline("10"))
+
+    # A rest that is not a whole-measure rest always has a <type>.
+    for measure in root.findall(".//measure"):
+        for n in measure.findall("note"):
+            rest = n.find("rest")
+            if rest is None or (rest.get("measure") or "").lower() == "yes":
+                continue
+            assert n.findtext("type"), (measure.get("number"), n.findtext("duration"))
+
+
+def test_musicxml_pickup_beats_keep_beat_times_sorted():
+    """Bug: a short pickup bar emitted beats past its end, so beat_times went backwards."""
+    import xml.etree.ElementTree as ET
+    from types import SimpleNamespace
+    import musicxml_loader
+
+    def measure(divisions, notes, time=("4", "4")):
+        m = ET.Element("measure")
+        attrs = ET.SubElement(m, "attributes")
+        ET.SubElement(attrs, "divisions").text = str(divisions)
+        t = ET.SubElement(attrs, "time")
+        ET.SubElement(t, "beats").text = time[0]
+        ET.SubElement(t, "beat-type").text = time[1]
+        for dur in notes:
+            n = ET.SubElement(m, "note")
+            ET.SubElement(n, "duration").text = str(dur)
+        return m
+
+    # Pickup bar holds one eighth (1 division at 2 divisions per quarter),
+    # the next bar is a full 4/4.
+    pickup = measure(2, [1])
+    full = measure(2, [2, 2, 2, 2])
+    part_measures = [[SimpleNamespace(elem=pickup), SimpleNamespace(elem=full)]]
+
+    bar_times, beat_times, _ = musicxml_loader._bar_and_beat_times(part_measures, [0, 1])
+
+    assert beat_times == sorted(beat_times)
+    assert bar_times == [0.0, 0.25, 2.25]
+    # Only the pickup's own downbeat, then the four beats of the full bar.
+    assert beat_times == [0.0, 0.25, 0.75, 1.25, 1.75, 2.25]
+
+    song = DummySong(bar_times=bar_times, beat_times=beat_times, duration=2.25)
+    times = [i * 2.25 / 200 for i in range(201)]
+    fracs = [_map_measure_time_to_frac(song, 0.25, 2.25, t) for t in times if t >= 0.25]
+    assert all(fracs[i] <= fracs[i + 1] + 1e-9 for i in range(len(fracs) - 1))
+    mapped = [_map_measure_frac_to_time(song, 0.25, 2.25, i / 200) for i in range(201)]
+    assert all(mapped[i] <= mapped[i + 1] + 1e-9 for i in range(len(mapped) - 1))
+
+
 def test_transport_seek_triggers_notes_at_seek_time_immediately():
     """Bug 2 verification: Seeking to downbeat triggers notes starting at that exact time on the first update."""
     from common import Transport

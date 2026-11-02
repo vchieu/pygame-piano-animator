@@ -1051,10 +1051,17 @@ def _bar_and_beat_times(part_measures, order: List[int]):
                     beats = int(_num(time, "beats", beats) or beats)
                     beat_type = int(_num(time, "beat-type", beat_type) or beat_type)
         bar_times.append(tempo.sec(div))
+        span = _measure_span(part_measures, idx, tempo.divisions)
+        # Only the beats that really fall inside this measure. A pickup bar is
+        # shorter than its time signature, and emitting the missing beats made
+        # beat_times run backwards (0, 0.5, 1, 1.5, 0.25, ...), which bent the
+        # cursor's time -> x mapping into a zig-zag.
+        limit = span if span > 0 else beats * (4.0 / beat_type) * tempo.divisions
         for b in range(beats):
             step = b * (4.0 / beat_type) * tempo.divisions
+            if step >= limit:
+                break
             beat_times.append(tempo.sec(div + step))
-        span = _measure_span(part_measures, idx, tempo.divisions)
         if span > 0:
             div += span
     if bar_times:
