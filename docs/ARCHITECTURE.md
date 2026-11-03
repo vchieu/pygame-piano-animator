@@ -1102,7 +1102,7 @@ therefore also carries:
 | `<note><type>` + `<dot>` | the written note value, not one guessed from the length |
 | `<note><staff>` | which hand: `1` is the right, `2` the left |
 | `<note><voice>`, `<backup>`, `<forward>`, `<chord>`, `<grace>` | the measure's voices, chords and grace notes |
-| `<tie>` / `<notations><tied>` | ties, merged into one sounding note |
+| `<tie>` / `<notations><tied>` | ties: both written heads are kept for the staff, and `xml_ties` pairs them; the falling notes draw the chain as one long block |
 | `<note><notations><technical><fingering>` | the printed fingering, where the score has one |
 | `<barline><repeat>`, `<ending>`, `<direction>` (segno/coda/D.C./D.S.) | the repeats, voltas and jumps |
 
@@ -1124,6 +1124,13 @@ therefore also carries:
   `printed` - and `staff.py` uses them only where they are set (`written_step`, `printed_value`,
   `printed_shape`), so the staff prints the composer's spelling and the score's note values
   instead of always sharps guessed from the pitch class and the measured length.
+- **A tie is drawn two ways.** The staff keeps both written heads and joins them with a tie
+  (`split_at_bar_lines` does the same for a note running past a bar line), while the falling
+  notes draw one block per attack: `MidiSong.sounding_notes_between` follows `xml_ties` from
+  the chain's first head to its last, gives the first head that whole length, and leaves the
+  later heads out. The block keeps the first head's `Note` (its hand and finger are the
+  attack's), so it stays visible while the held sound lasts; playback already merged the chain
+  (`common.Performance.with_ties`).
 
 ### Three fingering sources (the "MusicXML fingering" setting)
 

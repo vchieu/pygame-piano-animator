@@ -287,6 +287,12 @@ class MidiSong:
         self._starts = [n.start for n in self.notes]
         # Longest note lets us bound how far back an overlapping note can start.
         self._max_duration = max((n.duration for n in self.notes), default=0.0)
+        # The score's ties as the falling notes draw them, built on first use (a
+        # song that is never shown falling never needs it). See sounding_notes_between.
+        self._sounding = None
+        self._sounding_starts = []
+        self._sounding_max = 0.0
+        self._sounding_ties = None
 
     def __len__(self) -> int:
         return len(self.notes)
@@ -299,6 +305,52 @@ class MidiSong:
         lo = bisect.bisect_left(self._starts, t0 - self._max_duration)
         hi = bisect.bisect_left(self._starts, t1)
         return [n for n in self.notes[lo:hi] if n.end > t0 and not n.is_rest]
+
+    def _build_sounding(self):
+        """
+        `_sounding`: the score's notes as they sound, [(note, end)], with each tie
+        chain reduced to its first written head and held to the last head's end.
+        """
+        ids = {id(n) for n in self.notes}
+        pairs = [(left, right) for left, right in self.xml_ties
+                 if id(left) in ids and id(right) in ids]
+        starts = {id(left): right for left, right in pairs}
+        stops = {id(right) for _, right in pairs}
+        ends, later = {}, set()
+        for left, right in pairs:
+            lid = id(left)
+            if lid in stops:
+                continue                    # a middle or last head, not the chain's start
+            end, seen, cur = right.end, {lid}, right
+            while True:
+                later.add(id(cur))
+                end = max(end, cur.end)
+                cid = id(cur)
+                if cid not in starts or cid in seen:
+                    break
+                seen.add(cid)
+                cur = starts[cid]
+            ends[lid] = end
+        self._sounding = [(n, ends.get(id(n), n.end)) for n in self.notes
+                          if not n.is_rest and id(n) not in later]
+        self._sounding_starts = [n.start for n, _ in self._sounding]
+        self._sounding_max = max((end - n.start for n, end in self._sounding), default=0.0)
+        self._sounding_ties = self.xml_ties
+
+    def sounding_notes_between(self, t0: float, t1: float) -> List[Tuple[Note, float]]:
+        """
+        [(note, end)] overlapping the time window [t0, t1), one entry per attack.
+
+        The falling notes draw through here. A tie writes two heads but is struck
+        once, so a chain is its first head - `note` stays the real Note, whose hand
+        and finger belong to that first attack - and `end` is the last head's end:
+        the whole length the key is held and the one long block that falls.
+        """
+        if self._sounding is None or self._sounding_ties is not self.xml_ties:
+            self._build_sounding()
+        lo = bisect.bisect_left(self._sounding_starts, t0 - self._sounding_max)
+        hi = bisect.bisect_left(self._sounding_starts, t1)
+        return [(n, end) for n, end in self._sounding[lo:hi] if end > t0]
 
     def active_notes(self, t: float) -> List[Note]:
         """Notes sounding at time t (start <= t < end)."""

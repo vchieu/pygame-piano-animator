@@ -459,6 +459,24 @@ def test_a_falling_note_keeps_its_length_and_moves_smoothly():
         assert abs(r.bottom - (700 - (5.0 - i / 144) * pps)) <= 0.5
 
 
+def test_the_falling_notes_draw_a_tie_as_one_long_block(screen, monkeypatch):
+    # A tie is struck once, so it falls as one block from its first head to its last:
+    # the written second head belongs to the staff, not to the lanes over the keys.
+    from midi_loader import RIGHT, MidiSong, Note
+    a = Note(72, 0.0, 1.0, 80, 0, RIGHT, tie="start")
+    b = Note(72, 1.0, 2.0, 80, 0, RIGHT, tie="stop")
+    c = Note(64, 2.0, 3.0, 80, 0, RIGHT)
+    song = MidiSong([a, b, c], [], 3.0, [], [], xml_ties=[(a, b)])
+    vis = main.Visualizer(screen, song, midi=main.MidiOut(False), hands={})
+    vis.t = 0.0
+    seen = []
+    real = main.note_rect
+    monkeypatch.setattr(main, "note_rect", lambda *args, **kw: seen.append(args) or real(*args, **kw))
+    vis._draw_scene()
+    # note_rect(x, w, keyline, start, end, t, pps): just the spans the lanes were asked to draw
+    assert sorted((args[3], args[4]) for args in seen) == [(0.0, 2.0), (2.0, 3.0)]
+
+
 def test_bend_chain_curls_fingers_down_and_tucks_the_thumb():
     import math
     import pianist

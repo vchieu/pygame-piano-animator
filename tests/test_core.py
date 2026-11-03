@@ -1536,3 +1536,23 @@ def test_a_tied_note_is_not_struck_again():
     assert (press, release, note.pitch) == (0.0, 3.0, 72)
     assert tied.starting(0.99, 1.01) == []          # nothing is struck at the join
     assert tied.starting(1.99, 2.01) == []          # ... nor at the second join
+
+
+def test_a_tied_note_falls_as_one_long_block():
+    # The falling notes draw one block per attack: a tie chain is its first head,
+    # held to the last head's end, so the written heads after the first never fall
+    # as notes of their own - and the block stays on screen while it sounds.
+    a = Note(72, 0.0, 1.0, 80, 0, RIGHT, tie="start")
+    b = Note(72, 1.0, 2.0, 80, 0, RIGHT, tie="continue")
+    c = Note(72, 2.0, 3.0, 80, 0, RIGHT, tie="stop")
+    d = Note(64, 3.0, 4.0, 80, 0, RIGHT)
+    song = MidiSong([a, b, c, d], [], 4.0, [], [], xml_ties=[(a, b), (b, c)])
+    assert song.sounding_notes_between(0.0, 5.0) == [(a, 3.0), (d, 4.0)]
+    assert song.sounding_notes_between(1.5, 1.6) == [(a, 3.0)]   # still held after the first head
+    assert song.sounding_notes_between(3.5, 3.6) == [(d, 4.0)]   # the untied note is its own block
+
+    # Without ties (a plain MIDI file) nothing is merged: every note keeps its head.
+    plain = MidiSong([Note(72, 0.0, 1.0, 80, 0, RIGHT), Note(72, 1.0, 2.0, 80, 0, RIGHT)],
+                     [], 2.0, [], [])
+    assert plain.sounding_notes_between(0.0, 3.0) == [
+        (plain.notes[0], 1.0), (plain.notes[1], 2.0)]

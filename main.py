@@ -802,7 +802,7 @@ class Visualizer(Transport):
                     y = int(keyline - (bt - t) * pps)
                     pygame.draw.line(s, BAR_LINE, (0, y), (fall.w, y))
 
-            visible = song.notes_between(t, t_top)
+            visible = song.sounding_notes_between(t, t_top)
             # what the hands are holding down now (their performance, not the file's times)
             active = [n for _, _, n in self._performance().active(t)]
             held = {id(n) for n in active}
@@ -810,11 +810,11 @@ class Visualizer(Transport):
             s.set_clip(fall)
             # White-key notes first so black-key notes draw on top of them.
             for black_pass in (False, True):
-                for n in visible:
+                for n, end in visible:
                     if n.is_black != black_pass or n.pitch not in kb.lanes:
                         continue
                     x, w = kb.lanes[n.pitch]
-                    rect = note_rect(x, w, keyline, n.start, n.end, t, pps)
+                    rect = note_rect(x, w, keyline, n.start, end, t, pps)
                     color = HAND_COLORS[n.hand][1 if black_pass else 0]
                     if id(n) in held:
                         color = mix(color, (255, 255, 255), 0.3)
