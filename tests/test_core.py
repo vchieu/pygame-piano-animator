@@ -1522,6 +1522,29 @@ def test_the_shadow_layer_is_cleared_where_it_was_drawn():
     assert after == shot([second])
 
 
+def test_a_rest_is_not_played_by_the_hands():
+    # A rest is a staff symbol: its pitch (middle C unless the score prints it
+    # elsewhere) must not become a key a hand plays - it lit that key on the
+    # keyboard and moved the hand there, and the synth played it.
+    from common import Performance
+    a = Note(60, 0.0, 0.5, 80, 0, RIGHT)
+    rest = Note(60, 0.5, 1.0, 0, 0, RIGHT, is_rest=True)
+    b = Note(64, 1.0, 1.5, 80, 0, RIGHT)
+    song = song_of([a, rest, b])
+    hs = hands.build_hands(song)
+    played = [n for anim in hs.values() for _, _, n in anim.performance]
+    assert played == [a, b]
+    # The transport's fallback (no built hands) skips it too.
+    perf = Performance.from_notes(song.notes)
+    assert [n for _, _, n in perf.items] == [a, b]
+
+
+def test_a_hand_with_only_rests_is_not_built():
+    song = song_of([Note(60, 0.0, 0.5, 0, 0, LEFT, is_rest=True),
+                    Note(64, 0.0, 0.5, 80, 0, RIGHT)])
+    assert LEFT not in hands.build_hands(song)
+
+
 def test_a_tied_note_is_not_struck_again():
     # MusicXML writes a tie as two heads: only the first is attacked, and the sound is
     # held until the second head's release. A chain of ties reaches the last release.

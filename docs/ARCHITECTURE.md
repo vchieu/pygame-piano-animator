@@ -1104,6 +1104,7 @@ therefore also carries:
 | `<note><voice>`, `<backup>`, `<forward>`, `<chord>`, `<grace>` | the measure's voices, chords and grace notes |
 | `<tie>` / `<notations><tied>` | ties: both written heads are kept for the staff, and `xml_ties` pairs them; the falling notes draw the chain as one long block |
 | `<note><notations><technical><fingering>` | the printed fingering, where the score has one |
+| `<note><rest>` (+`display-step`/`display-octave`) | a rest symbol, kept for the staff only - never played |
 | `<barline><repeat>`, `<ending>`, `<direction>` (segno/coda/D.C./D.S.) | the repeats, voltas and jumps |
 
 - **Hands.** The score's own layout is followed: `<staff>1</staff>` is the right hand,
@@ -1131,6 +1132,10 @@ therefore also carries:
   later heads out. The block keeps the first head's `Note` (its hand and finger are the
   attack's), so it stays visible while the held sound lasts; playback already merged the chain
   (`common.Performance.with_ties`).
+- **A rest is staff-only.** The loader keeps it as a `Note` with `is_rest` and the pitch it is
+  printed at (`<display-step>`/`<display-octave>`, middle C by default), so `staff.py` can space
+  it; `hands.build_hands` / `HandAnimator` skip rests, so a rest is never fingered, played,
+  lit on the keyboard or followed by a hand.
 
 ### Three fingering sources (the "MusicXML fingering" setting)
 

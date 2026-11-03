@@ -477,6 +477,21 @@ def test_the_falling_notes_draw_a_tie_as_one_long_block(screen, monkeypatch):
     assert sorted((args[3], args[4]) for args in seen) == [(0.0, 2.0), (2.0, 3.0)]
 
 
+def test_a_rest_does_not_light_a_key(screen):
+    # The keys and the hand follow the performance: a rest is not in it, so its
+    # printed pitch stays dark (it used to light middle C and draw a finger there).
+    from midi_loader import RIGHT, MidiSong, Note
+    a = Note(60, 0.0, 0.5, 80, 0, RIGHT)
+    rest = Note(64, 0.5, 1.0, 0, 0, RIGHT, is_rest=True)
+    b = Note(67, 1.0, 1.5, 80, 0, RIGHT)
+    song = MidiSong([a, rest, b], [], 1.5, [], [])
+    vis = main.Visualizer(screen, song, midi=main.MidiOut(False), hands={})
+    vis.t = 0.75
+    assert vis.keys_down() == {}
+    vis.t = 0.25
+    assert vis.keys_down() == {60: RIGHT}
+
+
 def test_bend_chain_curls_fingers_down_and_tucks_the_thumb():
     import math
     import pianist

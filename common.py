@@ -744,7 +744,7 @@ class Performance:
 
     @classmethod
     def from_notes(cls, notes):
-        return cls([(n.start, n.end, n) for n in notes])
+        return cls([(n.start, n.end, n) for n in notes if not n.is_rest])
 
     def with_ties(self, ties):
         """

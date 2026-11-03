@@ -511,7 +511,7 @@ def live_poses(animators, t, kb, scrubbing, state):
 
 def build_hands(song, **kw):
     """{hand: HandAnimator} for each hand that has notes, paired (pair_hands); `kw` goes to each animator."""
-    counts = {h: sum(1 for n in song.notes if n.hand == h) for h in (RIGHT, LEFT)}
+    counts = {h: sum(1 for n in song.notes if n.hand == h and not n.is_rest) for h in (RIGHT, LEFT)}
     total = sum(counts.values()) or 1
     out, done = {}, 0
     for h in (RIGHT, LEFT):
@@ -986,7 +986,10 @@ class HandAnimator:
         self.mirror = hand != RIGHT
         self.vp = mirror_pitch if self.mirror else (lambda p: p)
         self._bias = 0.0
-        notes = [n for n in song.notes if n.hand == hand]
+        # A rest is a staff symbol, not a key: it must never be fingered, played
+        # or lit on the keyboard (its pitch is only where the rest is printed).
+        notes = [n for n in song.notes if n.hand == hand and not n.is_rest]
+        context = [n for n in song.notes if not n.is_rest]
         # Glissandos are slid, not fingered: their notes stay out of the
         # fingering and the fingers' timeline, and keep their times - but for
         # a step further than the slide can go in the time (_gliss_schedule).
@@ -1028,9 +1031,9 @@ class HandAnimator:
             elif fingering_mode == "fill":
                 repair = True
                 context_fixed = context_fingers(self.groups, self.vp, hand=hand,
-                                                context=song.notes, pianist=self.pianist)
+                                                context=context, pianist=self.pianist)
                 fill_weight = W["fill_context"]
-            fingering = plan_fingering(self.groups, self.vp, hand=hand, context=song.notes,
+            fingering = plan_fingering(self.groups, self.vp, hand=hand, context=context,
                                        pianist=self.pianist, repair=repair, repaired=self.repaired,
                                        fixed=fixed, context_fixed=context_fixed, fill_weight=fill_weight)
         self.fingering = {id(n): fingering[id(n)] for _, ns in self.groups for n in ns
@@ -4554,7 +4557,7 @@ def crossing_episodes(song):
     episodes = []
     groups, spans = {}, {}
     for h in (RIGHT, LEFT):
-        ns = sorted((n for n in song.notes if n.hand == h), key=lambda n: n.start)
+        ns = sorted((n for n in song.notes if n.hand == h and not n.is_rest), key=lambda n: n.start)
         gs = []
         for n in ns:
             if gs and n.start - gs[-1][0] < CROSS_GROUP:
@@ -4619,7 +4622,8 @@ def crossing_episodes(song):
             full = full or (L[0] + L[1]) / 2 > (R[0] + R[1]) / 2
         if state is not None:
             runs.append((t_on, clustered[-1] + 0.3, state, depth, full))
-        by_hand = {h: sorted((n.start, n.pitch) for n in song.notes if n.hand == h) for h in (RIGHT, LEFT)}
+        by_hand = {h: sorted((n.start, n.pitch) for n in song.notes if n.hand == h and not n.is_rest)
+                   for h in (RIGHT, LEFT)}
         note_ts = {h: [s for s, _ in by_hand[h]] for h in by_hand}
 
         def interlocked_top(t0, t1):
