@@ -108,17 +108,18 @@ def _canonical_duration(dur_div: int, max_div: int, dpq: int) -> int:
 
     A chord's <duration> has to agree with its <type>: a 450-division note
     typed as a quarter (480) made OSMD pad the bar with a stray rest. A length
-    within a 64th below a writable value is timing noise, so it is stretched
-    to it - stretching fills the silence instead of creating another rest.
-    A length that fits none (a triplet, say) keeps the old quantization: it
-    still fills the space, so no rests are invented for it either.
+    within a 32nd below a writable value is timing noise - the key was let go
+    a little early - so it is stretched to it: stretching fills the silence
+    instead of printing a tiny rest after the note. A length that fits none (a
+    triplet, say) keeps the old quantization: it still fills the space, so no
+    rests are invented for it either.
     """
-    unit = max(1, dpq // 16)
+    unit = max(1, dpq // 16)      # a 64th note
     durations = [d for d, _, _ in _writable_lengths(dpq) if d <= max_div]
     if not durations:
         return max(1, max_div)
     above = [d for d in durations if d >= dur_div]
-    if above and min(above) - dur_div <= unit:
+    if above and min(above) - dur_div <= 2 * unit:
         return min(above)
     return max(1, min(max_div, int(round(dur_div / unit)) * unit))
 

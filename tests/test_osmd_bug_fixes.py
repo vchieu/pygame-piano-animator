@@ -613,6 +613,51 @@ def test_mariage_damour_time_changes_write_clean_rests():
             assert n.findtext("type"), (measure.get("number"), n.findtext("duration"))
 
 
+def test_a_note_released_a_32nd_early_is_not_split_by_a_rest():
+    """The key let go just before the next onset is timing, not a written rest.
+
+    Mariage d'Amour's dotted quarter in m14/15/18 sounded 37 divisions short
+    of its 720-division slot, so it was written as 690 + a 64th rest.
+    """
+    import xml.etree.ElementTree as ET
+    from midi_loader import Note, RIGHT
+    from midi_to_musicxml import song_to_musicxml
+
+    song = DummySong(bar_times=[0.0, 2.0, 4.0], duration=4.0)
+    song.notes = [
+        Note(60, 0.0, 0.7115, 80, 0, RIGHT),   # released 37/1920 of the bar early
+        Note(62, 0.75, 1.0, 80, 0, RIGHT),
+    ]
+    root = ET.fromstring(song_to_musicxml(song))
+    rh = [n for n in root.findall(".//measure")[0].findall("note")
+          if n.findtext("staff") == "1"]
+    assert int(rh[0].findtext("duration")) == 720
+    assert rh[0].findtext("type") == "quarter"
+    assert not any(n.find("rest") is not None and int(n.findtext("duration")) < 120
+                   for n in rh)
+
+
+def test_mariage_damour_measures_14_15_18_have_no_tiny_rests():
+    """A released-early note must not leave a 64th rest in those bars."""
+    import os
+    import xml.etree.ElementTree as ET
+    import midi_loader
+    import midi_to_musicxml
+
+    midi_path = os.path.join("MIDIs", "Paul de Senneville - Mariage d'Amour.mid")
+    if not os.path.exists(midi_path):
+        pytest.skip("Mariage d'Amour MIDI not found")
+
+    song = midi_loader.load_midi(midi_path)
+    measures = {m.get("number"): m for m in
+                ET.fromstring(midi_to_musicxml.song_to_musicxml(song)).findall(".//measure")}
+    for number in ("14", "15", "18"):
+        for n in measures[number].findall("note"):
+            if n.find("rest") is not None:
+                assert int(n.findtext("duration")) >= 120, (number, n.findtext("duration"),
+                                                            n.findtext("type"))
+
+
 def test_musicxml_pickup_beats_keep_beat_times_sorted():
     """Bug: a short pickup bar emitted beats past its end, so beat_times went backwards."""
     import xml.etree.ElementTree as ET
