@@ -52,7 +52,7 @@ import time
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")      # (no banner in the console or the log)
 import pygame  # noqa: E402
 
-from common import (ACCENT, LANE_WHITE, set_key_style, PANEL, PANEL_EDGE, blit_shadowed, BAR_BG, BAR_FILL, BAR_LINE, BG, FELT_H, FPS, HAND_COLORS, LANE_LINE,
+from common import (ACCENT, AV_LAG_DEFAULT, AV_LAG_MAX, LANE_WHITE, set_key_style, PANEL, PANEL_EDGE, blit_shadowed, BAR_BG, BAR_FILL, BAR_LINE, BG, FELT_H, FPS, HAND_COLORS, LANE_LINE,
                     LEAD_IN, TEXT, TEXT_DIM, TOP_BAR_H, WINDOW_SIZE, Button, Keyboard,
                     MidiOut, Performance, Transport, bottom_layout, center_text, draw_felt,
                     draw_hand_area, draw_pianist_badge, fmt_time, load_fonts, mix, pick_file,
@@ -131,6 +131,12 @@ class Visualizer(Transport):
         self.dragging_wave = None        # the mouse x while the waveform is dragged (0 is a place too)
         self._wave_cache = (None, None)
         self.window_secs = DEFAULT_WINDOW_SECS
+        # how far the picture trails the song clock while playing (Settings > Audio/visual sync)
+        try:
+            lag = float(pianists.app_setting("av_lag", AV_LAG_DEFAULT))
+        except (TypeError, ValueError):
+            lag = AV_LAG_DEFAULT
+        self.av_lag = min(AV_LAG_MAX, max(0.0, lag))
         self.dragging_bar = False
         self._pose_state = {}             # (hands.live_poses: when the quick pose last gave way to the exact one)
         self._waiting = False             # the song waiting for the hands after a jump (hands.hands_waiting)...
@@ -506,6 +512,19 @@ class Visualizer(Transport):
         """Where playback (and a video) starts: the lead-in before the first note."""
         return -LEAD_IN
 
+    def view_time(self):
+        """The song time the picture shows.
+
+        While playing it trails the clock by the sound's output delay (`av_lag`, Settings >
+        Audio/visual sync): a note reaches the speakers a little after the transport sends it (the
+        soundfont stream's queued chunk, the mixer's buffer, the device), so drawn at the clock the
+        cursor, the falling notes and the keys ran ahead of what was heard. Paused the picture is
+        exactly at the clock again; a video's frames use their own exact time (render_video_frame).
+        """
+        if self.paused or self._waiting or not self.song:
+            return self.t
+        return self.t - self.av_lag * self.speed
+
     def render_video_frame(self, t):
         """The video's frame at song time t (VideoExport): the scene with only the chosen parts."""
         size = self.export.size
@@ -677,7 +696,7 @@ class Visualizer(Transport):
         """
         if not self.song or not hasattr(self, "staff_view") or self.staff_rect.h <= 0:
             return
-        self.seek(self.staff_view.time_at_x(x, self.staff_rect, self.t))
+        self.seek(self.staff_view.time_at_x(x, self.staff_rect, self.view_time()))
         if STAFF_CLICK_PLAYS and self.paused:
             self.toggle_pause()
 
@@ -792,7 +811,10 @@ class Visualizer(Transport):
 
         active = []
         if self.song:
-            t, song = self.t, self.song
+            # a video's frame is the exact song time it was asked for; live, the picture trails the
+            # clock by the sound's output delay, so it meets the notes as they are heard
+            t = self.t if video is not None else self.view_time()
+            song = self.song
             pps = fall.h / self.window_secs          # pixels per second
             keyline = fall.bottom
             t_top = t + self.window_secs
@@ -850,17 +872,17 @@ class Visualizer(Transport):
         if self.hands and self.show_hands:
             s.set_clip(pygame.Rect(0, self.felt_rect.top, s.get_width(), s.get_height()))
             if video is None:                   # (quick while scrubbed or until the exact pose is worked out after a jump)
-                poses = live_poses(self.hands.values(), self.t, kb, self.dragging_bar, self._pose_state)
+                poses = live_poses(self.hands.values(), t, kb, self.dragging_bar, self._pose_state)
             else:
-                poses = [a.pose(self.t, kb) for a in self.hands.values()]
+                poses = [a.pose(t, kb) for a in self.hands.values()]
             draw_hands(s, poses)
             s.set_clip(None)
         pedals = video is None or video.get("pedals")
         draw_pianist_badge(s, self.fonts, self.hand_rect, pianists.active(),
-                           self.song.control_state(self.t) if self.song and pedals else None,
+                           self.song.control_state(t) if self.song and pedals else None,
                            badge=video is None or bool(video.get("badge")))
         if self.staff_rect.h > 0 and hasattr(self, "staff_view"):
-            self.staff_view.draw(s, self.staff_rect, self.t, active, opacity=self.staff_opacity)
+            self.staff_view.draw(s, self.staff_rect, t, active, opacity=self.staff_opacity)
             handle_y = self.staff_rect.bottom - 1
             pygame.draw.line(s, (140, 140, 160), (0, handle_y), (s.get_width(), handle_y), 1)
             pill_w, pill_h = 40, 3

@@ -22,6 +22,12 @@ WINDOW_SIZE = (1280, 800)
 FPS = 60
 MAX_FRAME_DT = 1 / 15        # a slow frame (loading, a big redraw) never skips the song ahead
 LEAD_IN = 2.0                # seconds of empty time before the first note
+# How far the picture trails the song clock while playing (Settings > Audio/visual sync): a note
+# reaches the speakers a little after it is sent - the soundfont stream keeps a chunk queued, the
+# mixer its own buffer, the device another - so drawn at the clock the cursor (and the falling
+# notes, keys and hands) ran ahead of what was heard.
+AV_LAG_DEFAULT = 0.040       # s, the usual chunk queue + mixer buffer of the built-in player
+AV_LAG_MAX = 0.150           # s, the slider's top (a slow device, or Bluetooth headphones)
 TOP_BAR_H = 34
 FELT_H = 6
 HAND_AREA_MIN_H = 150

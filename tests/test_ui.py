@@ -343,6 +343,21 @@ def test_settings_screen_drags_the_keyboard_and_toggles_profiling(screen):
         common.set_keyboard_place(None)
 
 
+def test_settings_retunes_the_audio_visual_sync(screen):
+    import common
+    import pianist
+    app = app_on(screen)
+    app.settings()
+    st = app.mode
+    st.render()
+    assert abs(st.av.value - common.AV_LAG_DEFAULT * 1000) < 1e-9
+    st.handle_event(pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1,
+                                       pos=(st.av.track.right, st.av.track.centery)))
+    assert abs(pianist.app_setting("av_lag") - common.AV_LAG_MAX) < 1e-9
+    app.play(midi_path("demo_song.mid"))                 # (the player reads it when it opens)
+    assert abs(app.mode.av_lag - common.AV_LAG_MAX) < 1e-9
+
+
 def test_the_progress_bar_is_clear_and_the_controls_sit_under_it(screen):
     import pianist
     app = app_on(screen)
@@ -475,6 +490,36 @@ def test_the_falling_notes_draw_a_tie_as_one_long_block(screen, monkeypatch):
     vis._draw_scene()
     # note_rect(x, w, keyline, start, end, t, pps): just the spans the lanes were asked to draw
     assert sorted((args[3], args[4]) for args in seen) == [(0.0, 2.0), (2.0, 3.0)]
+
+
+def test_the_picture_trails_the_heard_sound_while_playing(screen, monkeypatch):
+    # A note reaches the speakers a little after the transport sends it (the soundfont stream's
+    # queued chunk, the mixer's buffer, the device), so the scene is drawn that much behind the
+    # clock while playing - and exactly at its own time in a video's frames, whose sound is
+    # rendered offline, sample-accurately.
+    from midi_loader import RIGHT, MidiSong, Note
+    a = Note(60, 0.0, 3.0, 80, 0, RIGHT)
+    song = MidiSong([a], [], 3.0, [], [])
+    vis = main.Visualizer(screen, song, midi=main.MidiOut(False), hands={})
+    vis.av_lag = 0.04
+    vis.t = 1.0
+    vis.paused = True
+    assert vis.view_time() == 1.0                         # paused: exactly at the clock
+    vis.paused = False
+    assert abs(vis.view_time() - 0.96) < 1e-12
+    vis.speed = 0.5                                       # the delay is in wall seconds
+    assert abs(vis.view_time() - (1.0 - 0.02)) < 1e-12
+
+    seen = []
+    real = main.note_rect
+    monkeypatch.setattr(main, "note_rect", lambda *args, **kw: seen.append(args[5]) or real(*args, **kw))
+    vis.speed = 1.0
+    vis.t = 0.5
+    vis._draw_scene()
+    assert seen == [0.46]
+    seen.clear()
+    vis._draw_scene(vis.export_parts)                     # a video's frame: its own exact time
+    assert seen == [0.5]
 
 
 def test_a_rest_does_not_light_a_key(screen):

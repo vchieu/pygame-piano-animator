@@ -70,6 +70,10 @@ Detailed design notes, kept up to date as features were added. Start with `CLAUD
     its one step further right "uncapped" (kept as null); default 60 (`common.FPS`, as before). `App.run` ticks
     the clock at the cap (0: no limit); the hands' work ahead in a frame's spare time (`idle`) is budgeted to the
     cap, or to `UNCAPPED_IDLE_HZ` 240 uncapped. `main.fps_cap_value` clamps what's read.
+  - Audio/visual sync ("av_lag", 2026-11-03): a slider from 0 to `common.AV_LAG_MAX` 150 ms (steps of 5),
+    default `common.AV_LAG_DEFAULT` 40 ms. How far the picture trails the song clock while playing
+    (`main.Visualizer.view_time`), because a note is heard a little after the transport sends it. The
+    player reads it when it opens and clamps it; paused (and in a video's frames) the delay is 0.
   - Pedal ("pedal_mode", 2026-10-24): "score" keeps the file's own pedal (default), "auto" uses `auto_pedal.build`
     (button labels "From the score" / "Auto by measure"). Clicking it calls `song.set_pedal_mode(...)` on the
     open song, so the change applies at once; `raw_controls` is kept, going back to "score" restores the file's pedal.
@@ -508,7 +512,8 @@ fast removes about a third of them: most are leaps of a few tens of milliseconds
   - `Visualizer.layout(size, video=parts)`: no waveform, and with the bar left out the notes fall from the top
     (`bar_rect` 0 high). The keyboard and hand area don't change, so the hands keep their caches.
   - `render_video_frame(t)`: `_draw_scene(parts)` (render's scene: notes, keys, hands, pedals / badge per
-    `draw_pianist_badge(..., badge=)`, the bar) onto a surface of its own at song time t.
+    `draw_pianist_badge(..., badge=)`, the bar) onto a surface of its own at song time t (exactly t: the
+    video's sound is rendered offline, so the live picture's `view_time` delay does not apply).
 - `VideoExport` (one export) runs in steps from the player's frames (`update` -> `step(EXPORT_STEP_T` 0.04 s)),
   the window kept alive: the frames' RGB bytes (`frame_bytes`) go through a queue (`QUEUE_FRAMES` 4) to a writer
   thread piping them into ffmpeg (imageio-ffmpeg's own binary, `ffmpeg_exe`; no console window on Windows): x264
@@ -1057,6 +1062,18 @@ menu (kept as `"keys"` in `pianists/settings.json`, read with `pianist.app_setti
   against the notes (`_drag_wave`, incremental; Shift `WAVE_FINE` 10x finer), `,` / `.` nudge 10 ms (Shift
   100 ms); the offset is kept so the recording still overlaps the MIDI. The strip is cached per offset.
 - The player starts paused with a recording, so it can be lined up first.
+- The picture trails the sound while playing (2026-11-03). A note is sent by `Transport.update` at song
+  time t, but reaches the speakers a little later: the soundfont stream (`MixerStream`) keeps one
+  `CHUNK_FRAMES` 768 chunk (17.4 ms at 44.1 kHz) queued behind the one playing and a note can just miss
+  the chunk being made, the mixer adds its `buffer` 512 frames (11.6 ms), and the device/driver its own.
+  Drawn at t, the staff cursor, the falling notes, the keys and the hands therefore led the heard music
+  - most noticeable in fast passages. `Visualizer.view_time()` is t - `av_lag` * `speed` while playing
+  (paused: t; after a seek's wait: t), and `_draw_scene` draws everything at it (falling notes and their
+  fingers, key glow and pressed keys, hands, pedals/badge, and `StaffView.draw`), so the scene meets the
+  notes as they are heard. `render_video_frame` keeps its exact t: a video's sound is rendered offline
+  from the same notes, sample-accurately, with no output queue. The delay is tunable (Settings >
+  Audio/visual sync, "av_lag"), default `common.AV_LAG_DEFAULT` 40 ms: a measured loopback value is not
+  available, so 40 ms covers the player's queue and mixer buffer with a little for the device.
 
 ## Sanitizing MIDI files (midi_loader.py, 2026-09-29)
 - `load_midi` runs every file through three steps; what they changed is in `song.cleanup` (and printed).

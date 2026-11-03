@@ -11,6 +11,9 @@ app_settings.py - The Settings screen (main menu > Settings).
   * Keyboard type: realistic or equal keys (common.set_key_style; "keys").
   * Frame rate cap: 24 to 240 frames a second, uncapped all the way to the
     right (App.set_fps_cap; "fps_cap", none = uncapped).
+  * Audio/visual sync: how far the picture trails the song clock while playing
+    (main.Visualizer.view_time; "av_lag" in seconds, default AV_LAG_DEFAULT),
+    so the cursor and the falling notes meet the notes as they are heard.
   * Performance profiling: the frame rate and a translucent graph of the
     frame times in the top-left corner (App.draw_perf; "perf_overlay").
   * Soundfont: browse for a .sf2 / .sf3 file to play the notes with
@@ -36,7 +39,7 @@ import pygame
 
 import pianist as pianists
 from sf_synth import SF_TYPES, soundfont_name
-from common import (ACCENT, BAR_BG, BG, FELT_H, FONT_TYPES, KEY_STYLES, PANEL, PANEL_EDGE, TEXT, TEXT_DIM, TOP_BAR_H,
+from common import (ACCENT, AV_LAG_DEFAULT, AV_LAG_MAX, BAR_BG, BG, FELT_H, FONT_TYPES, KEY_STYLES, PANEL, PANEL_EDGE, TEXT, TEXT_DIM, TOP_BAR_H,
                     Button, Keyboard, Slider, TextInput, blit_shadowed, font_choice, font_choice_name, has_letters, pick_file,
                     bottom_layout, draw_felt, draw_hand_area, key_style, keyboard_place, keyboard_y_range, mix,
                     set_key_style, set_keyboard_place, ui_font, wrap_text)
@@ -46,7 +49,7 @@ TO_MENU = "menu"
 FPS_CAP_MIN, FPS_CAP_MAX = 24, 240      # (as main.py's: the slider's top step past FPS_CAP_MAX is "uncapped")
 ROW_H = 62                              # each setting's row in the panel (less in a small window...
 ROW_H_MIN = 54                          # ...down to this: the panel kept above the window's centre)
-ROWS = 10
+ROWS = 11
 PICK_ROW_H = 34                         # the font list's rows...
 PICK_PREVIEW = 20                       # ...each name drawn in its own face this big
 
@@ -86,6 +89,8 @@ class SettingsScreen:
         self.fps = Slider("", FPS_CAP_MIN, FPS_CAP_MAX + 1, FPS_CAP_MAX + 1 if cap is None else cap,
                           self._set_cap, fmt=self._cap_text, step=1, lo_label=str(FPS_CAP_MIN),
                           hi_label="uncapped")
+        self.av = Slider("", 0.0, AV_LAG_MAX * 1000.0, self._lag_ms(), self._set_lag, fmt=self._lag_text,
+                         step=5.0, lo_label="0 ms", hi_label=f"{int(round(AV_LAG_MAX * 1000))} ms")
         self.dragging = None             # the mouse's offset from the keyboard's top while it's dragged
         self.scroll = 0
         self.max_scroll = 0
@@ -119,6 +124,8 @@ class SettingsScreen:
         self.pedal.rect = pygame.Rect(right - 150, by(8), 150, 30)
         self.normalize.rect = pygame.Rect(right - 150, by(9), 150, 30)
         self._rows = (x, y)
+        self._av_y = y + 10 * rh + (rh - 52) // 2
+        self.av.layout(pygame.Rect(right - 240, self._av_y, 248, 52))
         total_h = ROWS * rh
         self.max_scroll = max(0, total_h - (self.view.h - 16))
         self.scroll = min(max(0, self.scroll), self.max_scroll)
@@ -173,6 +180,22 @@ class SettingsScreen:
     def _set_cap(self, v):
         self.app.set_fps_cap(None if v > FPS_CAP_MAX else int(round(v)))
 
+    # ----- the audio/visual sync ------------------------------------------------
+    def _lag_ms(self):
+        """The picture's delay while playing, in ms (Settings > Audio/visual sync)."""
+        try:
+            lag = float(pianists.app_setting("av_lag", AV_LAG_DEFAULT))
+        except (TypeError, ValueError):
+            lag = AV_LAG_DEFAULT
+        return min(AV_LAG_MAX, max(0.0, lag)) * 1000.0
+
+    @staticmethod
+    def _lag_text(v):
+        return f"{int(round(v))} ms"
+
+    def _set_lag(self, v):
+        pianists.set_app_setting("av_lag", round(v / 1000.0, 3))
+
     # ----- the keyboard's place ------------------------------------------------
     def _kb(self):
         return bottom_layout(self.app.screen.get_size())
@@ -215,6 +238,8 @@ class SettingsScreen:
             self.scroll = min(max(0, self.scroll), self.max_scroll)
             return True
         elif self.fps.handle_event(event):
+            return True
+        elif self.av.handle_event(event):
             return True
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             if self.done.hit(event.pos):
@@ -325,7 +350,9 @@ class SettingsScreen:
                                        "fingers. Fill in: keep them, plan what the score leaves blank."),
                 ("Pedal", "From the score: keep the file's pedal. Auto by harmony: pedal follows the left hand's chords."),
                 ("Auto clean", "On: clean MIDI onto a metrical grid, or tidy MusicXML into clean 2-staff "
-                                "notation on open. Off: keep the file's original timing/layout.")]
+                                "notation on open. Off: keep the file's original timing/layout."),
+                ("Audio/visual sync", "How far the picture trails what you hear while playing. Raise it if "
+                                      "the cursor and the falling notes run ahead of the sound.")]
         clip = s.get_clip()
         s.set_clip(self.view)
         for i, (title, desc) in enumerate(rows):
@@ -374,6 +401,8 @@ class SettingsScreen:
         fps_orig_y = y + 2 * self.row_h + (self.row_h - 52) // 2
         self.fps.layout(pygame.Rect(self._text_w + x, fps_orig_y - self.scroll, 248, 52))
         self.fps.draw(s, f)
+        self.av.layout(pygame.Rect(self._text_w + x, self._av_y - self.scroll, 248, 52))
+        self.av.draw(s, f)
         s.set_clip(clip)
 
         pygame.draw.rect(s, BAR_BG, self.bar_rect)
