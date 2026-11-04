@@ -873,6 +873,12 @@ fast removes about a third of them: most are leaps of a few tens of milliseconds
   a render still in flight cannot turn OSMD back on or leave its "Đang tạo khuôn nhạc
   OSMD..." placeholder up; coming back reuses the systems already rendered and only renders
   again when there are none (the first time, or after a failed render).
+- The page is cut into systems on the widest blank band between two systems' centres
+  (`staff._osmd_crop_regions`), not the band closest to the boxes' midpoint. A mark can sit
+  well above its staff (the 8va bracket over the high ending of Mariage d'Amour leaves only a
+  ~20 px gap above its notes but ~160 px below the previous system): the closest band cut that
+  bracket into the system above, whose ink then looked far taller than its staff, so it was
+  scaled down and drawn high with a blank gap below. The wide band is the real separator.
 - The hand colours (`HAND_COLORS`) are still the note colour. Tests: `tests/test_notation.py`
   (metrics, the codepoint table, the glyph cache, every glyph at four sizes, the painter's
   geometry, the clef and time-signature painters, the no-font fallback) and `tests/test_staff.py`

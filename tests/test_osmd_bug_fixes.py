@@ -307,6 +307,36 @@ def test_osmd_crop_regions_follow_ink_not_bounding_boxes():
     assert regions[1][1] <= blocks[2][0]
 
 
+def test_osmd_crop_regions_keep_a_mark_above_a_staff_with_its_own_system():
+    """A mark high above a system (an 8va bracket) belongs to that system, not the one above.
+
+    At the end of Mariage d'Amour (measures 81-83) the bracket sits ~160 px below
+    the previous system's last ink, but only ~20 px above its own system's high
+    notes. OSMD's boxes put the halfway point beside that narrow gap, so pairing
+    a boundary with the closest band gave the bracket to the system above: its
+    ink then looked far taller than its staff, so it was scaled down and its
+    notes were drawn high with a blank gap below. The wide band is the real
+    boundary; the narrow one is inside the next system.
+    """
+    ink = [0] * 760
+    for top, bottom in [(110, 300), (360, 380), (390, 700)]:
+        for y in range(top, bottom):
+            ink[y] = 7
+
+    systems = [
+        {'systemIndex': 0, 'y': 100, 'h': 200,
+         'staffLinesMinY': 100, 'staffLinesMaxY': 300},
+        {'systemIndex': 1, 'y': 500, 'h': 200,
+         'staffLinesMinY': 500, 'staffLinesMaxY': 700},
+    ]
+
+    regions = _osmd_crop_regions(ink, systems, len(ink))
+    assert regions is not None
+    (_, _, sys0_top, sys0_bottom), (_, _, sys1_top, sys1_bottom) = regions
+    assert (sys0_top, sys0_bottom) == (110, 300)     # only the system's own ink
+    assert (sys1_top, sys1_bottom) == (360, 700)     # the bracket travels with its system
+
+
 def test_osmd_crop_regions_fall_back_without_clean_gaps():
     """A page that does not split into one blank band per system is left to the fallback."""
     ink = [5] * 100

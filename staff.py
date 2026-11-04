@@ -2273,7 +2273,10 @@ def _osmd_crop_regions(ink_counts, systems_info, full_h: int,
     the top of a system (or pulls in the tail of the one above). The blank bands
     the page leaves between systems are the real separators: each system's slice
     runs from the middle of the empty band above it to the middle of the band
-    below it, which keeps all of its ink and none of its neighbours'.
+    below it, which keeps all of its ink and none of its neighbours'. When the
+    space between two systems holds more than one band, the widest is the
+    separator: a mark that belongs to a system can sit above it with a narrow
+    gap between them (an 8va bracket), and that gap is inside the system.
 
     Returns `(crop_y, crop_bottom, content_top, content_bottom)` per system, with
     the content rows exclusive at the bottom, or None when the page does not
@@ -2305,15 +2308,27 @@ def _osmd_crop_regions(ink_counts, systems_info, full_h: int,
         return None
 
     # A system can also leave a narrow blank row inside itself (between the
-    # staves, say). Pair each boundary with the blank band closest to the
-    # midpoint between the two systems' boxes, then make sure the split is sane.
+    # staves, say). Pair each boundary with the widest blank band between the
+    # two systems' centres, then make sure the split is sane.
+    #
+    # The widest, not the one closest to the midpoint: a mark that belongs to a
+    # system can sit well above its staff (an 8va bracket over a high passage),
+    # leaving a narrow gap above it and the real gap above that. The midpoint
+    # between the boxes is pulled down by the tall passage, so the closest band
+    # was the narrow one, and the mark fell to the bottom of the system above:
+    # that system's ink then looked far taller than its staff, so it was scaled
+    # down and centred on the mark, leaving its notes high with a blank gap
+    # below (the ending of Mariage d'Amour, measures 77-80). The wide band
+    # separates the two systems' ink; the narrow ones are inside a system.
     centers = [float(info.get('y', 0)) + float(info.get('h', 0)) * 0.5
                for info in systems_info]
     separators = []
     for k in range(len(systems_info) - 1):
         boundary = (centers[k] + centers[k + 1]) * 0.5
-        separators.append(min(interior,
-                              key=lambda r: abs((r[0] + r[1]) * 0.5 - boundary)))
+        between = [r for r in interior if r[0] >= centers[k] and r[1] <= centers[k + 1]]
+        separators.append(max(between or interior,
+                              key=lambda r: (r[1] - r[0],
+                                             -abs((r[0] + r[1]) * 0.5 - boundary))))
 
     prev_end = 0
     for k, (start, end) in enumerate(separators):
